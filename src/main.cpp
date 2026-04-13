@@ -599,6 +599,45 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 tres.content  = "user denied permission to run " + tname;
                 tres.is_error = true;
                 std::cout << tui::meta("[tool: " + tname + " -> denied]") << "\n";
+            } else if (tname == "Task") {
+                // Spawn a no-tools sub-agent: fresh messages array,
+                // single round-trip via send_conversation. Streams to
+                // the terminal like a normal turn so the user can
+                // follow along. The final text becomes this tool's
+                // result.
+                const std::string sub_prompt = tinput.value("prompt", std::string{});
+                if (sub_prompt.empty()) {
+                    tres.content  = "error: Task requires a `prompt` argument";
+                    tres.is_error = true;
+                } else {
+                    const std::string sub_label = tinput.value("description", std::string{"sub-agent"});
+                    std::cout << tui::meta("  -> " + sub_label + ":") << "\n"
+                              << tui::claude_prompt();
+                    json sub_messages = json::array({{{"role", "user"}, {"content", sub_prompt}}});
+                    const auto sub = send_conversation(auth, model, max_tokens,
+                                                       sub_messages, custom_system,
+                                                       /*include_tools=*/false);
+                    std::cout << "\n";
+                    if (sub.exit_code != 0) {
+                        tres.content  = "error: sub-agent failed";
+                        tres.is_error = true;
+                    } else {
+                        tres.content  = sub.assistant_text;
+                        tres.is_error = false;
+                        aggregate.input_tokens  += sub.input_tokens;
+                        aggregate.output_tokens += sub.output_tokens;
+                    }
+                }
+                std::cout << tui::meta(tres.is_error
+                                       ? "[tool: Task -> error]"
+                                       : "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]")
+                          << "\n";
+                const json post_payload = {
+                    {"tool_input",  tinput},
+                    {"tool_result", tres.content},
+                    {"is_error",    tres.is_error},
+                };
+                hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
             } else {
                 tres = tools::run(tname, tinput);
                 const std::string rsize = std::to_string(tres.content.size());

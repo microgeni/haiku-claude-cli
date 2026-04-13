@@ -569,6 +569,30 @@ json builtin_definitions() {
             }},
         },
         {
+            {"name", "Task"},
+            {"description",
+                "Spawn a focused sub-agent to answer a self-contained question. "
+                "The sub-agent runs as a fresh Claude turn with no tools and does "
+                "not share the parent's conversation history — useful for "
+                "delegating work that would otherwise pollute the main context "
+                "(summarization, translation, expansion, etc.). The final "
+                "assistant text is returned as this tool's result."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"description", {
+                        {"type", "string"},
+                        {"description", "Short label for the sub-task (displayed to the user)."},
+                    }},
+                    {"prompt", {
+                        {"type", "string"},
+                        {"description", "Full task prompt sent to the sub-agent."},
+                    }},
+                }},
+                {"required", json::array({"prompt"})},
+            }},
+        },
+        {
             {"name", "TodoWrite"},
             {"description",
                 "Replace the current in-session todo list. Use this to plan "
@@ -769,6 +793,7 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "WebFetch")  return run_webfetch(input);
     if (name == "TodoWrite") return run_todowrite(input);
     if (name == "TodoRead")  return run_todoread(input);
+    if (name == "Task")      return {"error: Task is handled by the agent loop", true};
     if (auto mcp_res = mcp::run(name, input); mcp_res) return *mcp_res;
     return {"error: unknown tool " + name, true};
 }
