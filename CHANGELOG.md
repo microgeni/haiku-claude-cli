@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-14
+
+### Added
+- **Slash commands** in the REPL via a dispatcher that routes any
+  input beginning with `/`:
+  - `/help` (or `/?`) lists the available commands.
+  - `/clear` resets the running conversation and session counters.
+  - `/model [NAME]` prints the current model or swaps to a new one
+    mid-session without restarting the REPL.
+  - `/compact` asks Claude to summarize the running history and
+    replaces it with a single `[previous context]` + summary pair,
+    preserving important decisions, code, and open questions.
+  - `/cost` prints a session cost estimate based on cumulative
+    input/output tokens × per-model prices (from config or built-in
+    fallbacks). On OAuth sessions it notes the cost is informational
+    since billing is against the Pro/Max subscription quota.
+  - `/exit`, `/quit` leave the REPL (alongside the existing
+    `exit`/`quit`/`:q` keywords and Ctrl+D).
+- **Config file** at `~/config/settings/claude-cli/config.json`
+  (Haiku) or the XDG equivalent. Optional JSON with keys: `model`,
+  `max_tokens`, `system`, `show_usage`, `prices`. CLI flags override
+  the config. `--help` lists the file path and the accepted keys,
+  and the shown defaults reflect whatever the config resolves to.
+- **Per-model price table** for `/cost`. Config's `prices` key
+  accepts per-model `{"input": N, "output": N}` entries in
+  dollars-per-million-tokens; built-in fallbacks substring-match
+  sonnet/opus/haiku when a model isn't in the config.
+
+### Changed
+- `interactive_loop` now maintains its own live `model` string so
+  `/model` can mutate it mid-session. The welcome banner hints at
+  `/help` instead of just the exit keywords.
+
+### Fixed
+- Pressing Ctrl+C while Claude is streaming now aborts the in-flight
+  request gracefully — libcurl's `CURLOPT_XFERINFOFUNCTION` is wired
+  to a SIGINT-set flag, partial rendered output is flushed, a dim
+  `[interrupted]` note prints, and the REPL prompt returns instead
+  of the process dying. Failed user turns are dropped from history
+  (existing behavior), so the conversation stays consistent.
+
 ## [0.2.0] - 2026-04-13
 
 ### Added
