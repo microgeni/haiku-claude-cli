@@ -6,6 +6,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-14
+
+### Added
+- **Project memory** — `CLAUDE.md` in the current working directory
+  is loaded as a system-prompt preamble on every turn, so per-project
+  context doesn't have to be pasted each time. Edits take effect on
+  the next round-trip; no restart needed.
+- **User memory** — `~/config/settings/claude-cli/CLAUDE.md` is
+  loaded as a user-level preamble, appended before project memory.
+- **`/memory [user]`** slash command opens the relevant `CLAUDE.md`
+  in `$EDITOR` (falls back to `nano`), creating parent directories
+  for the user-level file if needed.
+- **Custom slash commands** loaded from `.claude/commands/*.md`
+  (project) and `~/config/settings/claude-cli/commands/*.md` (user,
+  respecting `XDG_CONFIG_HOME`). The filename minus `.md` becomes
+  the command name; the file body is the prompt template. `{{args}}`
+  is substituted with whatever text followed the command in the REPL.
+  Project definitions override user ones on name collision.
+- **Tab completion** in the REPL for slash commands — both built-in
+  and custom, via libedit's `rl_attempted_completion_function`.
+  Triggers only when the current word is at the start of the line
+  and begins with `/`, so argument completion still behaves normally.
+- `/help` now lists any loaded custom commands after the built-in set.
+
+### Fixed
+- OAuth-gated `/v1/messages` requests no longer 429 with
+  `rate_limit_error / "Error"` when the system prompt contains
+  content beyond the Claude Code preamble (e.g. a loaded `CLAUDE.md`).
+  The fix sends `system` as a two-element array — `[{type:"text",
+  text:"<preamble>"}, {type:"text", text:"<extra>"}]` — instead of a
+  concatenated string. Anthropic's fingerprint check is positional
+  on `system[0]`, not a substring scan.
+
 ## [0.5.0] - 2026-04-14
 
 ### Added
