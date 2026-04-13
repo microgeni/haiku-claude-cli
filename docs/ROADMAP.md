@@ -242,17 +242,31 @@ dev machine.
       in-process vector. Statuses: pending / in_progress / completed.
       `/todos` slash command prints the current list as a checklist.
 
-### v1.0 — Stable release
+### v1.0 — Stable release ✓
 
 Polish, docs, and Haiku-native integration.
 
-- [ ] Man page installed to `/boot/system/documentation/man/`.
-- [ ] `claude --version` with build info.
-- [ ] Structured logs under `~/config/settings/claude-cli/logs/`.
-- [ ] Graceful handling of quota exhaustion and token expiry mid-stream.
-- [ ] End-to-end README walkthrough covering every feature.
-- [ ] HaikuDepot package submission (optional — needs a packaging
-      reviewer).
+- [x] Man page installed to
+      `/boot/system/documentation/man/man1/claude.1`; shipped inside
+      the HPKG.
+- [x] `claude -V / --version` prints the build's semver string. The
+      same constant feeds the Messages API `User-Agent`.
+- [x] Structured logs at `~/config/settings/claude-cli/logs/` with
+      date-stamped filenames. Opt-in via a `logging.enabled` key in
+      `config.json`. Records session starts, turn tokens, tool
+      invocations, and HTTP error details.
+- [x] Graceful non-2xx error handling: Anthropic's error envelope is
+      parsed for `error.message`, well-known codes (401/403/429/5xx)
+      get plain-language explanations, and the opaque Claude Code
+      "Error" 429 gate is distinguished from a real rate limit.
+      Auto-refresh of expired OAuth tokens mid-stream is still a
+      future polish item.
+- [x] End-to-end README walkthrough rewritten covering install, auth,
+      REPL, slash commands, tools, memory, hooks, MCP, config keys,
+      and environment variables.
+- [ ] HaikuDepot package submission — requires a HaikuPorts recipe
+      and external review. Deferred; the HPKG is downloadable from
+      the Gitea release page for now.
 
 ## Haiku-native extras
 
