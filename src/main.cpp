@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -93,6 +94,36 @@ bool save_history(const json& messages, const std::string& model) {
     f << j.dump(2) << "\n";
     chmod(path.c_str(), 0600);
     return true;
+}
+
+volatile sig_atomic_t g_interrupted = 0;
+
+extern "C" void handle_sigint(int) {
+    g_interrupted = 1;
+}
+
+struct InterruptGuard {
+    InterruptGuard() {
+        g_interrupted = 0;
+        struct sigaction sa {};
+        sa.sa_handler = handle_sigint;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGINT, &sa, &prev_);
+    }
+    ~InterruptGuard() {
+        sigaction(SIGINT, &prev_, nullptr);
+    }
+    InterruptGuard(const InterruptGuard&) = delete;
+    InterruptGuard& operator=(const InterruptGuard&) = delete;
+  private:
+    struct sigaction prev_ {};
+};
+
+int xfer_callback(void* /*clientp*/,
+                  curl_off_t /*dltotal*/, curl_off_t /*dlnow*/,
+                  curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
+    return g_interrupted ? 1 : 0;
 }
 
 enum class AuthKind { None, OAuth, ApiKey };
@@ -287,13 +318,23 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli/0.1");
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
 
+    g_interrupted = 0;
     const CURLcode res = curl_easy_perform(curl);
     spinner.stop();
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+
+    if (g_interrupted) {
+        state.renderer.flush();
+        std::cout << "\n" << tui::meta("[interrupted]") << "\n";
+        return {1, state.text, state.input_tokens, state.output_tokens};
+    }
 
     if (res != CURLE_OK) {
         std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
@@ -330,6 +371,7 @@ void print_usage_line(const SendResult& result) {
 int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
                      const std::string& custom_system, bool resume,
                      const std::string& initial_message) {
+    InterruptGuard interrupt_guard;
     json messages = json::array();
 
     repl::init(repl_history_path());
@@ -543,6 +585,7 @@ int main(int argc, char* argv[]) {
         return interactive_loop(auth, model, max_tokens, custom_system, resume, message);
     }
 
+    InterruptGuard interrupt_guard;
     const json messages = json::array({{{"role", "user"}, {"content", message}}});
     const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
     if (show_usage) {
