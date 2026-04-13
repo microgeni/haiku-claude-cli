@@ -32,9 +32,15 @@ struct Auth {
 struct StreamState {
     std::string sse_buffer;
     std::string raw_buffer;
+    std::string text;
     bool        saw_text             = false;
     bool        stream_error         = false;
     std::string stream_error_message;
+};
+
+struct SendResult {
+    int         exit_code = 0;
+    std::string assistant_text;
 };
 
 void process_sse_event(const std::string& event, StreamState* state) {
@@ -58,7 +64,9 @@ void process_sse_event(const std::string& event, StreamState* state) {
         if (type == "content_block_delta") {
             const auto& delta = j["delta"];
             if (delta.value("type", "") == "text_delta") {
-                std::cout << delta.value("text", "") << std::flush;
+                const std::string chunk = delta.value("text", "");
+                std::cout << chunk << std::flush;
+                state->text += chunk;
                 state->saw_text = true;
             }
         } else if (type == "error") {
@@ -99,6 +107,7 @@ void print_usage(const char* prog) {
               << "  logout               Delete stored credentials.\n"
               << "\n"
               << "Options:\n"
+              << "  -i, --interactive    Start a multi-turn REPL session.\n"
               << "  -m, --model MODEL    Model to use (default: " << kDefaultModel << ").\n"
               << "  -t, --max-tokens N   Max tokens in response (default: " << kMaxTokens << ").\n"
               << "  -h, --help           Show this help and exit.\n"
@@ -127,18 +136,18 @@ Auth resolve_auth() {
     return {};
 }
 
-int send_message(const Auth& auth, const std::string& model, int max_tokens, const std::string& message) {
+SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens, const json& messages) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::cerr << "error: curl_easy_init failed\n";
-        return 1;
+        return {1, {}};
     }
 
     json body = {
         {"model",      model},
         {"max_tokens", max_tokens},
         {"stream",     true},
-        {"messages",   json::array({{{"role", "user"}, {"content", message}}})},
+        {"messages",   messages},
     };
     if (auth.kind == AuthKind::OAuth) {
         body["system"] = kOAuthSystem;
@@ -173,26 +182,69 @@ int send_message(const Auth& auth, const std::string& model, int max_tokens, con
 
     if (res != CURLE_OK) {
         std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
-        return 1;
+        return {1, {}};
     }
 
     if (http_status < 200 || http_status >= 300) {
         std::cerr << "\nerror: API returned HTTP " << http_status << "\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
-        return 1;
+        return {1, {}};
     }
 
     if (state.stream_error) {
         std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
-        return 1;
+        return {1, state.text};
     }
 
-    if (state.saw_text) {
-        std::cout << "\n";
-    } else {
+    if (!state.saw_text) {
         std::cerr << "error: no text received in stream\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
-        return 1;
+        return {1, {}};
+    }
+
+    std::cout << "\n";
+    return {0, state.text};
+}
+
+int interactive_loop(const Auth& auth, const std::string& model, int max_tokens, const std::string& initial_message) {
+    json messages = json::array();
+
+    std::cout << "Claude CLI interactive mode (model: " << model << ").\n"
+              << "Type 'exit', 'quit', or press Ctrl+D to leave.\n\n";
+
+    std::string pending = initial_message;
+
+    while (true) {
+        std::string line;
+        if (!pending.empty()) {
+            line    = std::move(pending);
+            pending.clear();
+            std::cout << "you> " << line << "\n";
+        } else {
+            std::cout << "you> " << std::flush;
+            if (!std::getline(std::cin, line)) {
+                std::cout << "\n";
+                break;
+            }
+        }
+
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        if (line.empty()) continue;
+        if (line == "exit" || line == "quit" || line == ":q") break;
+
+        messages.push_back({{"role", "user"}, {"content", line}});
+
+        std::cout << "\nclaude> ";
+        const auto result = send_conversation(auth, model, max_tokens, messages);
+        std::cout << "\n";
+
+        if (result.exit_code != 0) {
+            messages.erase(messages.end() - 1);
+            continue;
+        }
+        messages.push_back({{"role", "assistant"}, {"content", result.assistant_text}});
     }
     return 0;
 }
@@ -208,6 +260,7 @@ int main(int argc, char* argv[]) {
 
     std::string              model       = kDefaultModel;
     int                      max_tokens  = kMaxTokens;
+    bool                     interactive = false;
     std::vector<std::string> parts;
 
     for (int i = 1; i < argc; ++i) {
@@ -215,6 +268,10 @@ int main(int argc, char* argv[]) {
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
+        }
+        if (arg == "-i" || arg == "--interactive") {
+            interactive = true;
+            continue;
         }
         if (arg == "-m" || arg == "--model") {
             if (i + 1 >= argc) {
@@ -245,7 +302,7 @@ int main(int argc, char* argv[]) {
         message += parts[i];
     }
 
-    if (!isatty(fileno(stdin))) {
+    if (!interactive && !isatty(fileno(stdin))) {
         std::string stdin_data;
         char        buf[4096];
         size_t      n;
@@ -265,7 +322,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (message.empty()) {
+    if (!interactive && message.empty()) {
         print_usage(argv[0]);
         return 1;
     }
@@ -278,5 +335,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    return send_message(auth, model, max_tokens, message);
+    if (interactive) {
+        return interactive_loop(auth, model, max_tokens, message);
+    }
+
+    const json messages = json::array({{{"role", "user"}, {"content", message}}});
+    return send_conversation(auth, model, max_tokens, messages).exit_code;
 }
