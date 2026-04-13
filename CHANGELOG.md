@@ -6,39 +6,53 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-13
+
 ### Added
 - `-s/--system TEXT` — custom system prompt. When OAuth is used the
   required Claude Code prefix is preserved and the user text is
   appended; with an API key the user text is used verbatim.
-- `-u/--usage` — after the response, print input/output token counts
-  to stderr (`[usage] input: N tokens  output: M tokens`).
+- `-u/--usage` — after a one-shot response, print input/output token
+  counts to stderr.
 - `-r/--resume` — preload the REPL with the last saved session from
   `~/config/settings/claude-cli/history.json` (Haiku) or the XDG path
   elsewhere. Implies `-i`. Conversation history is auto-saved after
   every successful turn.
-- `CHANGELOG.md` following Keep a Changelog; release notes on
-  Gitea releases are now extracted from it automatically.
+- `CHANGELOG.md` following Keep a Changelog; release notes on Gitea
+  releases are now extracted from it automatically.
 - `docs/ROADMAP.md` describing milestones from v0.2 through v1.0
   toward Claude Code feature parity, including a dedicated Terminal
   UI polish milestone.
-- Terminal UI polish (`tui` module):
+- Terminal UI polish (new `tui` module):
   - ANSI color detection honoring `NO_COLOR`, `CLICOLOR=0`,
     `TERM=dumb`, plus `--plain` / `--color` overrides.
   - Bold cyan `you> ` and bold magenta `claude> ` REPL prompts;
     dim-styled meta notes.
-  - Braille "thinking" spinner between request submit and first
-    rendered output.
-  - Streaming markdown renderer supporting **bold**, *italic* /
-    _italic_, \`inline code\`, \`\`\` fenced code blocks, `#`/`##`/`###`
-    headings, bullet and numbered lists.
+  - Braille "thinking" spinner with live elapsed-seconds counter
+    between request submit and first rendered output.
+  - Streaming markdown renderer: **bold**, *italic* / _italic_,
+    `inline code`, fenced code blocks, `#`/`##`/`###` headings,
+    bullet and numbered lists.
   - Syntax highlighting inside code blocks for C/C++, Python, Shell,
     Rust, and JSON (keywords, strings, numbers, comments, C/C++
     preprocessor lines).
   - Line editing in the REPL via libedit: arrow-key history,
     emacs-style bindings, and persistent history at
     `~/config/settings/claude-cli/repl_history`.
+  - Multi-line input: either `"""` (or `'''`) fenced blocks or
+    trailing-backslash continuation, with a dim `... ` continuation
+    prompt.
+  - Per-turn status line printed after each REPL response showing
+    turn number, elapsed time, and this-turn / session token totals:
+    `[turn 3  1.8s  in 42/167  out 128/512]`.
+  - Palette uses standard 16-color ANSI codes so the user's terminal
+    theme (dark or light) drives the actual rendered colors.
 
 ### Changed
+- CI build + test merged into one job (one runner warmup per push).
+- `ci_scripts/build.sh` defensively installs `libedit_devel` on Haiku
+  if the pkg-config file is missing so fresh Taurus images don't
+  break CI.
 - `.PackageInfo.in` now requires `lib:libedit`; the Makefile and
   Haiku HPKG build pull it via pkg-config.
 
