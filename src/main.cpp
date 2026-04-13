@@ -58,6 +58,42 @@ std::string config_path() {
     return config_dir() + "/config.json";
 }
 
+std::string user_memory_path() {
+    return config_dir() + "/CLAUDE.md";
+}
+
+std::string project_memory_path() {
+    return "CLAUDE.md";
+}
+
+std::string load_optional_file(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return {};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+// Compose the effective system prompt from (in order):
+//   1. User-level memory at ~/config/settings/claude-cli/CLAUDE.md
+//   2. Project memory at <cwd>/CLAUDE.md
+//   3. The --system flag value (or config's "system")
+// The required Claude Code preamble for OAuth is prepended inside
+// send_conversation, so we don't repeat it here. Called per-turn so
+// edits to the CLAUDE.md files take effect immediately.
+std::string compose_system(const std::string& flag_system) {
+    std::string out;
+    auto append = [&](const std::string& chunk) {
+        if (chunk.empty()) return;
+        if (!out.empty()) out += "\n\n";
+        out += chunk;
+    };
+    append(load_optional_file(user_memory_path()));
+    append(load_optional_file(project_memory_path()));
+    append(flag_system);
+    return out;
+}
+
 bool mkdir_p(const std::string& path) {
     std::string accum;
     for (size_t i = 0; i < path.size(); ++i) {
@@ -335,6 +371,10 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "Config file: " << config_path() << "\n"
               << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
               << "  prices. CLI flags override config values.\n"
+              << "\n"
+              << "Memory files (prepended to the system prompt, user before project):\n"
+              << "  " << user_memory_path() << "\n"
+              << "  ./CLAUDE.md (per-project, loaded from the current working directory)\n"
               << "\n"
               << "Authentication (in priority order):\n"
               << "  1. OAuth tokens from 'claude login' (uses Pro/Max quota).\n"
@@ -622,8 +662,28 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
             "  /model <name>      swap the active model\n"
             "  /compact           summarize and replace the running history\n"
             "  /cost              session token cost estimate\n"
+            "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
             "  /exit, /quit       leave the REPL\n")
                   << "\n";
+        return SlashAction::Continue;
+    }
+    if (cmd == "/memory") {
+        const std::string target = (args == "user") ? user_memory_path()
+                                                     : project_memory_path();
+        if (args == "user") {
+            const auto slash = target.rfind('/');
+            if (slash != std::string::npos) mkdir_p(target.substr(0, slash));
+        }
+        const char* editor_env = std::getenv("EDITOR");
+        const std::string editor = editor_env && *editor_env ? editor_env : "nano";
+        const std::string cmdline = editor + " '" + target + "'";
+        std::cout << tui::meta("[opening " + target + " with " + editor + "]") << "\n";
+        const int rc = std::system(cmdline.c_str());
+        if (rc != 0) {
+            std::cout << tui::meta("[editor exited " + std::to_string(rc) + "]") << "\n";
+        } else {
+            std::cout << tui::meta("[memory will be reloaded on the next turn]") << "\n";
+        }
         return SlashAction::Continue;
     }
     if (cmd == "/exit" || cmd == "/quit") {
@@ -681,8 +741,9 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
                         "questions. Reply with only the summary."},
         });
         std::cout << "\n" << tui::claude_prompt();
+        const std::string compact_system = compose_system(ctx.custom_system);
         const auto result = send_conversation(ctx.auth, ctx.model, ctx.max_tokens,
-                                              request_messages, ctx.custom_system,
+                                              request_messages, compact_system,
                                               /*include_tools=*/false);
         std::cout << "\n";
         if (result.exit_code != 0) {
@@ -773,7 +834,8 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
         std::cout << "\n" << tui::claude_prompt();
         const auto turn_start = std::chrono::steady_clock::now();
-        const auto result = send_with_tools(auth, model, max_tokens, messages, custom_system);
+        const std::string system_for_turn = compose_system(custom_system);
+        const auto result = send_with_tools(auth, model, max_tokens, messages, system_for_turn);
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - turn_start).count();
         std::cout << "\n";
@@ -938,7 +1000,8 @@ int main(int argc, char* argv[]) {
 
     InterruptGuard interrupt_guard;
     json messages = json::array({{{"role", "user"}, {"content", message}}});
-    const auto result = send_with_tools(auth, model, max_tokens, messages, custom_system);
+    const std::string effective_system = compose_system(custom_system);
+    const auto result = send_with_tools(auth, model, max_tokens, messages, effective_system);
     if (show_usage) {
         print_usage_line(result);
     }

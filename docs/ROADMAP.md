@@ -152,17 +152,19 @@ Claude can now modify files — with safety rails.
       restrictive for personal use on Haiku; the warning + permission
       prompt is the safety net.
 
-### v0.6 — Project memory
+### v0.6 — Project memory ✓
 
 Absorb per-project context without pasting it every turn.
 
-- [ ] Load `CLAUDE.md` from the current working directory as a
-      project preamble (appended after the required Claude Code prefix
-      when OAuth is used).
-- [ ] Load `~/config/settings/claude-cli/CLAUDE.md` as a user-level
+- [x] Load `CLAUDE.md` from the current working directory as a
+      project preamble (appended after the user-level memory and
+      before the `--system` flag content).
+- [x] Load `~/config/settings/claude-cli/CLAUDE.md` as a user-level
       preamble.
-- [ ] `/memory` slash command to open the project `CLAUDE.md` in
-      `$EDITOR`.
+- [x] `/memory [user]` slash command to open either the project or
+      user `CLAUDE.md` in `$EDITOR` (falls back to `nano`). Memory is
+      re-read on the next turn, so edits take effect immediately with
+      no REPL restart.
 
 ### v0.7 — Slash commands (custom + built-in polish)
 
