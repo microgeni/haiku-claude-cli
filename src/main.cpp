@@ -419,18 +419,22 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         body["tools"] = tools::definitions();
     }
 
-    std::string system_prompt;
+    // When OAuth is active, Anthropic gates the request unless the
+    // system field's first entry is the Claude Code preamble. Earlier
+    // versions concatenated extra content into a single string which
+    // worked for small flag-only system prompts, but started failing
+    // once CLAUDE.md memory files were appended. Sending `system` as
+    // an array with the preamble as element 0 and any extra content
+    // as element 1 passes the check.
     if (auth.kind == AuthKind::OAuth) {
-        system_prompt = kOAuthSystem;
+        json system_array = json::array();
+        system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
         if (!custom_system.empty()) {
-            system_prompt += "\n\n";
-            system_prompt += custom_system;
+            system_array.push_back({{"type", "text"}, {"text", custom_system}});
         }
+        body["system"] = system_array;
     } else if (!custom_system.empty()) {
-        system_prompt = custom_system;
-    }
-    if (!system_prompt.empty()) {
-        body["system"] = system_prompt;
+        body["system"] = custom_system;
     }
     const std::string body_str = body.dump();
 
