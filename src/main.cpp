@@ -62,6 +62,47 @@ std::string config_path() {
     return config_dir() + "/config.json";
 }
 
+std::string log_dir() {
+    return config_dir() + "/logs";
+}
+
+std::ofstream g_log;
+
+void init_logging(bool enabled) {
+    if (!enabled) return;
+    const std::string dir = log_dir();
+    {
+        // Tiny inline mkdir_p so logging has no forward-decl hassle.
+        std::string accum;
+        for (size_t i = 0; i < dir.size(); ++i) {
+            accum += dir[i];
+            const bool boundary = (dir[i] == '/') || (i + 1 == dir.size());
+            if (!boundary) continue;
+            if (accum.empty() || accum == "/") continue;
+            if (mkdir(accum.c_str(), 0700) != 0 && errno != EEXIST) return;
+        }
+    }
+
+    const std::time_t t = std::time(nullptr);
+    std::tm            tm {};
+    localtime_r(&t, &tm);
+    char date[32];
+    std::strftime(date, sizeof(date), "%Y-%m-%d", &tm);
+
+    g_log.open(dir + "/claude-" + date + ".log", std::ios::app);
+}
+
+void log_line(const std::string& msg) {
+    if (!g_log.is_open()) return;
+    const std::time_t t = std::time(nullptr);
+    std::tm            tm {};
+    localtime_r(&t, &tm);
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm);
+    g_log << "[" << ts << "] " << msg << "\n";
+    g_log.flush();
+}
+
 std::string user_memory_path() {
     return config_dir() + "/CLAUDE.md";
 }
@@ -176,7 +217,8 @@ struct Config {
     std::string model;
     int         max_tokens = kMaxTokens;
     std::string system;
-    bool        show_usage = false;
+    bool        show_usage      = false;
+    bool        logging_enabled = false;
     json        prices;
     json        hooks;
     json        mcp_servers;
@@ -198,6 +240,9 @@ Config load_config() {
         if (j.contains("prices"))       cfg.prices      = j["prices"];
         if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
         if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
+        if (j.contains("logging") && j["logging"].is_object()) {
+            cfg.logging_enabled = j["logging"].value("enabled", false);
+        }
     } catch (const json::exception& e) {
         std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
     }
@@ -591,6 +636,7 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
             const json        tinput = block.value("input", json::object());
 
             std::cout << tui::meta("[tool: " + tname + " " + short_input_summary(tinput) + "]") << "\n";
+            log_line("tool " + tname + " input=" + short_input_summary(tinput));
 
             tools::ToolResult tres;
             const json pre_payload = { {"tool_input", tinput} };
@@ -873,6 +919,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     repl::set_slash_commands(all_slash);
 
     hooks::fire(hooks::Event::SessionStart, json::object());
+    log_line("session start (model=" + model + ")");
 
     int turn_count         = 0;
     int session_input      = 0;
@@ -967,6 +1014,10 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
             result.input_tokens, session_input,
             result.output_tokens, session_output);
         std::cout << tui::meta(status) << "\n";
+        log_line("turn " + std::to_string(turn_count)
+                 + " model=" + model
+                 + " in=" + std::to_string(result.input_tokens)
+                 + " out=" + std::to_string(result.output_tokens));
 
         save_history(messages, model);
 
@@ -987,6 +1038,7 @@ int main(int argc, char* argv[]) {
     }
 
     const Config cfg = load_config();
+    init_logging(cfg.logging_enabled);
     hooks::load(cfg.hooks);
     mcp::init(cfg.mcp_servers);
 
