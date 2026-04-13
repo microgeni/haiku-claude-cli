@@ -53,3 +53,28 @@ jobs:
           echo "Test:   ${{ job.status }}"
           echo "Ref:    ${{ github.ref_name }}"
           echo "Run:    ${{ github.run_number }}"
+
+  release:
+    name: Release
+    runs-on: macos-arm64
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build HPKG on Haiku
+        id: hpkg
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./ci_scripts/package_on_haiku.sh
+
+      - name: Upload release to Gitea
+        env:
+          VERSION: ${{ github.ref_name }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PKG_NAME: ${{ steps.hpkg.outputs.pkg_name }}
+        run: ./ci_scripts/upload_gitea_release.sh
