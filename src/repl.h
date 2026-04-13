@@ -2,6 +2,7 @@
 #define HAIKU_CLAUDE_CLI_REPL_H
 
 #include <string>
+#include <vector>
 
 // Thin wrapper around libedit's readline-compatible API. Provides line
 // editing (arrow keys, emacs bindings) and persistent in-memory +
@@ -11,6 +12,11 @@ namespace repl {
 // Load previously saved history from `history_file`. Missing or
 // unreadable files are silently ignored. Safe to call more than once.
 void init(const std::string& history_file);
+
+// Register the full list of slash-command names (with the leading
+// slash — "/help", "/clear", etc.) that tab completion should offer
+// when the current word starts with `/`. Replaces any previous list.
+void set_slash_commands(const std::vector<std::string>& names);
 
 // Read one line from stdin with editing. `prompt` may contain ANSI
 // escape sequences — they're wrapped in \001/\002 internally so libedit

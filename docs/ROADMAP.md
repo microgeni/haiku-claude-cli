@@ -166,14 +166,18 @@ Absorb per-project context without pasting it every turn.
       re-read on the next turn, so edits take effect immediately with
       no REPL restart.
 
-### v0.7 — Slash commands (custom + built-in polish)
+### v0.7 — Slash commands (custom + built-in polish) ✓
 
-- [ ] Namespace for built-in commands (`/help`, `/model`, `/cost`,
-      `/clear`, `/compact`, `/memory`).
-- [ ] User-defined commands loaded from `.claude/commands/*.md` in
-      the project and `~/config/settings/claude-cli/commands/` globally.
-- [ ] Argument support in custom commands via `{{args}}` substitution.
-- [ ] Tab completion in the REPL for slash command names.
+- [x] Namespace for built-in commands (`/help`, `/model`, `/cost`,
+      `/clear`, `/compact`, `/memory`, `/exit`, `/quit`).
+- [x] User-defined commands loaded from `.claude/commands/*.md` in
+      the project and `~/config/settings/claude-cli/commands/`
+      globally. Project definitions override user ones on collision.
+- [x] Argument support in custom commands via `{{args}}` substitution.
+      Text following the command name becomes `{{args}}` in the body,
+      which is sent as the user message.
+- [x] Tab completion in the REPL for slash command names, built-in
+      and custom, wired via libedit's `rl_attempted_completion_function`.
 
 ### v0.8 — Hooks
 

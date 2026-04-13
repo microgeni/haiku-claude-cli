@@ -18,6 +18,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include "commands.h"
 #include "oauth.h"
 #include "repl.h"
 #include "tools.h"
@@ -649,7 +650,8 @@ PriceEntry get_price(const std::string& model, const json& config_prices) {
     return { 3.0, 15.0 };
 }
 
-SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
+SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
+                           std::string& passthrough_out) {
     std::string cmd = line;
     std::string args;
     if (const auto sp = line.find(' '); sp != std::string::npos) {
@@ -669,6 +671,12 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
             "  /exit, /quit       leave the REPL\n")
                   << "\n";
+        const auto custom = commands::names();
+        if (!custom.empty()) {
+            std::string body = "custom commands from .claude/commands/ and user dir:\n";
+            for (const auto& c : custom) body += "  /" + c + "\n";
+            std::cout << tui::meta(body) << "\n";
+        }
         return SlashAction::Continue;
     }
     if (cmd == "/memory") {
@@ -767,6 +775,16 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
         std::cout << tui::meta(note) << "\n";
         return SlashAction::Continue;
     }
+    // Fall back to user-defined commands loaded from
+    // .claude/commands/*.md (or the global dir). If a match exists we
+    // substitute {{args}} and hand the expanded text back to the REPL
+    // loop to send as a normal user message.
+    const std::string cmd_name = cmd.substr(1); // drop leading '/'
+    if (auto expanded = commands::expand(cmd_name, args); expanded) {
+        passthrough_out = std::move(*expanded);
+        return SlashAction::Passthrough;
+    }
+
     std::cout << tui::meta("[unknown command: " + cmd + " — try /help]") << "\n";
     return SlashAction::Continue;
 }
@@ -779,6 +797,14 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     std::string model = initial_model;
 
     repl::init(repl_history_path());
+
+    commands::load(config_dir() + "/commands");
+    std::vector<std::string> all_slash = {
+        "/help", "/clear", "/model", "/compact", "/cost",
+        "/memory", "/exit", "/quit",
+    };
+    for (const auto& c : commands::names()) all_slash.push_back("/" + c);
+    repl::set_slash_commands(all_slash);
 
     int turn_count         = 0;
     int session_input      = 0;
@@ -822,16 +848,24 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
         if (line.empty()) continue;
         if (line == "exit" || line == "quit" || line == ":q") break;
 
+        bool already_recorded = false;
         if (!line.empty() && line.front() == '/') {
             LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
                         turn_count, session_input, session_output, messages};
-            const SlashAction action = dispatch_slash(line, ctx);
+            std::string expanded;
+            const SlashAction action = dispatch_slash(line, ctx, expanded);
             repl::record(line);
+            already_recorded = true;
             if (action == SlashAction::Quit) break;
             if (action == SlashAction::Continue) continue;
+            if (action == SlashAction::Passthrough) {
+                // Custom command resolved to a prompt; fall through
+                // with the expanded text as the actual user message.
+                line = std::move(expanded);
+            }
         }
 
-        repl::record(line);
+        if (!already_recorded) repl::record(line);
 
         const json snapshot = messages;
         messages.push_back({{"role", "user"}, {"content", line}});
