@@ -6,6 +6,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-14
+
+### Added
+- **Shell-command hooks** registered in `config.json` under a `hooks`
+  key, keyed by event name, with each entry a
+  `{ matcher?, command }` object. Five event types:
+  - `SessionStart` — once when the REPL starts.
+  - `UserPromptSubmit` — before a user message is committed to
+    history. Block drops the turn and prints `[hook blocked prompt]`.
+  - `PreToolUse` — before a tool runs, after the `[tool: ...]`
+    notice but before the permission prompt. Block synthesizes a
+    denied `tool_result` with `hook blocked <tool>`.
+  - `PostToolUse` — after a successful tool run, with the result
+    included in the payload.
+  - `Stop` — after a successful turn, with the assistant's text in
+    the payload.
+- Each hook runs as `sh -c <command>`. Event payload is written to
+  the hook's stdin as JSON (with `event` and, for tool events,
+  `tool_name` injected). Stderr is forwarded verbatim so hooks can
+  talk back to the user. The `matcher` field on PreToolUse/
+  PostToolUse filters by tool name; empty matcher matches any tool.
+- Non-zero exit from any matching hook means `Block` — the caller
+  aborts whatever was about to happen.
+
+### Deferred
+- Project-level hooks file (`.claude/hooks.json`).
+- Stdout-driven context injection from hooks into the prompt.
+- Per-hook timeouts.
+
 ## [0.7.0] - 2026-04-14
 
 ### Added
