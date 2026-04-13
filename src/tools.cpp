@@ -308,6 +308,75 @@ ToolResult run_todoread(const json& /*input*/) {
     return {format_todos(), false};
 }
 
+ToolResult run_websearch(const json& input) {
+    const std::string query = input.value("query", std::string{});
+    if (query.empty()) {
+        return {"error: WebSearch requires a `query` argument", true};
+    }
+    const char* key = std::getenv("BRAVE_SEARCH_API_KEY");
+    if (!key || !*key) {
+        return {"error: BRAVE_SEARCH_API_KEY is not set; get a free key at "
+                "https://brave.com/search/api/", true};
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return {"error: curl_easy_init failed", true};
+
+    char* escaped = curl_easy_escape(curl, query.c_str(), static_cast<int>(query.size()));
+    std::string url = "https://api.search.brave.com/res/v1/web/search?q=";
+    url += (escaped ? escaped : "");
+    curl_free(escaped);
+
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, ("x-subscription-token: " + std::string(key)).c_str());
+    headers = curl_slist_append(headers, "accept: application/json");
+
+    std::string body;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_to_string);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli/0.10");
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+    const CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return {std::string("error: ") + curl_easy_strerror(res), true};
+    }
+    if (http_code != 200) {
+        return {"error: Brave Search HTTP " + std::to_string(http_code) + ": " + body, true};
+    }
+
+    try {
+        const json j = json::parse(body);
+        if (!j.contains("web") || !j["web"].contains("results")
+            || !j["web"]["results"].is_array()) {
+            return {"(no results)", false};
+        }
+        std::ostringstream out;
+        int shown = 0;
+        for (const auto& r : j["web"]["results"]) {
+            if (shown >= 10) break;
+            if (shown > 0) out << "\n";
+            out << "- " << r.value("title", std::string{}) << "\n"
+                << "  " << r.value("url",   std::string{}) << "\n"
+                << "  " << r.value("description", std::string{});
+            ++shown;
+        }
+        if (shown == 0) return {"(no results)", false};
+        return {out.str(), false};
+    } catch (const json::exception& e) {
+        return {std::string("error: failed to parse search response: ") + e.what(), true};
+    }
+}
+
 ToolResult run_webfetch(const json& input) {
     const std::string url = input.value("url", std::string{});
     if (url.empty()) {
@@ -779,6 +848,25 @@ json builtin_definitions() {
 
 json definitions() {
     json out = builtin_definitions();
+    if (const char* key = std::getenv("BRAVE_SEARCH_API_KEY"); key && *key) {
+        out.push_back({
+            {"name", "WebSearch"},
+            {"description",
+                "Search the web via the Brave Search API. Returns up to 10 "
+                "results as title/url/description blocks. Requires "
+                "BRAVE_SEARCH_API_KEY in the environment."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"query", {
+                        {"type", "string"},
+                        {"description", "Search query string."},
+                    }},
+                }},
+                {"required", json::array({"query"})},
+            }},
+        });
+    }
     for (const auto& t : mcp::tool_definitions()) out.push_back(t);
     return out;
 }
@@ -791,6 +879,7 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "Write")    return run_write(input);
     if (name == "Edit")     return run_edit(input);
     if (name == "WebFetch")  return run_webfetch(input);
+    if (name == "WebSearch") return run_websearch(input);
     if (name == "TodoWrite") return run_todowrite(input);
     if (name == "TodoRead")  return run_todoread(input);
     if (name == "Task")      return {"error: Task is handled by the agent loop", true};

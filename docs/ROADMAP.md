@@ -220,17 +220,27 @@ CLI.
 - [ ] HTTP/SSE transport for remote MCP servers (deferred).
 - [ ] `resources/`, `prompts/` — tools-only in this slice.
 
-### v0.10 — Advanced built-ins
+### v0.10 — Advanced built-ins ✓
 
 Fill in the remaining Claude Code tools that make sense on a personal
 dev machine.
 
-- [ ] `WebFetch` tool — fetch a URL, render to Markdown, pass to Claude.
-- [ ] `WebSearch` tool (depends on a search API key).
-- [ ] `Task` tool — spawn sub-agents with a focused context budget
-      for parallelizable work.
-- [ ] Todo list tools (`TaskCreate` / `TaskUpdate` / `TaskList`) backed
-      by an in-session markdown file.
+- [x] `WebFetch` tool — libcurl GET with redirect following, 30 s
+      timeout, 32 KiB truncation. Returns HTTP status + content-type
+      header followed by the body. Raw HTML is passed through for
+      Claude to parse directly (no server-side HTML→Markdown).
+- [x] `WebSearch` tool — Brave Search API wrapper. Only registered
+      in `tools::definitions()` when `BRAVE_SEARCH_API_KEY` is set,
+      so Claude doesn't see an unusable tool. Returns up to 10
+      title/url/description blocks.
+- [x] `Task` tool — one-shot sub-agent via `send_conversation` with
+      `include_tools=false`. Fresh messages array, same auth/model/
+      memory as parent, streams to the terminal, final text becomes
+      the tool_result. Recursion-safe because the sub-agent has no
+      tools (including no Task).
+- [x] Todo list tools (`TodoWrite` / `TodoRead`) backed by an
+      in-process vector. Statuses: pending / in_progress / completed.
+      `/todos` slash command prints the current list as a checklist.
 
 ### v1.0 — Stable release
 
