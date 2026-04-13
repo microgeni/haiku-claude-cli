@@ -1,0 +1,20 @@
+name			claude_cli
+version			@VERSION@-@BUILD@
+architecture		x86_64
+summary			"Minimal Claude CLI for Haiku OS"
+description		"Command-line client for the Anthropic Messages API with streaming responses, OAuth 2.0 (Pro/Max subscription) and API-key authentication, stdin piping, and an interactive multi-turn REPL. Single-binary C++17, built on libcurl, nlohmann_json, and OpenSSL."
+packager		"Daniel Benjaminsson <daniel@microgeni.se>"
+vendor			"Microgeni AB"
+copyrights		"2026 Microgeni AB"
+licenses		MIT
+urls			"https://gitea.microgeni.synology.me/daniel/haiku-claude-cli"
+provides {
+	claude_cli = @VERSION@-@BUILD@
+	cmd:claude = @VERSION@-@BUILD@
+}
+requires {
+	haiku >= r1~beta5
+	lib:libcurl
+	lib:libcrypto >= 3
+	lib:libssl >= 3
+}
