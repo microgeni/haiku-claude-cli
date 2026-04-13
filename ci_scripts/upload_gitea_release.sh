@@ -71,9 +71,10 @@ fi
 
 payload=$(TAG="$TAG" VERSION_NUM="$version_num" BODY="$body" python3 -c '
 import json, os
+name = "haiku-claude-cli " + os.environ["VERSION_NUM"]
 print(json.dumps({
     "tag_name":   os.environ["TAG"],
-    "name":       f"haiku-claude-cli {os.environ[\"VERSION_NUM\"]}",
+    "name":       name,
     "body":       os.environ["BODY"],
     "draft":      False,
     "prerelease": False,
