@@ -18,6 +18,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every successful turn.
 - `CHANGELOG.md` following Keep a Changelog; release notes on
   Gitea releases are now extracted from it automatically.
+- `docs/ROADMAP.md` describing milestones from v0.2 through v1.0
+  toward Claude Code feature parity, including a dedicated Terminal
+  UI polish milestone.
+- Terminal UI polish (`tui` module):
+  - ANSI color detection honoring `NO_COLOR`, `CLICOLOR=0`,
+    `TERM=dumb`, plus `--plain` / `--color` overrides.
+  - Bold cyan `you> ` and bold magenta `claude> ` REPL prompts;
+    dim-styled meta notes.
+  - Braille "thinking" spinner between request submit and first
+    rendered output.
+  - Streaming markdown renderer supporting **bold**, *italic* /
+    _italic_, \`inline code\`, \`\`\` fenced code blocks, `#`/`##`/`###`
+    headings, bullet and numbered lists.
+  - Syntax highlighting inside code blocks for C/C++, Python, Shell,
+    Rust, and JSON (keywords, strings, numbers, comments, C/C++
+    preprocessor lines).
+  - Line editing in the REPL via libedit: arrow-key history,
+    emacs-style bindings, and persistent history at
+    `~/config/settings/claude-cli/repl_history`.
+
+### Changed
+- `.PackageInfo.in` now requires `lib:libedit`; the Makefile and
+  Haiku HPKG build pull it via pkg-config.
 
 ## [0.1.1] - 2026-04-13
 

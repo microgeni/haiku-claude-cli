@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "oauth.h"
+#include "repl.h"
 #include "tui.h"
 
 using json = nlohmann::json;
@@ -29,21 +30,24 @@ constexpr const char* kOAuthBeta    = "oauth-2025-04-20";
 constexpr const char* kOAuthSystem  = "You are Claude Code, Anthropic's official CLI for Claude.";
 constexpr int         kMaxTokens    = 1024;
 
-std::string history_path() {
+std::string config_dir() {
 #ifdef __HAIKU__
     const char* home = std::getenv("HOME");
-    const std::string dir = std::string(home ? home : "/boot/home") + "/config/settings/claude-cli";
+    return std::string(home ? home : "/boot/home") + "/config/settings/claude-cli";
 #else
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    std::string dir;
-    if (xdg && *xdg) {
-        dir = std::string(xdg) + "/claude-cli";
-    } else {
-        const char* home = std::getenv("HOME");
-        dir = std::string(home ? home : ".") + "/.config/claude-cli";
-    }
+    if (xdg && *xdg) return std::string(xdg) + "/claude-cli";
+    const char* home = std::getenv("HOME");
+    return std::string(home ? home : ".") + "/.config/claude-cli";
 #endif
-    return dir + "/history.json";
+}
+
+std::string history_path() {
+    return config_dir() + "/history.json";
+}
+
+std::string repl_history_path() {
+    return config_dir() + "/repl_history";
 }
 
 bool mkdir_p(const std::string& path) {
@@ -327,6 +331,8 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
                      const std::string& initial_message) {
     json messages = json::array();
 
+    repl::init(repl_history_path());
+
     if (resume) {
         if (auto loaded = load_history(); loaded && loaded->is_array()) {
             messages = *loaded;
@@ -351,8 +357,7 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
             pending.clear();
             std::cout << tui::user_prompt() << line << "\n";
         } else {
-            std::cout << tui::user_prompt() << std::flush;
-            if (!std::getline(std::cin, line)) {
+            if (!repl::read_line(tui::user_prompt(), line)) {
                 std::cout << "\n";
                 break;
             }
@@ -364,6 +369,7 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
         if (line.empty()) continue;
         if (line == "exit" || line == "quit" || line == ":q") break;
 
+        repl::record(line);
         messages.push_back({{"role", "user"}, {"content", line}});
 
         std::cout << "\n" << tui::claude_prompt();

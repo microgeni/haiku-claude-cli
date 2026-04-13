@@ -17,4 +17,5 @@ requires {
 	lib:libcurl
 	lib:libcrypto >= 3
 	lib:libssl >= 3
+	lib:libedit
 }

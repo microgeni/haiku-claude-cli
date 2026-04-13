@@ -18,6 +18,7 @@
             curl
             nlohmann_json
             openssl
+            libedit
           ];
         };
       });

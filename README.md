@@ -38,7 +38,7 @@ make
 Required packages (install via `pkgman` if missing):
 
 ```
-pkgman install devel:libcurl devel:libssl nlohmann_json pkgconfig
+pkgman install devel:libcurl devel:libssl nlohmann_json pkgconfig libedit_devel
 ```
 
 ### On macOS (nix)
