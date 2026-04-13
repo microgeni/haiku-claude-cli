@@ -66,6 +66,10 @@ std::string claude_prompt() {
     return wrap("\x1b[1;35m", "claude> ");
 }
 
+std::string continuation_prompt() {
+    return wrap("\x1b[2m", "... ");
+}
+
 std::string meta(const std::string& s) {
     return wrap("\x1b[2m", s);
 }

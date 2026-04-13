@@ -68,6 +68,53 @@ bool read_line(const std::string& prompt, std::string& out) {
     return true;
 }
 
+bool read_message(const std::string& prompt,
+                  const std::string& continuation_prompt,
+                  std::string&       out) {
+    out.clear();
+
+    std::string first;
+    if (!read_line(prompt, first)) return false;
+
+    // Fenced block: bare `"""` or `'''` on its own.
+    if (first == "\"\"\"" || first == "'''") {
+        const std::string fence = first;
+        while (true) {
+            std::string next;
+            if (!read_line(continuation_prompt, next)) {
+                return !out.empty();
+            }
+            if (next == fence) return true;
+            if (!out.empty()) out.push_back('\n');
+            out.append(next);
+        }
+    }
+
+    // Backslash continuation.
+    if (!first.empty() && first.back() == '\\') {
+        first.pop_back();
+        out.append(first);
+        out.push_back('\n');
+        while (true) {
+            std::string next;
+            if (!read_line(continuation_prompt, next)) {
+                return true;
+            }
+            if (!next.empty() && next.back() == '\\') {
+                next.pop_back();
+                out.append(next);
+                out.push_back('\n');
+                continue;
+            }
+            out.append(next);
+            return true;
+        }
+    }
+
+    out = std::move(first);
+    return true;
+}
+
 void record(const std::string& line) {
     if (line.empty()) return;
     add_history(line.c_str());

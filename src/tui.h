@@ -31,10 +31,11 @@ std::string gray(const std::string& s);
 
 // Semantic wrappers. These return the full string to print (including
 // trailing reset), or a plain equivalent when color is off.
-std::string user_prompt();            // "you> "
-std::string claude_prompt();          // "claude> "
+std::string user_prompt();              // "you> "
+std::string claude_prompt();            // "claude> "
+std::string continuation_prompt();      // "... " for multi-line input
 std::string meta(const std::string& s); // dim bracketed note
-std::string error_label();            // bold red "error:"
+std::string error_label();              // bold red "error:"
 
 // Forward declaration so MarkdownRenderer can reference Spinner.
 class Spinner;

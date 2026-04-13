@@ -17,6 +17,17 @@ void init(const std::string& history_file);
 // counts columns correctly. Returns false on EOF (Ctrl+D).
 bool read_line(const std::string& prompt, std::string& out);
 
+// Read a logical message from stdin. Supports two continuation modes:
+//   1. A bare `"""` line starts a fenced block that ends on another
+//      `"""` line (matching `'''` also works).
+//   2. A line ending with a trailing `\` continues onto the next line,
+//      concatenated with a newline.
+// The continuation prompt is shown for subsequent lines. Returns false
+// on EOF; partial input collected so far is returned in `out`.
+bool read_message(const std::string& prompt,
+                  const std::string& continuation_prompt,
+                  std::string&       out);
+
 // Append `line` to history and flush to disk. No-op on empty lines.
 void record(const std::string& line);
 

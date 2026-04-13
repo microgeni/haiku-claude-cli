@@ -357,7 +357,9 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
             pending.clear();
             std::cout << tui::user_prompt() << line << "\n";
         } else {
-            if (!repl::read_line(tui::user_prompt(), line)) {
+            if (!repl::read_message(tui::user_prompt(),
+                                    tui::continuation_prompt(),
+                                    line)) {
                 std::cout << "\n";
                 break;
             }
