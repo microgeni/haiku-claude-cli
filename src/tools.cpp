@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "mcp.h"
+
 namespace tools {
 
 namespace {
@@ -437,7 +439,9 @@ ToolResult run_grep(const json& input) {
 
 } // namespace
 
-json definitions() {
+namespace {
+
+json builtin_definitions() {
     return json::array({
         {
             {"name", "Read"},
@@ -587,6 +591,14 @@ json definitions() {
     });
 }
 
+} // namespace
+
+json definitions() {
+    json out = builtin_definitions();
+    for (const auto& t : mcp::tool_definitions()) out.push_back(t);
+    return out;
+}
+
 ToolResult run(const std::string& name, const json& input) {
     if (name == "Read")  return run_read(input);
     if (name == "Glob")  return run_glob(input);
@@ -594,11 +606,14 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "Bash")  return run_bash(input);
     if (name == "Write") return run_write(input);
     if (name == "Edit")  return run_edit(input);
+    if (auto mcp_res = mcp::run(name, input); mcp_res) return *mcp_res;
     return {"error: unknown tool " + name, true};
 }
 
 bool requires_permission(const std::string& name) {
-    return name == "Bash" || name == "Write" || name == "Edit";
+    if (name == "Bash" || name == "Write" || name == "Edit") return true;
+    if (mcp::is_mcp_tool(name)) return true;
+    return false;
 }
 
 std::string preview(const std::string& name, const json& input) {

@@ -198,16 +198,27 @@ Let the user react to lifecycle events with plain shell scripts.
       PreToolUse synthesizes a denied tool_result. Stdout is not
       captured in this slice (no context injection yet).
 
-### v0.9 — MCP (Model Context Protocol)
+### v0.9 — MCP (Model Context Protocol) ✓
 
 Interoperate with MCP servers so every MCP tool is available to this
 CLI.
 
-- [ ] stdio transport — spawn a server subprocess, speak JSON-RPC.
-- [ ] `~/config/settings/claude-cli/mcp.json` for server config.
-- [ ] Advertise MCP-provided tools and resources to Claude via the
-      Messages API `tools` array.
-- [ ] HTTP/SSE transport for remote MCP servers (follow-up).
+- [x] stdio transport — spawn each configured server as a subprocess,
+      speak newline-delimited JSON-RPC 2.0 over stdin/stdout, run
+      the `initialize` handshake, and query `tools/list`.
+- [x] Server config lives under a `mcp_servers` key in the existing
+      `config.json` — each entry has `command`, optional `args`, and
+      optional `env`. A separate `mcp.json` file is deferred; the
+      existing config.json path is enough for now.
+- [x] Advertise MCP-provided tools to Claude via the Messages API
+      `tools` array. Tool names are namespaced as
+      `mcp__<server>__<tool>` so they can't collide with built-ins.
+      `tools::run` dispatches any `mcp__…` name to the owning server
+      via `tools/call`, concatenates text content blocks in the
+      result, and propagates `isError`. All MCP tools
+      `require_permission`.
+- [ ] HTTP/SSE transport for remote MCP servers (deferred).
+- [ ] `resources/`, `prompts/` — tools-only in this slice.
 
 ### v0.10 — Advanced built-ins
 

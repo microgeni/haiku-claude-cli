@@ -20,6 +20,7 @@
 
 #include "commands.h"
 #include "hooks.h"
+#include "mcp.h"
 #include "oauth.h"
 #include "repl.h"
 #include "tools.h"
@@ -177,6 +178,7 @@ struct Config {
     bool        show_usage = false;
     json        prices;
     json        hooks;
+    json        mcp_servers;
 };
 
 Config load_config() {
@@ -192,8 +194,9 @@ Config load_config() {
         if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
         if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
         if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
-        if (j.contains("prices"))     cfg.prices     = j["prices"];
-        if (j.contains("hooks"))      cfg.hooks      = j["hooks"];
+        if (j.contains("prices"))       cfg.prices      = j["prices"];
+        if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
+        if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
     } catch (const json::exception& e) {
         std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
     }
@@ -936,6 +939,7 @@ int main(int argc, char* argv[]) {
 
     const Config cfg = load_config();
     hooks::load(cfg.hooks);
+    mcp::init(cfg.mcp_servers);
 
     std::string              model         = cfg.model;
     int                      max_tokens    = cfg.max_tokens;
