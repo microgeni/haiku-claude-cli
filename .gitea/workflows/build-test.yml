@@ -19,8 +19,8 @@ env:
   GITEA_REPO_URL: ssh://git@gitea.microgeni.synology.me:2222/daniel/haiku-claude-cli.git
 
 jobs:
-  build:
-    name: Build
+  build-and-test:
+    name: Build & Test
     runs-on: macos-arm64
     steps:
       - name: Checkout
@@ -36,12 +36,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh"
 
-  test:
-    name: Test
-    runs-on: macos-arm64
-    needs: build
-    steps:
-      - name: Run tests on Haiku
+      - name: Test on Haiku
         run: |
           ssh -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/test.sh"
@@ -49,15 +44,14 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "Build:  ${{ needs.build.result }}"
-          echo "Test:   ${{ job.status }}"
+          echo "Status: ${{ job.status }}"
           echo "Ref:    ${{ github.ref_name }}"
           echo "Run:    ${{ github.run_number }}"
 
   release:
     name: Release
     runs-on: macos-arm64
-    needs: [build, test]
+    needs: build-and-test
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout
