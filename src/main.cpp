@@ -52,6 +52,10 @@ std::string repl_history_path() {
     return config_dir() + "/repl_history";
 }
 
+std::string config_path() {
+    return config_dir() + "/config.json";
+}
+
 bool mkdir_p(const std::string& path) {
     std::string accum;
     for (size_t i = 0; i < path.size(); ++i) {
@@ -124,6 +128,34 @@ int xfer_callback(void* /*clientp*/,
                   curl_off_t /*dltotal*/, curl_off_t /*dlnow*/,
                   curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
     return g_interrupted ? 1 : 0;
+}
+
+struct Config {
+    std::string model;
+    int         max_tokens = kMaxTokens;
+    std::string system;
+    bool        show_usage = false;
+    json        prices;
+};
+
+Config load_config() {
+    Config cfg;
+    cfg.model = kDefaultModel;
+
+    std::ifstream f(config_path());
+    if (!f.is_open()) return cfg;
+
+    try {
+        const json j = json::parse(f);
+        if (j.contains("model"))      cfg.model      = j["model"].get<std::string>();
+        if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
+        if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
+        if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
+        if (j.contains("prices"))     cfg.prices     = j["prices"];
+    } catch (const json::exception& e) {
+        std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
+    }
+    return cfg;
 }
 
 enum class AuthKind { None, OAuth, ApiKey };
@@ -216,7 +248,7 @@ size_t stream_write_callback(char* data, size_t size, size_t nmemb, void* userp)
     return total;
 }
 
-void print_usage(const char* prog) {
+void print_usage(const char* prog, const std::string& default_model, int default_max_tokens) {
     std::cerr << "Usage: " << prog << " [OPTIONS] [MESSAGE...]\n"
               << "\n"
               << "Sends a one-shot message to the Claude API and streams the reply.\n"
@@ -229,8 +261,8 @@ void print_usage(const char* prog) {
               << "\n"
               << "Options:\n"
               << "  -i, --interactive    Start a multi-turn REPL session.\n"
-              << "  -m, --model MODEL    Model to use (default: " << kDefaultModel << ").\n"
-              << "  -t, --max-tokens N   Max tokens in response (default: " << kMaxTokens << ").\n"
+              << "  -m, --model MODEL    Model to use (default: " << default_model << ").\n"
+              << "  -t, --max-tokens N   Max tokens in response (default: " << default_max_tokens << ").\n"
               << "  -s, --system TEXT    Custom system prompt (appended after the\n"
               << "                       required Claude Code prefix when OAuth is used).\n"
               << "  -u, --usage          After the response, print input/output token\n"
@@ -240,6 +272,10 @@ void print_usage(const char* prog) {
               << "      --plain          Disable ANSI color output.\n"
               << "      --color          Force ANSI color output, even when piped.\n"
               << "  -h, --help           Show this help and exit.\n"
+              << "\n"
+              << "Config file: " << config_path() << "\n"
+              << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
+              << "  prices. CLI flags override config values.\n"
               << "\n"
               << "Authentication (in priority order):\n"
               << "  1. OAuth tokens from 'claude login' (uses Pro/Max quota).\n"
@@ -562,18 +598,20 @@ int main(int argc, char* argv[]) {
         if (cmd == "logout") return do_logout();
     }
 
-    std::string              model         = kDefaultModel;
-    int                      max_tokens    = kMaxTokens;
+    const Config cfg = load_config();
+
+    std::string              model         = cfg.model;
+    int                      max_tokens    = cfg.max_tokens;
     bool                     interactive   = false;
-    bool                     show_usage    = false;
+    bool                     show_usage    = cfg.show_usage;
     bool                     resume        = false;
-    std::string              custom_system;
+    std::string              custom_system = cfg.system;
     std::vector<std::string> parts;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
-            print_usage(argv[0]);
+            print_usage(argv[0], model, max_tokens);
             return 0;
         }
         if (arg == "-i" || arg == "--interactive") {
@@ -669,7 +707,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (!interactive && message.empty()) {
-        print_usage(argv[0]);
+        print_usage(argv[0], model, max_tokens);
         return 1;
     }
 
