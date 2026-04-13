@@ -20,7 +20,8 @@ project_path="$1"
 repo_url="$2"
 ref="$3"
 
-if [ ! -d "$project_path" ]; then
+if [ ! -d "$project_path/.git" ]; then
+    rm -rf "$project_path"
     mkdir -p "$(dirname "$project_path")"
     git clone "$repo_url" "$project_path"
 fi
