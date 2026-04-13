@@ -1,7 +1,9 @@
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include <curl/curl.h>
@@ -86,20 +88,24 @@ size_t stream_write_callback(char* data, size_t size, size_t nmemb, void* userp)
 }
 
 void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " [-h] <command|message>...\n"
+    std::cerr << "Usage: " << prog << " [OPTIONS] [MESSAGE...]\n"
+              << "\n"
+              << "Sends a one-shot message to the Claude API and streams the reply.\n"
+              << "If stdin is not a terminal (piped input), its contents are appended\n"
+              << "to the message so `cat file.txt | " << prog << " \"summarize\"` works.\n"
               << "\n"
               << "Commands:\n"
               << "  login                Authenticate via Claude.ai (OAuth + PKCE).\n"
               << "  logout               Delete stored credentials.\n"
               << "\n"
-              << "Otherwise, remaining arguments are sent as a one-shot message.\n"
+              << "Options:\n"
+              << "  -m, --model MODEL    Model to use (default: " << kDefaultModel << ").\n"
+              << "  -t, --max-tokens N   Max tokens in response (default: " << kMaxTokens << ").\n"
+              << "  -h, --help           Show this help and exit.\n"
               << "\n"
               << "Authentication (in priority order):\n"
               << "  1. OAuth tokens from 'claude login' (uses Pro/Max quota).\n"
-              << "  2. ANTHROPIC_API_KEY environment variable (billed per token).\n"
-              << "\n"
-              << "Options:\n"
-              << "  -h, --help           Show this help and exit.\n";
+              << "  2. ANTHROPIC_API_KEY environment variable (billed per token).\n";
 }
 
 Auth resolve_auth() {
@@ -121,7 +127,7 @@ Auth resolve_auth() {
     return {};
 }
 
-int send_message(const Auth& auth, const std::string& message) {
+int send_message(const Auth& auth, const std::string& model, int max_tokens, const std::string& message) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::cerr << "error: curl_easy_init failed\n";
@@ -129,8 +135,8 @@ int send_message(const Auth& auth, const std::string& message) {
     }
 
     json body = {
-        {"model",      kDefaultModel},
-        {"max_tokens", kMaxTokens},
+        {"model",      model},
+        {"max_tokens", max_tokens},
         {"stream",     true},
         {"messages",   json::array({{{"role", "user"}, {"content", message}}})},
     };
@@ -200,17 +206,66 @@ int main(int argc, char* argv[]) {
         if (cmd == "logout") return do_logout();
     }
 
+    std::string              model       = kDefaultModel;
+    int                      max_tokens  = kMaxTokens;
     std::vector<std::string> parts;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
         }
+        if (arg == "-m" || arg == "--model") {
+            if (i + 1 >= argc) {
+                std::cerr << "error: " << arg << " requires a value\n";
+                return 1;
+            }
+            model = argv[++i];
+            continue;
+        }
+        if (arg == "-t" || arg == "--max-tokens") {
+            if (i + 1 >= argc) {
+                std::cerr << "error: " << arg << " requires a value\n";
+                return 1;
+            }
+            max_tokens = std::atoi(argv[++i]);
+            if (max_tokens <= 0) {
+                std::cerr << "error: --max-tokens must be a positive integer\n";
+                return 1;
+            }
+            continue;
+        }
         parts.push_back(arg);
     }
 
-    if (parts.empty()) {
+    std::string message;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) message += ' ';
+        message += parts[i];
+    }
+
+    if (!isatty(fileno(stdin))) {
+        std::string stdin_data;
+        char        buf[4096];
+        size_t      n;
+        while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0) {
+            stdin_data.append(buf, n);
+        }
+        while (!stdin_data.empty() && (stdin_data.back() == '\n' || stdin_data.back() == '\r')) {
+            stdin_data.pop_back();
+        }
+        if (!stdin_data.empty()) {
+            if (message.empty()) {
+                message = std::move(stdin_data);
+            } else {
+                message += "\n\n";
+                message += stdin_data;
+            }
+        }
+    }
+
+    if (message.empty()) {
         print_usage(argv[0]);
         return 1;
     }
@@ -223,10 +278,5 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string message = parts[0];
-    for (size_t i = 1; i < parts.size(); ++i) {
-        message += ' ';
-        message += parts[i];
-    }
-    return send_message(auth, message);
+    return send_message(auth, model, max_tokens, message);
 }
