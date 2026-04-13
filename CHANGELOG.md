@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-14
+
+### Added
+- **Write tool** — creates or overwrites a file, auto-creates parent
+  directories, returns a byte-count summary. Requires permission on
+  first use.
+- **Edit tool** — exact-string replacement in an existing file, with
+  an optional `replace_all` flag for multi-match cases. Errors on
+  zero matches and on >1 match without `replace_all`. Requires
+  permission on first use.
+- **Permission preview system** — `tools::preview(name, input)`
+  returns an optional multi-line description of what a tool would
+  do, rendered dim between the `[tool: ...]` notice and the
+  yes/always/no prompt. Write's preview shows new-vs-overwrite with
+  byte/line counts and the first 10 lines of content; Edit's preview
+  renders a block-style diff (`-` old_string / `+` new_string) with
+  the line number of the first match, capped at 12 lines per side.
+- **Out-of-cwd warning** — Write/Edit paths outside the current
+  working directory are flagged with `[WARNING: outside cwd]` in
+  the preview. Not a hard deny; the permission prompt is the safety
+  net.
+
 ## [0.4.0] - 2026-04-14
 
 ### Added
