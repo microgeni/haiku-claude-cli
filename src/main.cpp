@@ -368,11 +368,65 @@ void print_usage_line(const SendResult& result) {
               << " tokens  output: " << result.output_tokens << " tokens\n";
 }
 
-int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
+enum class SlashAction { Continue, Quit, Passthrough };
+
+struct LoopCtx {
+    std::string&          model;
+    int&                  turn_count;
+    int&                  session_input;
+    int&                  session_output;
+    json&                 messages;
+};
+
+SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
+    std::string cmd = line;
+    std::string args;
+    if (const auto sp = line.find(' '); sp != std::string::npos) {
+        cmd  = line.substr(0, sp);
+        args = line.substr(sp + 1);
+        while (!args.empty() && args.front() == ' ') args.erase(args.begin());
+    }
+
+    if (cmd == "/help" || cmd == "/?") {
+        std::cout << tui::meta(
+            "slash commands:\n"
+            "  /help              this list\n"
+            "  /clear             reset the running conversation\n"
+            "  /model <name>      swap the active model\n"
+            "  /exit, /quit       leave the REPL\n")
+                  << "\n";
+        return SlashAction::Continue;
+    }
+    if (cmd == "/exit" || cmd == "/quit") {
+        return SlashAction::Quit;
+    }
+    if (cmd == "/clear") {
+        ctx.messages        = json::array();
+        ctx.turn_count      = 0;
+        ctx.session_input   = 0;
+        ctx.session_output  = 0;
+        std::cout << tui::meta("[conversation cleared]") << "\n";
+        return SlashAction::Continue;
+    }
+    if (cmd == "/model") {
+        if (args.empty()) {
+            std::cout << tui::meta("[current model: " + ctx.model + "]") << "\n";
+        } else {
+            ctx.model = args;
+            std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
+        }
+        return SlashAction::Continue;
+    }
+    std::cout << tui::meta("[unknown command: " + cmd + " — try /help]") << "\n";
+    return SlashAction::Continue;
+}
+
+int interactive_loop(const Auth& auth, const std::string& initial_model, int max_tokens,
                      const std::string& custom_system, bool resume,
                      const std::string& initial_message) {
     InterruptGuard interrupt_guard;
     json messages = json::array();
+    std::string model = initial_model;
 
     repl::init(repl_history_path());
 
@@ -393,7 +447,7 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
     }
 
     std::cout << tui::bold("Claude CLI interactive mode") << tui::dim(" (model: " + model + ")") << ".\n"
-              << tui::dim("Type 'exit', 'quit', or press Ctrl+D to leave.") << "\n\n";
+              << tui::dim("Type /help for commands, 'exit' or Ctrl+D to leave.") << "\n\n";
 
     std::string pending = initial_message;
 
@@ -417,6 +471,14 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
         }
         if (line.empty()) continue;
         if (line == "exit" || line == "quit" || line == ":q") break;
+
+        if (!line.empty() && line.front() == '/') {
+            LoopCtx ctx{model, turn_count, session_input, session_output, messages};
+            const SlashAction action = dispatch_slash(line, ctx);
+            repl::record(line);
+            if (action == SlashAction::Quit) break;
+            if (action == SlashAction::Continue) continue;
+        }
 
         repl::record(line);
         messages.push_back({{"role", "user"}, {"content", line}});
