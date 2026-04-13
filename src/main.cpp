@@ -98,15 +98,16 @@ struct Auth {
 };
 
 struct StreamState {
-    std::string   sse_buffer;
-    std::string   raw_buffer;
-    std::string   text;
-    int           input_tokens        = 0;
-    int           output_tokens       = 0;
-    bool          saw_text            = false;
-    bool          stream_error        = false;
-    std::string   stream_error_message;
-    tui::Spinner* spinner             = nullptr;
+    std::string          sse_buffer;
+    std::string          raw_buffer;
+    std::string          text;
+    int                  input_tokens        = 0;
+    int                  output_tokens       = 0;
+    bool                 saw_text            = false;
+    bool                 stream_error        = false;
+    std::string          stream_error_message;
+    tui::Spinner*        spinner             = nullptr;
+    tui::MarkdownRenderer renderer;
 };
 
 struct SendResult {
@@ -138,11 +139,7 @@ void process_sse_event(const std::string& event, StreamState* state) {
             const auto& delta = j["delta"];
             if (delta.value("type", "") == "text_delta") {
                 const std::string chunk = delta.value("text", "");
-                if (state->spinner) {
-                    state->spinner->stop();
-                    state->spinner = nullptr;
-                }
-                std::cout << chunk << std::flush;
+                state->renderer.write(chunk);
                 state->text += chunk;
                 state->saw_text = true;
             }
@@ -276,6 +273,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     StreamState state;
     tui::Spinner spinner("thinking");
     state.spinner = &spinner;
+    state.renderer.set_spinner(&spinner);
 
     curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -314,6 +312,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         return {1, {}, 0, 0};
     }
 
+    state.renderer.flush();
     std::cout << "\n";
     return {0, state.text, state.input_tokens, state.output_tokens};
 }

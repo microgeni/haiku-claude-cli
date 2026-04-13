@@ -36,6 +36,37 @@ std::string claude_prompt();          // "claude> "
 std::string meta(const std::string& s); // dim bracketed note
 std::string error_label();            // bold red "error:"
 
+// Forward declaration so MarkdownRenderer can reference Spinner.
+class Spinner;
+
+// Incremental markdown renderer for streamed text. Accepts text chunks
+// via write(), buffers by line internally, and emits ANSI-formatted
+// output to stdout. Handles bold **, italic *, inline code `,
+// fenced code blocks ```lang, headings #/##/###, and bullet/numbered
+// lists. Nested inline formatting is not supported (scope: 80% case).
+//
+// Falls back to raw passthrough when color is disabled.
+//
+// Optionally holds a non-owning Spinner pointer: on the first byte of
+// real output, the spinner is stopped so the user sees the thinking
+// indicator up until something is actually visible.
+class MarkdownRenderer {
+public:
+    MarkdownRenderer();
+    void set_spinner(Spinner* s) { spinner_ = s; }
+    void write(const std::string& chunk);
+    void flush();
+private:
+    void emit(const std::string& s);
+    void render_line(const std::string& line);
+    void render_inline(const std::string& text);
+
+    std::string line_buffer_;
+    bool        in_code_block_     = false;
+    bool        first_output_done_ = false;
+    Spinner*    spinner_           = nullptr;
+};
+
 // Animated "thinking..." indicator. Spawns a background thread that
 // writes dimmed spinner frames to stdout until stop() (or destruction).
 // No-op when color is disabled or stdout is not a TTY.

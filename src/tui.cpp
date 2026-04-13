@@ -1,6 +1,7 @@
 #include "tui.h"
 
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
@@ -70,6 +71,180 @@ std::string meta(const std::string& s) {
 
 std::string error_label() {
     return wrap("\x1b[1;31m", "error:");
+}
+
+MarkdownRenderer::MarkdownRenderer() = default;
+
+void MarkdownRenderer::emit(const std::string& s) {
+    if (!first_output_done_) {
+        first_output_done_ = true;
+        if (spinner_) {
+            spinner_->stop();
+            spinner_ = nullptr;
+        }
+    }
+    std::cout << s << std::flush;
+}
+
+void MarkdownRenderer::render_inline(const std::string& text) {
+    if (!g_color_enabled) { emit(text); return; }
+
+    enum class Mode { Normal, Bold, Italic, Code };
+    Mode mode = Mode::Normal;
+    std::string out;
+    out.reserve(text.size() + 32);
+
+    auto ansi = [](const char* code) { return std::string(code); };
+    auto starts_with_double_star = [&](size_t i) {
+        return i + 1 < text.size() && text[i] == '*' && text[i + 1] == '*';
+    };
+
+    for (size_t i = 0; i < text.size();) {
+        const char c = text[i];
+        if (mode == Mode::Normal) {
+            if (starts_with_double_star(i)) {
+                out += ansi("\x1b[1m");
+                mode = Mode::Bold;
+                i += 2;
+            } else if (c == '*' || c == '_') {
+                out += ansi("\x1b[3m");
+                mode = Mode::Italic;
+                i += 1;
+            } else if (c == '`') {
+                out += ansi("\x1b[38;5;81m");
+                mode = Mode::Code;
+                i += 1;
+            } else {
+                out += c;
+                i += 1;
+            }
+        } else if (mode == Mode::Bold) {
+            if (starts_with_double_star(i)) {
+                out += ansi("\x1b[22m");
+                mode = Mode::Normal;
+                i += 2;
+            } else {
+                out += c;
+                i += 1;
+            }
+        } else if (mode == Mode::Italic) {
+            if (c == '*' || c == '_') {
+                out += ansi("\x1b[23m");
+                mode = Mode::Normal;
+                i += 1;
+            } else {
+                out += c;
+                i += 1;
+            }
+        } else { // Code
+            if (c == '`') {
+                out += ansi("\x1b[39m");
+                mode = Mode::Normal;
+                i += 1;
+            } else {
+                out += c;
+                i += 1;
+            }
+        }
+    }
+    // Defensive reset in case a line ends mid-token.
+    if (mode != Mode::Normal) out += ansi("\x1b[0m");
+    emit(out);
+}
+
+void MarkdownRenderer::render_line(const std::string& line) {
+    // Inside a code block, everything passes through with a dim tint
+    // until we see the closing fence.
+    if (in_code_block_) {
+        if (line.size() >= 3 && line.substr(0, 3) == "```") {
+            in_code_block_ = false;
+            emit(dim("```") + "\n");
+            return;
+        }
+        emit("\x1b[38;5;114m" + line + "\x1b[0m\n");
+        return;
+    }
+
+    // Opening code fence.
+    if (line.size() >= 3 && line.substr(0, 3) == "```") {
+        in_code_block_ = true;
+        const std::string lang = line.substr(3);
+        if (lang.empty()) {
+            emit(dim("```") + "\n");
+        } else {
+            emit(dim("``` " + lang) + "\n");
+        }
+        return;
+    }
+
+    // Headings.
+    size_t hash_count = 0;
+    while (hash_count < line.size() && line[hash_count] == '#') ++hash_count;
+    if (hash_count > 0 && hash_count <= 3 && hash_count < line.size() && line[hash_count] == ' ') {
+        const std::string rest = line.substr(hash_count + 1);
+        const char* color = hash_count == 1 ? "\x1b[1;95m"
+                          : hash_count == 2 ? "\x1b[1;94m"
+                          :                    "\x1b[1;96m";
+        emit(std::string(color) + rest + "\x1b[0m\n");
+        return;
+    }
+
+    // Bullet list: optional leading whitespace, then '- ' or '* '.
+    size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i + 1 < line.size() && (line[i] == '-' || line[i] == '*') && line[i + 1] == ' ') {
+        const std::string indent(i, ' ');
+        emit(indent + "\x1b[36m\u2022\x1b[0m ");
+        render_inline(line.substr(i + 2));
+        emit("\n");
+        return;
+    }
+
+    // Numbered list: N. or N) at line start (optionally indented).
+    {
+        size_t j = i;
+        while (j < line.size() && std::isdigit(static_cast<unsigned char>(line[j]))) ++j;
+        if (j > i && j + 1 < line.size() && (line[j] == '.' || line[j] == ')') && line[j + 1] == ' ') {
+            emit(std::string(i, ' ') + "\x1b[36m" + line.substr(i, j - i + 1) + "\x1b[0m ");
+            render_inline(line.substr(j + 2));
+            emit("\n");
+            return;
+        }
+    }
+
+    // Regular paragraph line.
+    render_inline(line);
+    emit("\n");
+}
+
+void MarkdownRenderer::write(const std::string& chunk) {
+    if (!g_color_enabled) {
+        std::cout << chunk << std::flush;
+        if (!first_output_done_) {
+            first_output_done_ = true;
+            if (spinner_) {
+                spinner_->stop();
+                spinner_ = nullptr;
+            }
+        }
+        return;
+    }
+
+    for (char c : chunk) {
+        if (c == '\n') {
+            render_line(line_buffer_);
+            line_buffer_.clear();
+        } else {
+            line_buffer_ += c;
+        }
+    }
+}
+
+void MarkdownRenderer::flush() {
+    if (!line_buffer_.empty()) {
+        render_line(line_buffer_);
+        line_buffer_.clear();
+    }
 }
 
 Spinner::Spinner(std::string label) : label_(std::move(label)) {
