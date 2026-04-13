@@ -111,6 +111,8 @@ void print_usage(const char* prog) {
               << "  -i, --interactive    Start a multi-turn REPL session.\n"
               << "  -m, --model MODEL    Model to use (default: " << kDefaultModel << ").\n"
               << "  -t, --max-tokens N   Max tokens in response (default: " << kMaxTokens << ").\n"
+              << "  -s, --system TEXT    Custom system prompt (appended after the\n"
+              << "                       required Claude Code prefix when OAuth is used).\n"
               << "  -h, --help           Show this help and exit.\n"
               << "\n"
               << "Authentication (in priority order):\n"
@@ -137,7 +139,8 @@ Auth resolve_auth() {
     return {};
 }
 
-SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens, const json& messages) {
+SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens,
+                             const json& messages, const std::string& custom_system) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::cerr << "error: curl_easy_init failed\n";
@@ -150,8 +153,19 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         {"stream",     true},
         {"messages",   messages},
     };
+
+    std::string system_prompt;
     if (auth.kind == AuthKind::OAuth) {
-        body["system"] = kOAuthSystem;
+        system_prompt = kOAuthSystem;
+        if (!custom_system.empty()) {
+            system_prompt += "\n\n";
+            system_prompt += custom_system;
+        }
+    } else if (!custom_system.empty()) {
+        system_prompt = custom_system;
+    }
+    if (!system_prompt.empty()) {
+        body["system"] = system_prompt;
     }
     const std::string body_str = body.dump();
 
@@ -207,7 +221,8 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     return {0, state.text};
 }
 
-int interactive_loop(const Auth& auth, const std::string& model, int max_tokens, const std::string& initial_message) {
+int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
+                     const std::string& custom_system, const std::string& initial_message) {
     json messages = json::array();
 
     std::cout << "Claude CLI interactive mode (model: " << model << ").\n"
@@ -238,7 +253,7 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
         messages.push_back({{"role", "user"}, {"content", line}});
 
         std::cout << "\nclaude> ";
-        const auto result = send_conversation(auth, model, max_tokens, messages);
+        const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
         std::cout << "\n";
 
         if (result.exit_code != 0) {
@@ -259,9 +274,10 @@ int main(int argc, char* argv[]) {
         if (cmd == "logout") return do_logout();
     }
 
-    std::string              model       = kDefaultModel;
-    int                      max_tokens  = kMaxTokens;
-    bool                     interactive = false;
+    std::string              model         = kDefaultModel;
+    int                      max_tokens    = kMaxTokens;
+    bool                     interactive   = false;
+    std::string              custom_system;
     std::vector<std::string> parts;
 
     for (int i = 1; i < argc; ++i) {
@@ -292,6 +308,14 @@ int main(int argc, char* argv[]) {
                 std::cerr << "error: --max-tokens must be a positive integer\n";
                 return 1;
             }
+            continue;
+        }
+        if (arg == "-s" || arg == "--system") {
+            if (i + 1 >= argc) {
+                std::cerr << "error: " << arg << " requires a value\n";
+                return 1;
+            }
+            custom_system = argv[++i];
             continue;
         }
         parts.push_back(arg);
@@ -351,9 +375,9 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, model, max_tokens, message);
+        return interactive_loop(auth, model, max_tokens, custom_system, message);
     }
 
     const json messages = json::array({{{"role", "user"}, {"content", message}}});
-    return send_conversation(auth, model, max_tokens, messages).exit_code;
+    return send_conversation(auth, model, max_tokens, messages, custom_system).exit_code;
 }
