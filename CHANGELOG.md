@@ -6,6 +6,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-04-14
+
+### Changed
+- Running `claude` with no message or `-i` flag now drops directly
+  into interactive mode when stdin is a terminal. `-i` becomes a
+  formality in the common case; piped/redirected invocations still
+  hit the usage error path so scripts fail loudly on empty input.
+- REPL user prompt simplified from `you> ` to `> ` (bold cyan), to
+  match Claude Code and most modern TUIs. The `claude> ` response
+  prompt stays (bold magenta) so turns are still visually distinct.
+
 ## [0.8.0] - 2026-04-14
 
 ### Added
