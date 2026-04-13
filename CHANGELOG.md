@@ -4,6 +4,21 @@ All notable changes to this project are recorded here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `-s/--system TEXT` — custom system prompt. When OAuth is used the
+  required Claude Code prefix is preserved and the user text is
+  appended; with an API key the user text is used verbatim.
+- `-u/--usage` — after the response, print input/output token counts
+  to stderr (`[usage] input: N tokens  output: M tokens`).
+- `-r/--resume` — preload the REPL with the last saved session from
+  `~/config/settings/claude-cli/history.json` (Haiku) or the XDG path
+  elsewhere. Implies `-i`. Conversation history is auto-saved after
+  every successful turn.
+- `CHANGELOG.md` following Keep a Changelog; release notes on
+  Gitea releases are now extracted from it automatically.
+
 ## [0.1.1] - 2026-04-13
 
 ### Added
