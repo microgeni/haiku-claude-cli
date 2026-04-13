@@ -12,8 +12,8 @@ JSON_CFLAGS    := $(shell $(PKG_CONFIG) --cflags nlohmann_json 2>/dev/null)
 OPENSSL_CFLAGS := $(shell $(PKG_CONFIG) --cflags openssl     2>/dev/null)
 OPENSSL_LIBS   := $(shell $(PKG_CONFIG) --libs   openssl     2>/dev/null || echo -lssl -lcrypto)
 
-CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS)
-LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS)
+CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) -pthread
+LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) -pthread
 
 SRCDIR   := src
 BUILDDIR := build

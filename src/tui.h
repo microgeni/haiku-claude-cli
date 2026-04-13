@@ -1,7 +1,11 @@
 #ifndef HAIKU_CLAUDE_CLI_TUI_H
 #define HAIKU_CLAUDE_CLI_TUI_H
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace tui {
 
@@ -31,6 +35,26 @@ std::string user_prompt();            // "you> "
 std::string claude_prompt();          // "claude> "
 std::string meta(const std::string& s); // dim bracketed note
 std::string error_label();            // bold red "error:"
+
+// Animated "thinking..." indicator. Spawns a background thread that
+// writes dimmed spinner frames to stdout until stop() (or destruction).
+// No-op when color is disabled or stdout is not a TTY.
+class Spinner {
+public:
+    explicit Spinner(std::string label);
+    ~Spinner();
+    Spinner(const Spinner&) = delete;
+    Spinner& operator=(const Spinner&) = delete;
+    void stop();
+private:
+    void run();
+    std::string             label_;
+    std::atomic<bool>       stopping_{false};
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    std::thread             thread_;
+    bool                    active_ = false;
+};
 
 } // namespace tui
 

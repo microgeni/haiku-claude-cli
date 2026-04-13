@@ -98,14 +98,15 @@ struct Auth {
 };
 
 struct StreamState {
-    std::string sse_buffer;
-    std::string raw_buffer;
-    std::string text;
-    int         input_tokens        = 0;
-    int         output_tokens       = 0;
-    bool        saw_text            = false;
-    bool        stream_error        = false;
-    std::string stream_error_message;
+    std::string   sse_buffer;
+    std::string   raw_buffer;
+    std::string   text;
+    int           input_tokens        = 0;
+    int           output_tokens       = 0;
+    bool          saw_text            = false;
+    bool          stream_error        = false;
+    std::string   stream_error_message;
+    tui::Spinner* spinner             = nullptr;
 };
 
 struct SendResult {
@@ -137,6 +138,10 @@ void process_sse_event(const std::string& event, StreamState* state) {
             const auto& delta = j["delta"];
             if (delta.value("type", "") == "text_delta") {
                 const std::string chunk = delta.value("text", "");
+                if (state->spinner) {
+                    state->spinner->stop();
+                    state->spinner = nullptr;
+                }
                 std::cout << chunk << std::flush;
                 state->text += chunk;
                 state->saw_text = true;
@@ -269,6 +274,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     headers = curl_slist_append(headers, "accept: text/event-stream");
 
     StreamState state;
+    tui::Spinner spinner("thinking");
+    state.spinner = &spinner;
+
     curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
@@ -278,6 +286,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli/0.1");
 
     const CURLcode res = curl_easy_perform(curl);
+    spinner.stop();
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
     curl_slist_free_all(headers);
