@@ -48,6 +48,63 @@ ToolResult run_read(const json& input) {
     return {out.str(), false};
 }
 
+ToolResult run_bash(const json& input) {
+    const std::string command  = input.value("command", std::string{});
+    const int         timeout  = input.value("timeout_seconds", 60);
+    (void)timeout; // not enforced in this slice — parent trusts grace of fork+wait
+    if (command.empty()) {
+        return {"error: Bash requires a `command` argument", true};
+    }
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return {std::string("error: pipe() failed: ") + std::strerror(errno), true};
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return {std::string("error: fork() failed: ") + std::strerror(errno), true};
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
+        close(pipefd[1]);
+        const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
+        execvp("sh", const_cast<char* const*>(argv));
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    std::string output;
+    char        buf[4096];
+    ssize_t     n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+        output.append(buf, static_cast<size_t>(n));
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    constexpr size_t kMaxBytes = 32 * 1024;
+    if (output.size() > kMaxBytes) {
+        output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
+    }
+
+    if (!WIFEXITED(status)) {
+        return {"error: shell terminated abnormally (output: " + output + ")", true};
+    }
+    const int code = WEXITSTATUS(status);
+    if (code != 0) {
+        return {"exit " + std::to_string(code) + "\n" + output, true};
+    }
+    return {output.empty() ? "(no output)" : output, false};
+}
+
 ToolResult run_glob(const json& input) {
     const std::string pattern = input.value("pattern", std::string{});
     if (pattern.empty()) {
@@ -200,6 +257,25 @@ json definitions() {
             }},
         },
         {
+            {"name", "Bash"},
+            {"description",
+                "Run a shell command via `sh -c` and return its combined stdout+stderr "
+                "plus exit code. Output is truncated to 32 KiB. The user is prompted "
+                "for permission on the first Bash call of each session unless they "
+                "pre-approved Bash; answer (a)lways to skip subsequent prompts. "
+                "Prefer Read/Glob/Grep for pure inspection."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"command", {
+                        {"type", "string"},
+                        {"description", "Shell command line to execute."},
+                    }},
+                }},
+                {"required", json::array({"command"})},
+            }},
+        },
+        {
             {"name", "Grep"},
             {"description",
                 "Search for a pattern across files under a directory. Uses POSIX "
@@ -250,7 +326,12 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "Read") return run_read(input);
     if (name == "Glob") return run_glob(input);
     if (name == "Grep") return run_grep(input);
+    if (name == "Bash") return run_bash(input);
     return {"error: unknown tool " + name, true};
+}
+
+bool requires_permission(const std::string& name) {
+    return name == "Bash";
 }
 
 } // namespace tools

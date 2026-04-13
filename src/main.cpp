@@ -12,6 +12,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <unordered_set>
 #include <vector>
 
 #include <curl/curl.h>
@@ -470,6 +471,35 @@ std::string short_input_summary(const json& input) {
     return dumped.substr(0, 77) + "...";
 }
 
+enum class Permission { Allow, Deny };
+
+// Session-scoped allowlist of tool names the user has explicitly
+// approved with "(a)lways".
+std::unordered_set<std::string>& always_allowed() {
+    static std::unordered_set<std::string> s;
+    return s;
+}
+
+Permission prompt_permission(const std::string& tool_name, const json& input) {
+    if (always_allowed().count(tool_name)) return Permission::Allow;
+    if (!tools::requires_permission(tool_name)) return Permission::Allow;
+
+    std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n"
+              << tui::bold("allow " + tool_name + "? ")
+              << tui::dim("(y)es once, (a)lways this session, (n)o: ")
+              << std::flush;
+
+    std::string line;
+    if (!std::getline(std::cin, line)) return Permission::Deny;
+    const char c = line.empty() ? 'n' : static_cast<char>(std::tolower(static_cast<unsigned char>(line[0])));
+    if (c == 'a') {
+        always_allowed().insert(tool_name);
+        return Permission::Allow;
+    }
+    if (c == 'y') return Permission::Allow;
+    return Permission::Deny;
+}
+
 SendResult send_with_tools(const Auth& auth, const std::string& model, int max_tokens,
                            json& messages, const std::string& custom_system) {
     SendResult aggregate;
@@ -502,12 +532,20 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
             const json        tinput = block.value("input", json::object());
 
             std::cout << tui::meta("[tool: " + tname + " " + short_input_summary(tinput) + "]") << "\n";
-            const auto tres = tools::run(tname, tinput);
-            const std::string rsize = std::to_string(tres.content.size());
-            std::cout << tui::meta(tres.is_error
-                                   ? "[tool: " + tname + " -> error]"
-                                   : "[tool: " + tname + " -> " + rsize + " bytes]")
-                      << "\n";
+
+            tools::ToolResult tres;
+            if (prompt_permission(tname, tinput) == Permission::Deny) {
+                tres.content  = "user denied permission to run " + tname;
+                tres.is_error = true;
+                std::cout << tui::meta("[tool: " + tname + " -> denied]") << "\n";
+            } else {
+                tres = tools::run(tname, tinput);
+                const std::string rsize = std::to_string(tres.content.size());
+                std::cout << tui::meta(tres.is_error
+                                       ? "[tool: " + tname + " -> error]"
+                                       : "[tool: " + tname + " -> " + rsize + " bytes]")
+                          << "\n";
+            }
 
             tool_results.push_back({
                 {"type",        "tool_result"},

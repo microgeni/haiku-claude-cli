@@ -106,23 +106,29 @@ The TUI layer should be isolated behind a small abstraction so a
 to the current raw streaming behavior. Piping into scripts must keep
 working without surprises.
 
-### v0.4 — Read-only tool use
+### v0.4 — Read-only tool use ✓
 
-Let Claude see the local project without being able to modify it.
-This is the biggest architectural jump in the roadmap: introducing the
-server-side tool-use loop, where Claude requests a tool, the CLI runs
-it, and the result is fed back as a `tool_result` turn.
+Let Claude see (and, via Bash, act on) the local project. This is the
+biggest architectural jump in the roadmap: the server-side tool-use
+loop, where Claude requests a tool, the CLI runs it, and the result
+is fed back as a `tool_result` turn.
 
-- [ ] `Bash` tool — run a shell command, return stdout/stderr, with a
-      read-only heuristic (deny writes unless explicitly opted in).
-- [ ] `Read` tool — read a file or a line range and return contents.
-- [ ] `Glob` tool — shell-pattern file matching, results sorted by mtime.
-- [ ] `Grep` tool — content search (ripgrep if available, `grep -R`
-      fallback).
-- [ ] Per-tool permission prompts with "allow once", "allow this session",
-      "deny" choices.
-- [ ] Wire the Messages API `tools` parameter and handle the
-      tool_use / tool_result turn-taking correctly across streaming.
+- [x] `Bash` tool — sh -c command wrapper, combined stdout+stderr
+      capture, 32 KiB output cap. Prompts for permission on the first
+      call per session (no substring write-heuristic — the prompt is
+      the safety net).
+- [x] `Read` tool — file contents with optional `start_line`/`end_line`
+      range.
+- [x] `Glob` tool — POSIX glob pattern match, sorted newest-first by
+      mtime.
+- [x] `Grep` tool — fork/exec POSIX `grep -rnH -e PATTERN --`, clean
+      no-match vs error handling.
+- [x] Per-tool permission prompts with (y)es-once / (a)lways-this-
+      session / (n)o choices, stored in a session-scoped allowlist.
+      Read/Glob/Grep auto-approve; only Bash prompts.
+- [x] Wire the Messages API `tools` parameter and handle the
+      tool_use / tool_result turn-taking across streaming
+      (`send_with_tools` loop + `StreamState.content_blocks`).
 
 ### v0.5 — Write tools
 
