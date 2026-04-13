@@ -27,6 +27,7 @@ DEPS := $(OBJS:.o=.d)
 
 PREFIX  ?= /boot/system/non-packaged
 BINDIR  ?= $(PREFIX)/bin
+MANDIR  ?= $(PREFIX)/documentation/man/man1
 
 PKG_NAME    ?= claude_cli
 PKG_VERSION ?= 0.1.0
@@ -54,18 +55,21 @@ clean:
 install: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/claude
+	install -d $(DESTDIR)$(MANDIR)
+	install -m 644 docs/claude.1 $(DESTDIR)$(MANDIR)/claude.1
 
 # Build a Haiku HPKG. Requires Haiku's `package` tool.
 package: $(PKG_FILE)
 
-$(PKG_FILE): $(BIN) .PackageInfo.in | $(BUILDDIR)
+$(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@command -v package >/dev/null 2>&1 || { \
 	    echo "error: 'package' command not found — HPKG build requires Haiku."; \
 	    exit 1; \
 	}
 	rm -rf "$(PKG_STAGE)"
-	mkdir -p "$(PKG_STAGE)/bin"
+	mkdir -p "$(PKG_STAGE)/bin" "$(PKG_STAGE)/documentation/man/man1"
 	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
+	cp docs/claude.1 "$(PKG_STAGE)/documentation/man/man1/claude.1"
 	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
 	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
 	    .PackageInfo.in > "$(PKG_STAGE)/.PackageInfo"

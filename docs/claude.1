@@ -1,0 +1,231 @@
+.TH CLAUDE 1 "April 2026" "haiku-claude-cli" "User Commands"
+.SH NAME
+claude \- command-line client for Anthropic's Claude on Haiku
+.SH SYNOPSIS
+.B claude
+.RI [ OPTIONS ]
+.RI [ MESSAGE ...]
+.br
+.B claude
+.I login
+.br
+.B claude
+.I logout
+.SH DESCRIPTION
+.B claude
+is a native Haiku command-line client for Anthropic's Claude API with
+streaming responses, OAuth 2.0 authentication against claude.ai (Pro/Max
+subscription) or API-key authentication, an interactive REPL, built-in
+tools (Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch, Task,
+TodoWrite/TodoRead), MCP (Model Context Protocol) server integration,
+shell-command lifecycle hooks, project memory via
+.IR CLAUDE.md ,
+custom slash commands, and more.
+.PP
+Running
+.B claude
+with no arguments in a terminal drops directly into interactive mode.
+In a non-interactive context (pipe, redirect, cron), a message must be
+provided on the command line or piped in via stdin.
+.SH COMMANDS
+.TP
+.B login
+Authenticate against claude.ai using OAuth 2.0 + PKCE. Opens a browser
+for authorization and saves the returned tokens to
+.IR ~/config/settings/claude-cli/credentials.json .
+.TP
+.B logout
+Delete the stored OAuth credentials.
+.SH OPTIONS
+.TP
+.B \-i, \-\-interactive
+Start a multi-turn REPL session (the default when
+.B claude
+is invoked with no message at a terminal).
+.TP
+.BI \-m " MODEL" ", \-\-model " MODEL
+Override the default model (claude-sonnet-4-6).
+.TP
+.BI \-t " N" ", \-\-max-tokens " N
+Set the maximum tokens in the response (default 1024).
+.TP
+.BI \-s " TEXT" ", \-\-system " TEXT
+Append a custom system prompt. With OAuth, the required Claude Code
+preamble is preserved and this text is appended after it.
+.TP
+.B \-u, \-\-usage
+After a one-shot response, print input/output token counts to stderr.
+.TP
+.B \-r, \-\-resume
+Pre-load the REPL with the last saved session (implies
+.BR \-i ).
+.TP
+.B \-\-plain
+Disable ANSI color output.
+.TP
+.B \-\-color
+Force ANSI color output even when piped.
+.TP
+.B \-V, \-\-version
+Print the version and exit.
+.TP
+.B \-h, \-\-help
+Print usage and exit.
+.SH SLASH COMMANDS
+Inside the REPL:
+.TP
+.B /help
+Show the list of slash commands (built-in and custom).
+.TP
+.B /clear
+Reset the running conversation.
+.TP
+.BI /model " NAME"
+Swap the active model mid-session.
+.TP
+.B /compact
+Ask Claude to summarize the running history and replace it with the
+summary.
+.TP
+.B /cost
+Session token cost estimate based on the config's price table.
+.TP
+.B /todos
+Show the current in-session todo list.
+.TP
+.BR /memory " [user]"
+Open the project or user
+.I CLAUDE.md
+in
+.B $EDITOR
+(falls back to nano). Memory is reloaded on the next turn.
+.TP
+.B /exit, /quit
+Leave the REPL (Ctrl+D also works).
+.PP
+User-defined slash commands may live in
+.I .claude/commands/*.md
+(project) or
+.I ~/config/settings/claude-cli/commands/*.md
+(user). The filename minus
+.I .md
+becomes the command name; the body is a prompt template with
+.I {{args}}
+substituted from the text following the command invocation.
+.SH CONFIGURATION
+.B claude
+reads an optional JSON config file at
+.IR ~/config/settings/claude-cli/config.json .
+Recognized keys:
+.TP
+.I model
+Default model string.
+.TP
+.I max_tokens
+Default response token cap.
+.TP
+.I system
+Default custom system prompt.
+.TP
+.I show_usage
+Boolean; default for
+.BR \-\-usage .
+.TP
+.I prices
+Object keyed by model name with
+.RB { input ", " output }
+per-million-token prices (dollars) for
+.BR /cost .
+.TP
+.I hooks
+Object keyed by event name with arrays of
+.RB { matcher ?, command }
+entries. Event names:
+.BR SessionStart ,
+.BR UserPromptSubmit ,
+.BR PreToolUse ,
+.BR PostToolUse ,
+.BR Stop .
+Each hook runs as
+.IR "sh -c <command>"
+with a JSON event payload on stdin. A non-zero exit blocks the next
+action.
+.TP
+.I mcp_servers
+Object keyed by server name with
+.RB { command ", " args ", " env }
+entries. Each named server is spawned as a subprocess over stdio
+JSON-RPC 2.0, initialized via the MCP handshake, and its tools are
+advertised to Claude as
+.IR mcp__<server>__<tool> .
+.SH FILES
+.TP
+.I ~/config/settings/claude-cli/config.json
+Per-user configuration.
+.TP
+.I ~/config/settings/claude-cli/credentials.json
+OAuth tokens (0600).
+.TP
+.I ~/config/settings/claude-cli/history.json
+Most recent REPL conversation history for
+.BR \-\-resume .
+.TP
+.I ~/config/settings/claude-cli/repl_history
+Persistent line-editing history for the REPL prompt.
+.TP
+.I ~/config/settings/claude-cli/CLAUDE.md
+User-level project memory.
+.TP
+.I ./CLAUDE.md
+Project memory loaded from the current working directory.
+.TP
+.I .claude/commands/*.md
+Project-scoped custom slash commands.
+.SH ENVIRONMENT
+.TP
+.B ANTHROPIC_API_KEY
+Falls back to API-key billing when no OAuth tokens are stored.
+.TP
+.B BRAVE_SEARCH_API_KEY
+Enables the WebSearch tool via the Brave Search API.
+.TP
+.B EDITOR
+Editor launched by the
+.B /memory
+slash command.
+.TP
+.B NO_COLOR, CLICOLOR, TERM
+Honored by the ANSI-color detection.
+.TP
+.B XDG_CONFIG_HOME
+Overrides the user config directory location on non-Haiku builds.
+.SH EXAMPLES
+.PP
+One-shot query:
+.PP
+.RS
+.nf
+claude "Give me a one-paragraph history of BeOS."
+.fi
+.RE
+.PP
+Pipe context in:
+.PP
+.RS
+.nf
+cat README.md | claude "Summarize this in three bullets."
+.fi
+.RE
+.PP
+Interactive session resumed from last time:
+.PP
+.RS
+.nf
+claude \-r
+.fi
+.RE
+.SH SEE ALSO
+.UR https://gitea.microgeni.synology.me/daniel/haiku-claude-cli
+.UE
+.SH AUTHOR
+Daniel Benjaminsson <daniel@microgeni.se>
