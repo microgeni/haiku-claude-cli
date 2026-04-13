@@ -19,6 +19,7 @@
 
 #include "oauth.h"
 #include "repl.h"
+#include "tools.h"
 #include "tui.h"
 
 using json = nlohmann::json;
@@ -176,13 +177,24 @@ struct StreamState {
     std::string          stream_error_message;
     tui::Spinner*        spinner             = nullptr;
     tui::MarkdownRenderer renderer;
+
+    // Structured content accumulation for tool-use support.
+    std::vector<json>    content_blocks;           // finalized text + tool_use blocks
+    std::string          current_type;             // "text" / "tool_use" while streaming a block
+    std::string          current_text;
+    std::string          current_tool_id;
+    std::string          current_tool_name;
+    std::string          current_tool_input_raw;   // partial JSON being accumulated
+    std::string          stop_reason;              // set via message_delta
 };
 
 struct SendResult {
-    int         exit_code = 0;
-    std::string assistant_text;
-    int         input_tokens  = 0;
-    int         output_tokens = 0;
+    int                exit_code = 0;
+    std::string        assistant_text;
+    int                input_tokens  = 0;
+    int                output_tokens = 0;
+    std::vector<json>  content_blocks;
+    std::string        stop_reason;
 };
 
 void process_sse_event(const std::string& event, StreamState* state) {
@@ -203,21 +215,67 @@ void process_sse_event(const std::string& event, StreamState* state) {
         const json j = json::parse(data);
         const std::string type = j.value("type", "");
 
-        if (type == "content_block_delta") {
-            const auto& delta = j["delta"];
-            if (delta.value("type", "") == "text_delta") {
+        if (type == "content_block_start") {
+            const auto& cb = j.value("content_block", json::object());
+            state->current_type = cb.value("type", std::string{});
+            state->current_text.clear();
+            state->current_tool_id.clear();
+            state->current_tool_name.clear();
+            state->current_tool_input_raw.clear();
+            if (state->current_type == "tool_use") {
+                state->current_tool_id   = cb.value("id",   std::string{});
+                state->current_tool_name = cb.value("name", std::string{});
+            }
+        } else if (type == "content_block_delta") {
+            const auto& delta = j.value("delta", json::object());
+            const std::string dtype = delta.value("type", std::string{});
+            if (dtype == "text_delta") {
                 const std::string chunk = delta.value("text", "");
                 state->renderer.write(chunk);
+                state->current_text += chunk;
                 state->text += chunk;
                 state->saw_text = true;
+            } else if (dtype == "input_json_delta") {
+                state->current_tool_input_raw += delta.value("partial_json", "");
             }
+        } else if (type == "content_block_stop") {
+            if (state->current_type == "text") {
+                state->content_blocks.push_back({
+                    {"type", "text"},
+                    {"text", state->current_text},
+                });
+            } else if (state->current_type == "tool_use") {
+                json parsed_input = json::object();
+                try {
+                    if (!state->current_tool_input_raw.empty()) {
+                        parsed_input = json::parse(state->current_tool_input_raw);
+                    }
+                } catch (const json::exception&) {
+                    parsed_input = json::object();
+                }
+                state->content_blocks.push_back({
+                    {"type",  "tool_use"},
+                    {"id",    state->current_tool_id},
+                    {"name",  state->current_tool_name},
+                    {"input", parsed_input},
+                });
+            }
+            state->current_type.clear();
         } else if (type == "message_start") {
+            if (state->spinner) {
+                state->spinner->stop();
+                state->spinner = nullptr;
+            }
             if (j.contains("message") && j["message"].contains("usage")) {
                 const auto& u = j["message"]["usage"];
                 state->input_tokens  = u.value("input_tokens",  0);
                 state->output_tokens = u.value("output_tokens", 0);
             }
         } else if (type == "message_delta") {
+            if (j.contains("delta") && j["delta"].contains("stop_reason")
+                && j["delta"]["stop_reason"].is_string()) {
+                state->stop_reason = j["delta"]["stop_reason"].get<std::string>();
+            }
             if (j.contains("usage")) {
                 const auto& u = j["usage"];
                 state->output_tokens = u.value("output_tokens", state->output_tokens);
@@ -302,11 +360,12 @@ Auth resolve_auth() {
 }
 
 SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens,
-                             const json& messages, const std::string& custom_system) {
+                             const json& messages, const std::string& custom_system,
+                             bool include_tools) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::cerr << "error: curl_easy_init failed\n";
-        return {1, {}};
+        return {1, {}, 0, 0, {}, {}};
     }
 
     json body = {
@@ -315,6 +374,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         {"stream",     true},
         {"messages",   messages},
     };
+    if (include_tools) {
+        body["tools"] = tools::definitions();
+    }
 
     std::string system_prompt;
     if (auth.kind == AuthKind::OAuth) {
@@ -369,34 +431,98 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     if (g_interrupted) {
         state.renderer.flush();
         std::cout << "\n" << tui::meta("[interrupted]") << "\n";
-        return {1, state.text, state.input_tokens, state.output_tokens};
+        return {1, state.text, state.input_tokens, state.output_tokens,
+                state.content_blocks, state.stop_reason};
     }
 
     if (res != CURLE_OK) {
         std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
-        return {1, {}};
+        return {1, {}, 0, 0, {}, {}};
     }
 
     if (http_status < 200 || http_status >= 300) {
         std::cerr << "\nerror: API returned HTTP " << http_status << "\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
-        return {1, {}};
+        return {1, {}, 0, 0, {}, {}};
     }
 
     if (state.stream_error) {
         std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
-        return {1, state.text, state.input_tokens, state.output_tokens};
+        return {1, state.text, state.input_tokens, state.output_tokens,
+                state.content_blocks, state.stop_reason};
     }
 
-    if (!state.saw_text) {
-        std::cerr << "error: no text received in stream\n";
+    if (state.content_blocks.empty()) {
+        std::cerr << "error: no content received in stream\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
-        return {1, {}, 0, 0};
+        return {1, {}, 0, 0, {}, {}};
     }
 
     state.renderer.flush();
     std::cout << "\n";
-    return {0, state.text, state.input_tokens, state.output_tokens};
+    return {0, state.text, state.input_tokens, state.output_tokens,
+            state.content_blocks, state.stop_reason};
+}
+
+std::string short_input_summary(const json& input) {
+    const std::string dumped = input.dump();
+    if (dumped.size() <= 80) return dumped;
+    return dumped.substr(0, 77) + "...";
+}
+
+SendResult send_with_tools(const Auth& auth, const std::string& model, int max_tokens,
+                           json& messages, const std::string& custom_system) {
+    SendResult aggregate;
+    aggregate.exit_code = 0;
+
+    while (true) {
+        SendResult result = send_conversation(auth, model, max_tokens, messages,
+                                              custom_system, /*include_tools=*/true);
+        aggregate.input_tokens  += result.input_tokens;
+        aggregate.output_tokens += result.output_tokens;
+        aggregate.assistant_text = result.assistant_text;
+        aggregate.stop_reason    = result.stop_reason;
+
+        if (result.exit_code != 0) {
+            aggregate.exit_code = result.exit_code;
+            return aggregate;
+        }
+
+        messages.push_back({{"role", "assistant"}, {"content", result.content_blocks}});
+
+        if (result.stop_reason != "tool_use") {
+            return aggregate;
+        }
+
+        json tool_results = json::array();
+        for (const auto& block : result.content_blocks) {
+            if (block.value("type", "") != "tool_use") continue;
+            const std::string tname = block.value("name", std::string{});
+            const std::string tid   = block.value("id",   std::string{});
+            const json        tinput = block.value("input", json::object());
+
+            std::cout << tui::meta("[tool: " + tname + " " + short_input_summary(tinput) + "]") << "\n";
+            const auto tres = tools::run(tname, tinput);
+            const std::string rsize = std::to_string(tres.content.size());
+            std::cout << tui::meta(tres.is_error
+                                   ? "[tool: " + tname + " -> error]"
+                                   : "[tool: " + tname + " -> " + rsize + " bytes]")
+                      << "\n";
+
+            tool_results.push_back({
+                {"type",        "tool_result"},
+                {"tool_use_id", tid},
+                {"content",     tres.content},
+                {"is_error",    tres.is_error},
+            });
+        }
+
+        if (tool_results.empty()) {
+            // stop_reason said tool_use but no tool_use blocks — bail to avoid a loop.
+            return aggregate;
+        }
+        messages.push_back({{"role", "user"}, {"content", tool_results}});
+    }
 }
 
 void print_usage_line(const SendResult& result) {
@@ -513,7 +639,8 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
         });
         std::cout << "\n" << tui::claude_prompt();
         const auto result = send_conversation(ctx.auth, ctx.model, ctx.max_tokens,
-                                              request_messages, ctx.custom_system);
+                                              request_messages, ctx.custom_system,
+                                              /*include_tools=*/false);
         std::cout << "\n";
         if (result.exit_code != 0) {
             std::cout << tui::meta("[compact failed]") << "\n";
@@ -597,17 +724,19 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
         }
 
         repl::record(line);
+
+        const json snapshot = messages;
         messages.push_back({{"role", "user"}, {"content", line}});
 
         std::cout << "\n" << tui::claude_prompt();
         const auto turn_start = std::chrono::steady_clock::now();
-        const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
+        const auto result = send_with_tools(auth, model, max_tokens, messages, custom_system);
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - turn_start).count();
         std::cout << "\n";
 
         if (result.exit_code != 0) {
-            messages.erase(messages.end() - 1);
+            messages = snapshot;
             continue;
         }
 
@@ -623,7 +752,6 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
             result.output_tokens, session_output);
         std::cout << tui::meta(status) << "\n";
 
-        messages.push_back({{"role", "assistant"}, {"content", result.assistant_text}});
         save_history(messages, model);
     }
     return 0;
@@ -766,8 +894,8 @@ int main(int argc, char* argv[]) {
     }
 
     InterruptGuard interrupt_guard;
-    const json messages = json::array({{{"role", "user"}, {"content", message}}});
-    const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
+    json messages = json::array({{{"role", "user"}, {"content", message}}});
+    const auto result = send_with_tools(auth, model, max_tokens, messages, custom_system);
     if (show_usage) {
         print_usage_line(result);
     }
