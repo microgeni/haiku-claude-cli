@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include <curl/curl.h>
+
 #include "mcp.h"
 
 namespace tools {
@@ -259,6 +261,62 @@ std::string preview_edit(const json& input) {
     return body.str();
 }
 
+size_t append_to_string(void* ptr, size_t size, size_t nmemb, void* userp) {
+    auto* out = static_cast<std::string*>(userp);
+    out->append(static_cast<char*>(ptr), size * nmemb);
+    return size * nmemb;
+}
+
+ToolResult run_webfetch(const json& input) {
+    const std::string url = input.value("url", std::string{});
+    if (url.empty()) {
+        return {"error: WebFetch requires a `url` argument", true};
+    }
+    const int max_bytes = input.value("max_bytes", 32 * 1024);
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return {"error: curl_easy_init failed", true};
+
+    std::string body;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_to_string);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli/0.10");
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+    const CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    char* content_type = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type);
+    std::string ct = content_type ? content_type : "";
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return {std::string("error: ") + curl_easy_strerror(res), true};
+    }
+    if (http_code < 200 || http_code >= 400) {
+        return {"error: HTTP " + std::to_string(http_code), true};
+    }
+
+    const bool truncated = static_cast<int>(body.size()) > max_bytes;
+    if (truncated) {
+        body = body.substr(0, static_cast<size_t>(max_bytes));
+    }
+
+    std::string out;
+    out += "HTTP " + std::to_string(http_code);
+    if (!ct.empty()) out += "  (" + ct + ")";
+    out += "\n\n";
+    out += body;
+    if (truncated) out += "\n\n[... truncated at " + std::to_string(max_bytes) + " bytes]";
+    return {out, false};
+}
+
 ToolResult run_bash(const json& input) {
     const std::string command  = input.value("command", std::string{});
     const int         timeout  = input.value("timeout_seconds", 60);
@@ -470,6 +528,28 @@ json builtin_definitions() {
             }},
         },
         {
+            {"name", "WebFetch"},
+            {"description",
+                "Fetch a URL via HTTPS and return the response body. Follows up to "
+                "5 redirects, times out after 30 seconds, and truncates the body to "
+                "`max_bytes` (default 32768). The first line of the result shows "
+                "HTTP status and content-type."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"url", {
+                        {"type", "string"},
+                        {"description", "Absolute URL to fetch."},
+                    }},
+                    {"max_bytes", {
+                        {"type", "integer"},
+                        {"description", "Truncate the body to this many bytes."},
+                    }},
+                }},
+                {"required", json::array({"url"})},
+            }},
+        },
+        {
             {"name", "Edit"},
             {"description",
                 "Replace an exact string in a file with a new string. old_string "
@@ -600,12 +680,13 @@ json definitions() {
 }
 
 ToolResult run(const std::string& name, const json& input) {
-    if (name == "Read")  return run_read(input);
-    if (name == "Glob")  return run_glob(input);
-    if (name == "Grep")  return run_grep(input);
-    if (name == "Bash")  return run_bash(input);
-    if (name == "Write") return run_write(input);
-    if (name == "Edit")  return run_edit(input);
+    if (name == "Read")     return run_read(input);
+    if (name == "Glob")     return run_glob(input);
+    if (name == "Grep")     return run_grep(input);
+    if (name == "Bash")     return run_bash(input);
+    if (name == "Write")    return run_write(input);
+    if (name == "Edit")     return run_edit(input);
+    if (name == "WebFetch") return run_webfetch(input);
     if (auto mcp_res = mcp::run(name, input); mcp_res) return *mcp_res;
     return {"error: unknown tool " + name, true};
 }
