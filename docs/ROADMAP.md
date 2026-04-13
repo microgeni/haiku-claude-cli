@@ -60,10 +60,47 @@ without adding any new capabilities.
       running conversation and replaces history with the summary.
 - [ ] Ctrl+C during a streaming response cancels the in-flight request
       cleanly instead of killing the process.
-- [ ] Optional ANSI color in the REPL prompt with graceful fallback
-      when stdout is not a TTY.
 
-### v0.3 — Read-only tool use
+### v0.3 — Terminal UI polish
+
+The current REPL is `getline` + raw stream output. Claude Code's TUI
+gets a lot of its feel from small things — live markdown rendering,
+a thinking spinner, proper line editing. Match the parts that work on
+Haiku's Terminal app (ANSI + UTF-8, 256 colors, no sixel/kitty).
+
+- [ ] **Markdown rendering** in assistant output: bold, italic, inline
+      code, code blocks with language label, bullet lists, headings.
+      Falls back to raw text when stdout isn't a TTY so piped output
+      stays scriptable.
+- [ ] **Syntax-highlighted code blocks** — minimal tokenizer per
+      language (C/C++, Python, shell, JSON to start), ANSI 256-color
+      theme, auto-detected from the code block's language label.
+- [ ] **Line editing via libedit/readline** — arrow-key navigation,
+      in-memory history, emacs-style bindings, persisted REPL history
+      at `~/config/settings/claude-cli/repl_history`.
+- [ ] **Multi-line input** — trailing backslash (or `"""` fence) opens
+      a continuation prompt for pasting multi-paragraph messages.
+- [ ] **Live status line** at the bottom of the REPL frame showing
+      model, turn count, token totals, and elapsed time of the
+      in-flight request. Disappears cleanly when the session exits.
+- [ ] **Thinking spinner** between request submit and first token,
+      erased automatically when the stream starts.
+- [ ] **Distinct turn styling** — color and bold for `you>` / `claude>`
+      prompts, dim for meta notes like `[resumed N messages]`. Honors
+      `NO_COLOR` and non-TTY stdout.
+- [ ] **Terminal resize handling** — redraw status line on SIGWINCH.
+- [ ] **Theme awareness** — detect dark vs light background (or read a
+      `theme` key from config.json) and pick a color palette that
+      stays readable on both.
+- [ ] **Unicode box-drawing frame** around the REPL (optional, toggled
+      by a config key).
+
+The TUI layer should be isolated behind a small abstraction so a
+`--plain` flag or a non-TTY stdout disables it entirely and falls back
+to the current raw streaming behavior. Piping into scripts must keep
+working without surprises.
+
+### v0.4 — Read-only tool use
 
 Let Claude see the local project without being able to modify it.
 This is the biggest architectural jump in the roadmap: introducing the
@@ -81,7 +118,7 @@ it, and the result is fed back as a `tool_result` turn.
 - [ ] Wire the Messages API `tools` parameter and handle the
       tool_use / tool_result turn-taking correctly across streaming.
 
-### v0.4 — Write tools
+### v0.5 — Write tools
 
 Claude can now modify files — with safety rails.
 
@@ -92,7 +129,7 @@ Claude can now modify files — with safety rails.
 - [ ] Auto-deny writes outside the current working directory unless
       the user opts in.
 
-### v0.5 — Project memory
+### v0.6 — Project memory
 
 Absorb per-project context without pasting it every turn.
 
@@ -104,7 +141,7 @@ Absorb per-project context without pasting it every turn.
 - [ ] `/memory` slash command to open the project `CLAUDE.md` in
       `$EDITOR`.
 
-### v0.6 — Slash commands (custom + built-in polish)
+### v0.7 — Slash commands (custom + built-in polish)
 
 - [ ] Namespace for built-in commands (`/help`, `/model`, `/cost`,
       `/clear`, `/compact`, `/memory`).
@@ -113,7 +150,7 @@ Absorb per-project context without pasting it every turn.
 - [ ] Argument support in custom commands via `{{args}}` substitution.
 - [ ] Tab completion in the REPL for slash command names.
 
-### v0.7 — Hooks
+### v0.8 — Hooks
 
 Let the user react to lifecycle events with plain shell scripts.
 
@@ -124,7 +161,7 @@ Let the user react to lifecycle events with plain shell scripts.
       payload; non-zero exit or specific output can block a tool call
       or inject extra context.
 
-### v0.8 — MCP (Model Context Protocol)
+### v0.9 — MCP (Model Context Protocol)
 
 Interoperate with MCP servers so every MCP tool is available to this
 CLI.
@@ -135,7 +172,7 @@ CLI.
       Messages API `tools` array.
 - [ ] HTTP/SSE transport for remote MCP servers (follow-up).
 
-### v0.9 — Advanced built-ins
+### v0.10 — Advanced built-ins
 
 Fill in the remaining Claude Code tools that make sense on a personal
 dev machine.
