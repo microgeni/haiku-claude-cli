@@ -62,6 +62,7 @@ private:
     void render_inline(const std::string& text);
 
     std::string line_buffer_;
+    std::string code_block_lang_;
     bool        in_code_block_     = false;
     bool        first_output_done_ = false;
     Spinner*    spinner_           = nullptr;

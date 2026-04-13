@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <iostream>
 #include <unistd.h>
+#include <unordered_set>
 
 namespace tui {
 namespace {
@@ -72,6 +73,224 @@ std::string meta(const std::string& s) {
 std::string error_label() {
     return wrap("\x1b[1;31m", "error:");
 }
+
+namespace {
+
+struct LangSpec {
+    const std::unordered_set<std::string>* keywords = nullptr;
+    bool has_slash_comment = false;  // //
+    bool has_hash_comment  = false;  // #
+    bool has_block_comment = false;  // /* */
+    bool has_single_string = false;  // '...'
+    bool has_numbers       = true;
+    bool has_preprocessor  = false;  // C/C++ #include etc.
+};
+
+const std::unordered_set<std::string>& cpp_keywords() {
+    static const std::unordered_set<std::string> k = {
+        "auto","break","case","catch","char","class","const","constexpr","continue",
+        "default","delete","do","double","else","enum","explicit","extern","false",
+        "float","for","friend","goto","if","inline","int","long","namespace","new",
+        "noexcept","nullptr","operator","private","protected","public","return",
+        "short","signed","sizeof","static","static_cast","struct","switch","template",
+        "this","throw","true","try","typedef","typename","union","unsigned","using",
+        "virtual","void","volatile","while","bool","wchar_t","char16_t","char32_t",
+        "size_t","ssize_t","int8_t","int16_t","int32_t","int64_t","uint8_t","uint16_t",
+        "uint32_t","uint64_t","std"
+    };
+    return k;
+}
+
+const std::unordered_set<std::string>& py_keywords() {
+    static const std::unordered_set<std::string> k = {
+        "False","None","True","and","as","assert","async","await","break","class",
+        "continue","def","del","elif","else","except","finally","for","from","global",
+        "if","import","in","is","lambda","nonlocal","not","or","pass","raise","return",
+        "try","while","with","yield","self"
+    };
+    return k;
+}
+
+const std::unordered_set<std::string>& sh_keywords() {
+    static const std::unordered_set<std::string> k = {
+        "if","then","else","elif","fi","case","esac","for","while","do","done","in",
+        "function","select","until","return","break","continue","local","export",
+        "readonly","unset","set","shift","trap","true","false"
+    };
+    return k;
+}
+
+const std::unordered_set<std::string>& rust_keywords() {
+    static const std::unordered_set<std::string> k = {
+        "as","async","await","break","const","continue","crate","dyn","else","enum",
+        "extern","false","fn","for","if","impl","in","let","loop","match","mod",
+        "move","mut","pub","ref","return","self","Self","static","struct","super",
+        "trait","true","type","unsafe","use","where","while"
+    };
+    return k;
+}
+
+const std::unordered_set<std::string>& json_keywords() {
+    static const std::unordered_set<std::string> k = { "true","false","null" };
+    return k;
+}
+
+bool lookup_lang(const std::string& lang, LangSpec& spec) {
+    const std::string l = [&]{
+        std::string s = lang;
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    }();
+
+    if (l == "cpp" || l == "c++" || l == "cxx" || l == "hpp" || l == "hxx" ||
+        l == "c"   || l == "h") {
+        spec.keywords        = &cpp_keywords();
+        spec.has_slash_comment = true;
+        spec.has_block_comment = true;
+        spec.has_single_string = true;
+        spec.has_preprocessor  = true;
+        return true;
+    }
+    if (l == "py" || l == "python") {
+        spec.keywords          = &py_keywords();
+        spec.has_hash_comment  = true;
+        spec.has_single_string = true;
+        return true;
+    }
+    if (l == "sh" || l == "bash" || l == "zsh" || l == "shell") {
+        spec.keywords          = &sh_keywords();
+        spec.has_hash_comment  = true;
+        spec.has_single_string = true;
+        spec.has_numbers       = false;
+        return true;
+    }
+    if (l == "rust" || l == "rs") {
+        spec.keywords          = &rust_keywords();
+        spec.has_slash_comment = true;
+        spec.has_block_comment = true;
+        return true;
+    }
+    if (l == "json") {
+        spec.keywords = &json_keywords();
+        return true;
+    }
+    return false;
+}
+
+std::string highlight_with(const LangSpec& spec, const std::string& line) {
+    // C/C++ preprocessor: whole line if the first non-ws char is #.
+    if (spec.has_preprocessor) {
+        size_t k = 0;
+        while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+        if (k < line.size() && line[k] == '#') {
+            return std::string("\x1b[35m") + line + "\x1b[39m";
+        }
+    }
+
+    std::string out;
+    out.reserve(line.size() + 32);
+    size_t i = 0;
+
+    auto starts_at = [&](const char* lit) {
+        const size_t n = std::char_traits<char>::length(lit);
+        return i + n <= line.size() && line.compare(i, n, lit) == 0;
+    };
+
+    while (i < line.size()) {
+        // Line comments
+        if (spec.has_slash_comment && starts_at("//")) {
+            out += "\x1b[2;90m";
+            out += line.substr(i);
+            out += "\x1b[0m";
+            break;
+        }
+        if (spec.has_hash_comment && line[i] == '#') {
+            out += "\x1b[2;90m";
+            out += line.substr(i);
+            out += "\x1b[0m";
+            break;
+        }
+        // Block comment opener — color to end of line (line-local).
+        if (spec.has_block_comment && starts_at("/*")) {
+            out += "\x1b[2;90m";
+            const size_t close = line.find("*/", i + 2);
+            if (close == std::string::npos) {
+                out += line.substr(i);
+                out += "\x1b[0m";
+                break;
+            }
+            out += line.substr(i, close + 2 - i);
+            out += "\x1b[0m";
+            i = close + 2;
+            continue;
+        }
+        // Double-quoted string
+        if (line[i] == '"') {
+            const size_t start = i++;
+            while (i < line.size() && line[i] != '"') {
+                if (line[i] == '\\' && i + 1 < line.size()) ++i;
+                ++i;
+            }
+            if (i < line.size()) ++i;
+            out += "\x1b[32m";
+            out += line.substr(start, i - start);
+            out += "\x1b[39m";
+            continue;
+        }
+        // Single-quoted string / char literal
+        if (spec.has_single_string && line[i] == '\'') {
+            const size_t start = i++;
+            while (i < line.size() && line[i] != '\'') {
+                if (line[i] == '\\' && i + 1 < line.size()) ++i;
+                ++i;
+            }
+            if (i < line.size()) ++i;
+            out += "\x1b[32m";
+            out += line.substr(start, i - start);
+            out += "\x1b[39m";
+            continue;
+        }
+        // Numbers
+        if (spec.has_numbers && std::isdigit(static_cast<unsigned char>(line[i]))) {
+            const size_t start = i;
+            while (i < line.size()
+                   && (std::isalnum(static_cast<unsigned char>(line[i]))
+                       || line[i] == '.' || line[i] == '_')) ++i;
+            out += "\x1b[36m";
+            out += line.substr(start, i - start);
+            out += "\x1b[39m";
+            continue;
+        }
+        // Identifiers → keywords
+        if (std::isalpha(static_cast<unsigned char>(line[i])) || line[i] == '_') {
+            const size_t start = i;
+            while (i < line.size()
+                   && (std::isalnum(static_cast<unsigned char>(line[i])) || line[i] == '_')) ++i;
+            const std::string word = line.substr(start, i - start);
+            if (spec.keywords && spec.keywords->count(word)) {
+                out += "\x1b[1;35m";
+                out += word;
+                out += "\x1b[22;39m";
+            } else {
+                out += word;
+            }
+            continue;
+        }
+        out += line[i++];
+    }
+    return out;
+}
+
+std::string highlight_code(const std::string& lang, const std::string& line) {
+    LangSpec spec;
+    if (!lookup_lang(lang, spec)) {
+        // Unknown or unspecified language — keep T3's dim green tint.
+        return "\x1b[38;5;114m" + line + "\x1b[0m";
+    }
+    return highlight_with(spec, line);
+}
+
+} // namespace
 
 MarkdownRenderer::MarkdownRenderer() = default;
 
@@ -153,26 +372,27 @@ void MarkdownRenderer::render_inline(const std::string& text) {
 }
 
 void MarkdownRenderer::render_line(const std::string& line) {
-    // Inside a code block, everything passes through with a dim tint
-    // until we see the closing fence.
+    // Inside a code block, highlight per recognized language until we
+    // see the closing fence.
     if (in_code_block_) {
         if (line.size() >= 3 && line.substr(0, 3) == "```") {
-            in_code_block_ = false;
+            in_code_block_   = false;
+            code_block_lang_.clear();
             emit(dim("```") + "\n");
             return;
         }
-        emit("\x1b[38;5;114m" + line + "\x1b[0m\n");
+        emit(highlight_code(code_block_lang_, line) + "\n");
         return;
     }
 
     // Opening code fence.
     if (line.size() >= 3 && line.substr(0, 3) == "```") {
-        in_code_block_ = true;
-        const std::string lang = line.substr(3);
-        if (lang.empty()) {
+        in_code_block_   = true;
+        code_block_lang_ = line.substr(3);
+        if (code_block_lang_.empty()) {
             emit(dim("```") + "\n");
         } else {
-            emit(dim("``` " + lang) + "\n");
+            emit(dim("``` " + code_block_lang_) + "\n");
         }
         return;
     }
