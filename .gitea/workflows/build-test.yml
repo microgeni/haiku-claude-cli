@@ -1,0 +1,129 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  HAIKU_HOST: taurus.microgeni.synology.me
+  HAIKU_USER: user
+  HAIKU_PROJECT_PATH: /Data/Code/Projects/haiku-claude-cli
+  GITEA_REPO_URL: ssh://git@gitea.microgeni.synology.me:2222/daniel/haiku-claude-cli.git
+
+jobs:
+  build:
+    name: Build
+    runs-on: macos-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync to Haiku
+        run: |
+          ssh -o StrictHostKeyChecking=no $HAIKU_USER@$HAIKU_HOST << 'ENDSSH'
+            set -e
+            if [ ! -d "${{ env.HAIKU_PROJECT_PATH }}" ]; then
+              mkdir -p "$(dirname ${{ env.HAIKU_PROJECT_PATH }})"
+              cd "$(dirname ${{ env.HAIKU_PROJECT_PATH }})"
+              git clone ${{ env.GITEA_REPO_URL }} "$(basename ${{ env.HAIKU_PROJECT_PATH }})"
+            fi
+            cd "${{ env.HAIKU_PROJECT_PATH }}"
+            git fetch origin --tags --force
+            REF="${{ github.ref_name }}"
+            if git tag -l "$REF" | grep -q "$REF"; then
+              git checkout -f "$REF"
+            else
+              git checkout -f "$REF" 2>/dev/null || git checkout -b "$REF" "origin/$REF"
+              git reset --hard "origin/$REF"
+            fi
+            git clean -fd
+          ENDSSH
+
+      - name: Compile on Haiku (gcc13)
+        run: |
+          ssh -o StrictHostKeyChecking=no $HAIKU_USER@$HAIKU_HOST << 'ENDSSH'
+            set -e
+            cd "${{ env.HAIKU_PROJECT_PATH }}"
+            echo "=== gcc version ==="
+            gcc --version | head -1
+            echo "=== make clean ==="
+            make clean || true
+            echo "=== make ==="
+            make
+            echo "=== artifact ==="
+            ls -la build/claude
+            file build/claude
+          ENDSSH
+
+  test:
+    name: Test
+    runs-on: macos-arm64
+    needs: build
+    steps:
+      - name: Binary sanity check
+        run: |
+          ssh -o StrictHostKeyChecking=no $HAIKU_USER@$HAIKU_HOST << 'ENDSSH'
+            set -e
+            cd "${{ env.HAIKU_PROJECT_PATH }}"
+            test -x build/claude || { echo "FAIL: build/claude missing or not executable"; exit 1; }
+            file build/claude | grep -q "ELF 64-bit" || { echo "FAIL: not a 64-bit ELF"; exit 1; }
+            file build/claude | grep -q "x86-64"    || { echo "FAIL: not x86-64"; exit 1; }
+            echo "PASS: binary is Haiku x86_64 ELF"
+          ENDSSH
+
+      - name: --help exits 0 and prints usage
+        run: |
+          ssh -o StrictHostKeyChecking=no $HAIKU_USER@$HAIKU_HOST << 'ENDSSH'
+            set -e
+            cd "${{ env.HAIKU_PROJECT_PATH }}"
+            OUT=$(./build/claude --help 2>&1)
+            echo "$OUT" | grep -q "^Usage:" || { echo "FAIL: missing Usage line"; echo "$OUT"; exit 1; }
+            echo "$OUT" | grep -q "login"   || { echo "FAIL: missing login command in help"; exit 1; }
+            echo "$OUT" | grep -q "logout"  || { echo "FAIL: missing logout command in help"; exit 1; }
+            echo "PASS: --help"
+          ENDSSH
+
+      - name: No-args exits non-zero
+        run: |
+          ssh -o StrictHostKeyChecking=no $HAIKU_USER@$HAIKU_HOST << 'ENDSSH'
+            set -e
+            cd "${{ env.HAIKU_PROJECT_PATH }}"
+            if ./build/claude >/dev/null 2>&1; then
+              echo "FAIL: expected non-zero exit with no args"
+              exit 1
+            fi
+            echo "PASS: no-args exits non-zero"
+          ENDSSH
+
+      - name: Unauthenticated request reports missing auth
+        run: |
+          ssh -o StrictHostKeyChecking=no $HAIKU_USER@$HAIKU_HOST << 'ENDSSH'
+            set -e
+            cd "${{ env.HAIKU_PROJECT_PATH }}"
+            TMPHOME=$(mktemp -d /tmp/claude-cli-test.XXXXXX)
+            trap 'rm -rf "$TMPHOME"' EXIT
+            OUT=$(env -u ANTHROPIC_API_KEY HOME="$TMPHOME" ./build/claude "hello" 2>&1) && rc=0 || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "FAIL: expected non-zero exit when no auth configured"
+              echo "$OUT"
+              exit 1
+            fi
+            echo "$OUT" | grep -qi "no authentication" || { echo "FAIL: error message did not mention missing auth"; echo "$OUT"; exit 1; }
+            echo "PASS: unauthenticated request reports missing auth"
+          ENDSSH
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== Build: ${{ needs.build.result }} ==="
+          echo "=== Test:  ${{ job.status }} ==="
+          echo "Ref:    ${{ github.ref_name }}"
+          echo "Build:  ${{ github.run_number }}"
