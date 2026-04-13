@@ -33,13 +33,13 @@ jobs:
 
       - name: Build on Haiku
         run: |
-          ssh -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
-            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh"
+          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh </dev/null"
 
       - name: Test on Haiku
         run: |
-          ssh -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
-            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/test.sh"
+          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/test.sh </dev/null"
 
       - name: Summary
         if: always()

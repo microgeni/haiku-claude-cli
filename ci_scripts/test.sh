@@ -16,14 +16,14 @@ file "$BIN" | grep -q "x86-64"         || fail "not x86-64"
 echo "PASS"
 
 step "--help exits 0 and prints usage"
-out=$("$BIN" --help 2>&1) || fail "--help exited non-zero"
+out=$("$BIN" --help </dev/null 2>&1) || fail "--help exited non-zero"
 echo "$out" | grep -q "^Usage:"        || fail "missing Usage line"
 echo "$out" | grep -q "login"          || fail "missing login command"
 echo "$out" | grep -q "logout"         || fail "missing logout command"
 echo "PASS"
 
 step "no-args exits non-zero"
-if "$BIN" >/dev/null 2>&1; then
+if "$BIN" </dev/null >/dev/null 2>&1; then
     fail "expected non-zero exit with no args"
 fi
 echo "PASS"
@@ -32,7 +32,7 @@ step "unauthenticated request reports missing auth"
 tmphome=$(mktemp -d /tmp/claude-cli-test.XXXXXX)
 trap 'rm -rf "$tmphome"' EXIT
 set +e
-out=$(env -u ANTHROPIC_API_KEY HOME="$tmphome" "$BIN" "hello" 2>&1)
+out=$(env -u ANTHROPIC_API_KEY HOME="$tmphome" "$BIN" "hello" </dev/null 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ]                        || fail "expected non-zero exit when no auth configured"
