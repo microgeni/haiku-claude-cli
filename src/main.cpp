@@ -410,12 +410,31 @@ struct LoopCtx {
     const Auth&        auth;
     int                max_tokens;
     const std::string& custom_system;
+    const json&        prices;
     std::string&       model;
     int&               turn_count;
     int&               session_input;
     int&               session_output;
     json&              messages;
 };
+
+struct PriceEntry {
+    double input;
+    double output;
+};
+
+PriceEntry get_price(const std::string& model, const json& config_prices) {
+    if (config_prices.is_object() && config_prices.contains(model)) {
+        const auto& p = config_prices[model];
+        return { p.value("input", 0.0), p.value("output", 0.0) };
+    }
+    // Per-million-token fallbacks based on publicly listed Claude pricing.
+    // Config file overrides these by adding an entry under "prices".
+    if (model.find("opus")   != std::string::npos) return { 15.0, 75.0 };
+    if (model.find("haiku")  != std::string::npos) return { 0.8,   4.0 };
+    if (model.find("sonnet") != std::string::npos) return { 3.0,  15.0 };
+    return { 3.0, 15.0 };
+}
 
 SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
     std::string cmd = line;
@@ -433,6 +452,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
             "  /clear             reset the running conversation\n"
             "  /model <name>      swap the active model\n"
             "  /compact           summarize and replace the running history\n"
+            "  /cost              session token cost estimate\n"
             "  /exit, /quit       leave the REPL\n")
                   << "\n";
         return SlashAction::Continue;
@@ -454,6 +474,28 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
         } else {
             ctx.model = args;
             std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
+        }
+        return SlashAction::Continue;
+    }
+    if (cmd == "/cost") {
+        const PriceEntry price = get_price(ctx.model, ctx.prices);
+        const double in_cost  = (ctx.session_input  / 1'000'000.0) * price.input;
+        const double out_cost = (ctx.session_output / 1'000'000.0) * price.output;
+        const double total    = in_cost + out_cost;
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "session cost estimate (%s):\n"
+            "  input  : %d tokens  x $%.2f/M = $%.4f\n"
+            "  output : %d tokens  x $%.2f/M = $%.4f\n"
+            "  total  :                     = $%.4f",
+            ctx.model.c_str(),
+            ctx.session_input,  price.input,  in_cost,
+            ctx.session_output, price.output, out_cost,
+            total);
+        std::cout << tui::meta(buf) << "\n";
+        if (ctx.auth.kind == AuthKind::OAuth) {
+            std::cout << tui::meta("(OAuth sessions bill against your Pro/Max quota; this is informational)")
+                      << "\n";
         }
         return SlashAction::Continue;
     }
@@ -495,7 +537,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
 }
 
 int interactive_loop(const Auth& auth, const std::string& initial_model, int max_tokens,
-                     const std::string& custom_system, bool resume,
+                     const std::string& custom_system, const json& prices, bool resume,
                      const std::string& initial_message) {
     InterruptGuard interrupt_guard;
     json messages = json::array();
@@ -546,7 +588,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
         if (line == "exit" || line == "quit" || line == ":q") break;
 
         if (!line.empty() && line.front() == '/') {
-            LoopCtx ctx{auth, max_tokens, custom_system, model,
+            LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
                         turn_count, session_input, session_output, messages};
             const SlashAction action = dispatch_slash(line, ctx);
             repl::record(line);
@@ -720,7 +762,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, model, max_tokens, custom_system, resume, message);
+        return interactive_loop(auth, model, max_tokens, custom_system, cfg.prices, resume, message);
     }
 
     InterruptGuard interrupt_guard;
