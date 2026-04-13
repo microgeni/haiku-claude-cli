@@ -371,11 +371,14 @@ void print_usage_line(const SendResult& result) {
 enum class SlashAction { Continue, Quit, Passthrough };
 
 struct LoopCtx {
-    std::string&          model;
-    int&                  turn_count;
-    int&                  session_input;
-    int&                  session_output;
-    json&                 messages;
+    const Auth&        auth;
+    int                max_tokens;
+    const std::string& custom_system;
+    std::string&       model;
+    int&               turn_count;
+    int&               session_input;
+    int&               session_output;
+    json&              messages;
 };
 
 SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
@@ -393,6 +396,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
             "  /help              this list\n"
             "  /clear             reset the running conversation\n"
             "  /model <name>      swap the active model\n"
+            "  /compact           summarize and replace the running history\n"
             "  /exit, /quit       leave the REPL\n")
                   << "\n";
         return SlashAction::Continue;
@@ -415,6 +419,39 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx) {
             ctx.model = args;
             std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
         }
+        return SlashAction::Continue;
+    }
+    if (cmd == "/compact") {
+        if (ctx.messages.empty()) {
+            std::cout << tui::meta("[nothing to compact]") << "\n";
+            return SlashAction::Continue;
+        }
+        json request_messages = ctx.messages;
+        request_messages.push_back({
+            {"role",    "user"},
+            {"content", "Summarize the preceding conversation in 2-3 short paragraphs, "
+                        "preserving important context, decisions, code, and open "
+                        "questions. Reply with only the summary."},
+        });
+        std::cout << "\n" << tui::claude_prompt();
+        const auto result = send_conversation(ctx.auth, ctx.model, ctx.max_tokens,
+                                              request_messages, ctx.custom_system);
+        std::cout << "\n";
+        if (result.exit_code != 0) {
+            std::cout << tui::meta("[compact failed]") << "\n";
+            return SlashAction::Continue;
+        }
+        ctx.session_input  += result.input_tokens;
+        ctx.session_output += result.output_tokens;
+        ctx.messages = json::array({
+            {{"role", "user"},      {"content", "[previous conversation context follows]"}},
+            {{"role", "assistant"}, {"content", result.assistant_text}},
+        });
+        char note[96];
+        std::snprintf(note, sizeof(note),
+            "[compacted: %d in / %d out tokens]",
+            result.input_tokens, result.output_tokens);
+        std::cout << tui::meta(note) << "\n";
         return SlashAction::Continue;
     }
     std::cout << tui::meta("[unknown command: " + cmd + " — try /help]") << "\n";
@@ -473,7 +510,8 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
         if (line == "exit" || line == "quit" || line == ":q") break;
 
         if (!line.empty() && line.front() == '/') {
-            LoopCtx ctx{model, turn_count, session_input, session_output, messages};
+            LoopCtx ctx{auth, max_tokens, custom_system, model,
+                        turn_count, session_input, session_output, messages};
             const SlashAction action = dispatch_slash(line, ctx);
             repl::record(line);
             if (action == SlashAction::Quit) break;
