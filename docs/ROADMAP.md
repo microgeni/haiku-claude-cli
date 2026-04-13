@@ -89,11 +89,14 @@ Haiku's Terminal app (ANSI + UTF-8, 256 colors, no sixel/kitty).
       prompts, dim for meta notes like `[resumed N messages]`. Honors
       `NO_COLOR` and non-TTY stdout.
 - [ ] **Terminal resize handling** — redraw status line on SIGWINCH.
-- [ ] **Theme awareness** — detect dark vs light background (or read a
-      `theme` key from config.json) and pick a color palette that
-      stays readable on both.
-- [ ] **Unicode box-drawing frame** around the REPL (optional, toggled
-      by a config key).
+- [x] **Palette portability** — the TUI sticks to standard 16-color
+      ANSI codes (no 256-color / truecolor) so the user's terminal
+      theme (dark or light) controls the actual rendered colors.
+      True dark/light auto-detection via terminal queries or
+      `COLORFGBG` is deferred until we hit a concrete need.
+- [ ] **Unicode box-drawing frame** around the REPL — deferred:
+      fixed-bottom frames need DECSTBM scroll regions and careful
+      SIGWINCH tracking, which is a bigger refactor than v0.3 warrants.
 
 The TUI layer should be isolated behind a small abstraction so a
 `--plain` flag or a non-TTY stdout disables it entirely and falls back

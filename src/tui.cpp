@@ -289,7 +289,7 @@ std::string highlight_code(const std::string& lang, const std::string& line) {
     LangSpec spec;
     if (!lookup_lang(lang, spec)) {
         // Unknown or unspecified language — keep T3's dim green tint.
-        return "\x1b[38;5;114m" + line + "\x1b[0m";
+        return "\x1b[32m" + line + "\x1b[0m";
     }
     return highlight_with(spec, line);
 }
@@ -334,7 +334,7 @@ void MarkdownRenderer::render_inline(const std::string& text) {
                 mode = Mode::Italic;
                 i += 1;
             } else if (c == '`') {
-                out += ansi("\x1b[38;5;81m");
+                out += ansi("\x1b[1;36m");
                 mode = Mode::Code;
                 i += 1;
             } else {
@@ -406,9 +406,9 @@ void MarkdownRenderer::render_line(const std::string& line) {
     while (hash_count < line.size() && line[hash_count] == '#') ++hash_count;
     if (hash_count > 0 && hash_count <= 3 && hash_count < line.size() && line[hash_count] == ' ') {
         const std::string rest = line.substr(hash_count + 1);
-        const char* color = hash_count == 1 ? "\x1b[1;95m"
-                          : hash_count == 2 ? "\x1b[1;94m"
-                          :                    "\x1b[1;96m";
+        const char* color = hash_count == 1 ? "\x1b[1;35m"
+                          : hash_count == 2 ? "\x1b[1;34m"
+                          :                    "\x1b[1;36m";
         emit(std::string(color) + rest + "\x1b[0m\n");
         return;
     }
