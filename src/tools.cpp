@@ -7,6 +7,8 @@
 #include <glob.h>
 #include <sstream>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 namespace tools {
@@ -91,6 +93,82 @@ ToolResult run_glob(const json& input) {
     return {out.str(), false};
 }
 
+ToolResult run_grep(const json& input) {
+    const std::string pattern = input.value("pattern", std::string{});
+    const std::string path    = input.value("path",    std::string{"."});
+    const bool case_insensitive = input.value("case_insensitive", false);
+
+    if (pattern.empty()) {
+        return {"error: Grep requires a `pattern` argument", true};
+    }
+
+    std::vector<const char*> argv;
+    argv.push_back("grep");
+    argv.push_back("-rn");
+    argv.push_back("-H");
+    argv.push_back("--color=never");
+    if (case_insensitive) argv.push_back("-i");
+    argv.push_back("-e");
+    argv.push_back(pattern.c_str());
+    argv.push_back("--");
+    argv.push_back(path.c_str());
+    argv.push_back(nullptr);
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return {std::string("error: pipe() failed: ") + std::strerror(errno), true};
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return {std::string("error: fork() failed: ") + std::strerror(errno), true};
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
+        close(pipefd[1]);
+        execvp("grep", const_cast<char* const*>(argv.data()));
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    std::string output;
+    char        buf[4096];
+    ssize_t     n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+        output.append(buf, static_cast<size_t>(n));
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (!WIFEXITED(status)) {
+        return {"error: grep terminated abnormally", true};
+    }
+    const int code = WEXITSTATUS(status);
+    if (code == 1) {
+        return {"(no matches for " + pattern + " in " + path + ")", false};
+    }
+    if (code == 127 || code == 126) {
+        return {"error: grep not found on PATH", true};
+    }
+    if (code != 0) {
+        return {"error: grep exited with code " + std::to_string(code)
+                + (output.empty() ? "" : ": " + output), true};
+    }
+
+    constexpr size_t kMaxBytes = 32 * 1024;
+    if (output.size() > kMaxBytes) {
+        output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
+    }
+    return {output, false};
+}
+
 } // namespace
 
 json definitions() {
@@ -122,6 +200,32 @@ json definitions() {
             }},
         },
         {
+            {"name", "Grep"},
+            {"description",
+                "Search for a pattern across files under a directory. Uses POSIX "
+                "grep -rn internally with -H (always-show-filename). Returns matches "
+                "in `path:line:match` format, one per line. Output is truncated at "
+                "32 KiB with a [... output truncated] marker."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"pattern", {
+                        {"type", "string"},
+                        {"description", "Basic regex pattern passed to grep -e."},
+                    }},
+                    {"path", {
+                        {"type", "string"},
+                        {"description", "File or directory to search. Defaults to the current working directory."},
+                    }},
+                    {"case_insensitive", {
+                        {"type", "boolean"},
+                        {"description", "Pass -i to grep for a case-insensitive match."},
+                    }},
+                }},
+                {"required", json::array({"pattern"})},
+            }},
+        },
+        {
             {"name", "Glob"},
             {"description",
                 "Find files matching a shell-style glob pattern (e.g. 'src/*.cpp', "
@@ -145,6 +249,7 @@ json definitions() {
 ToolResult run(const std::string& name, const json& input) {
     if (name == "Read") return run_read(input);
     if (name == "Glob") return run_glob(input);
+    if (name == "Grep") return run_grep(input);
     return {"error: unknown tool " + name, true};
 }
 
