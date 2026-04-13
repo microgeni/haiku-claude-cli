@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -327,11 +328,15 @@ void print_usage_line(const SendResult& result) {
 }
 
 int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
-                     const std::string& custom_system, bool show_usage, bool resume,
+                     const std::string& custom_system, bool resume,
                      const std::string& initial_message) {
     json messages = json::array();
 
     repl::init(repl_history_path());
+
+    int turn_count         = 0;
+    int session_input      = 0;
+    int session_output     = 0;
 
     if (resume) {
         if (auto loaded = load_history(); loaded && loaded->is_array()) {
@@ -375,17 +380,29 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
         messages.push_back({{"role", "user"}, {"content", line}});
 
         std::cout << "\n" << tui::claude_prompt();
+        const auto turn_start = std::chrono::steady_clock::now();
         const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - turn_start).count();
         std::cout << "\n";
-
-        if (show_usage) {
-            print_usage_line(result);
-        }
 
         if (result.exit_code != 0) {
             messages.erase(messages.end() - 1);
             continue;
         }
+
+        ++turn_count;
+        session_input  += result.input_tokens;
+        session_output += result.output_tokens;
+
+        char status[192];
+        std::snprintf(status, sizeof(status),
+            "[turn %d  %.1fs  in %d/%d  out %d/%d]",
+            turn_count, elapsed,
+            result.input_tokens, session_input,
+            result.output_tokens, session_output);
+        std::cout << tui::meta(status) << "\n";
+
         messages.push_back({{"role", "assistant"}, {"content", result.assistant_text}});
         save_history(messages, model);
     }
@@ -523,7 +540,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, model, max_tokens, custom_system, show_usage, resume, message);
+        return interactive_loop(auth, model, max_tokens, custom_system, resume, message);
     }
 
     const json messages = json::array({{{"role", "user"}, {"content", message}}});

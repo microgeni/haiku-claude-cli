@@ -497,11 +497,15 @@ void Spinner::run() {
     constexpr int kFrameCount = sizeof(kFrames) / sizeof(kFrames[0]);
     int idx = 0;
 
+    const auto start = std::chrono::steady_clock::now();
+
     while (!stopping_.load()) {
-        {
-            std::string frame = std::string(kFrames[idx]) + " " + label_;
-            std::cout << "\r\x1b[2K" << dim(frame) << std::flush;
-        }
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count();
+        char tail[24];
+        std::snprintf(tail, sizeof(tail), " %.1fs", elapsed);
+        const std::string frame = std::string(kFrames[idx]) + " " + label_ + tail;
+        std::cout << "\r\x1b[2K" << dim(frame) << std::flush;
         idx = (idx + 1) % kFrameCount;
 
         std::unique_lock<std::mutex> lock(mutex_);
