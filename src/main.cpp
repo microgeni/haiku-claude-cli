@@ -30,6 +30,7 @@ using json = nlohmann::json;
 
 namespace {
 
+constexpr const char* kVersion      = "0.10.0";
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
 constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
@@ -373,6 +374,7 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "                       session (implies -i).\n"
               << "      --plain          Disable ANSI color output.\n"
               << "      --color          Force ANSI color output, even when piped.\n"
+              << "  -V, --version        Print version and exit.\n"
               << "  -h, --help           Show this help and exit.\n"
               << "\n"
               << "Config file: " << config_path() << "\n"
@@ -467,7 +469,8 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli/0.1");
+    const std::string ua = std::string("haiku-claude-cli/") + kVersion;
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, ua.c_str());
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
@@ -999,6 +1002,10 @@ int main(int argc, char* argv[]) {
         const std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0], model, max_tokens);
+            return 0;
+        }
+        if (arg == "-V" || arg == "--version") {
+            std::cout << "haiku-claude-cli " << kVersion << "\n";
             return 0;
         }
         if (arg == "-i" || arg == "--interactive") {
