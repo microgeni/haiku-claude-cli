@@ -179,16 +179,24 @@ Absorb per-project context without pasting it every turn.
 - [x] Tab completion in the REPL for slash command names, built-in
       and custom, wired via libedit's `rl_attempted_completion_function`.
 
-### v0.8 — Hooks
+### v0.8 — Hooks ✓
 
 Let the user react to lifecycle events with plain shell scripts.
 
-- [ ] Hook types: `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
-      `Stop`, `SessionStart`.
-- [ ] Hooks declared in `settings.json` at project or user scope.
-- [ ] Each hook is a shell command; stdin receives a JSON event
-      payload; non-zero exit or specific output can block a tool call
-      or inject extra context.
+- [x] Hook types: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+      `PostToolUse`, `Stop`.
+- [x] Hooks declared in the existing `config.json` under a `"hooks"`
+      key, keyed by event name. Each entry is
+      `{ "matcher": "...", "command": "..." }`; matcher is used as a
+      tool-name filter for PreToolUse/PostToolUse (missing matcher =
+      match any). Project-level overrides deferred.
+- [x] Each hook runs as `sh -c <command>` with the event payload
+      written to its stdin as JSON (enriched with `event` and, for
+      tool events, `tool_name`). Stderr is forwarded verbatim so
+      hooks can talk back to the user. A non-zero exit from any
+      matching hook Blocks — UserPromptSubmit drops the turn,
+      PreToolUse synthesizes a denied tool_result. Stdout is not
+      captured in this slice (no context injection yet).
 
 ### v0.9 — MCP (Model Context Protocol)
 

@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include "commands.h"
+#include "hooks.h"
 #include "oauth.h"
 #include "repl.h"
 #include "tools.h"
@@ -175,6 +176,7 @@ struct Config {
     std::string system;
     bool        show_usage = false;
     json        prices;
+    json        hooks;
 };
 
 Config load_config() {
@@ -191,6 +193,7 @@ Config load_config() {
         if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
         if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
         if (j.contains("prices"))     cfg.prices     = j["prices"];
+        if (j.contains("hooks"))      cfg.hooks      = j["hooks"];
     } catch (const json::exception& e) {
         std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
     }
@@ -584,7 +587,12 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
             std::cout << tui::meta("[tool: " + tname + " " + short_input_summary(tinput) + "]") << "\n";
 
             tools::ToolResult tres;
-            if (prompt_permission(tname, tinput) == Permission::Deny) {
+            const json pre_payload = { {"tool_input", tinput} };
+            if (hooks::fire(hooks::Event::PreToolUse, pre_payload, tname) == hooks::Outcome::Block) {
+                tres.content  = "hook blocked " + tname;
+                tres.is_error = true;
+                std::cout << tui::meta("[tool: " + tname + " -> blocked by hook]") << "\n";
+            } else if (prompt_permission(tname, tinput) == Permission::Deny) {
                 tres.content  = "user denied permission to run " + tname;
                 tres.is_error = true;
                 std::cout << tui::meta("[tool: " + tname + " -> denied]") << "\n";
@@ -595,6 +603,12 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                                        ? "[tool: " + tname + " -> error]"
                                        : "[tool: " + tname + " -> " + rsize + " bytes]")
                           << "\n";
+                const json post_payload = {
+                    {"tool_input",  tinput},
+                    {"tool_result", tres.content},
+                    {"is_error",    tres.is_error},
+                };
+                hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
             }
 
             tool_results.push_back({
@@ -806,6 +820,8 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
 
+    hooks::fire(hooks::Event::SessionStart, json::object());
+
     int turn_count         = 0;
     int session_input      = 0;
     int session_output     = 0;
@@ -867,6 +883,11 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
         if (!already_recorded) repl::record(line);
 
+        if (hooks::fire(hooks::Event::UserPromptSubmit, json{{"prompt", line}}) == hooks::Outcome::Block) {
+            std::cout << tui::meta("[hook blocked prompt]") << "\n";
+            continue;
+        }
+
         const json snapshot = messages;
         messages.push_back({{"role", "user"}, {"content", line}});
 
@@ -896,6 +917,8 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
         std::cout << tui::meta(status) << "\n";
 
         save_history(messages, model);
+
+        hooks::fire(hooks::Event::Stop, json{{"assistant_text", result.assistant_text}});
     }
     return 0;
 }
@@ -912,6 +935,7 @@ int main(int argc, char* argv[]) {
     }
 
     const Config cfg = load_config();
+    hooks::load(cfg.hooks);
 
     std::string              model         = cfg.model;
     int                      max_tokens    = cfg.max_tokens;
