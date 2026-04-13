@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -26,10 +27,62 @@ struct Auth {
     std::string credential;
 };
 
-size_t write_callback(char* data, size_t size, size_t nmemb, void* userp) {
-    auto* out = static_cast<std::string*>(userp);
-    out->append(data, size * nmemb);
-    return size * nmemb;
+struct StreamState {
+    std::string sse_buffer;
+    std::string raw_buffer;
+    bool        saw_text             = false;
+    bool        stream_error         = false;
+    std::string stream_error_message;
+};
+
+void process_sse_event(const std::string& event, StreamState* state) {
+    std::string data;
+    std::istringstream iss(event);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("data:", 0) != 0) continue;
+        std::string payload = line.substr(5);
+        if (!payload.empty() && payload.front() == ' ') payload.erase(0, 1);
+        if (!data.empty()) data += '\n';
+        data += payload;
+    }
+    if (data.empty()) return;
+
+    try {
+        const json j = json::parse(data);
+        const std::string type = j.value("type", "");
+
+        if (type == "content_block_delta") {
+            const auto& delta = j["delta"];
+            if (delta.value("type", "") == "text_delta") {
+                std::cout << delta.value("text", "") << std::flush;
+                state->saw_text = true;
+            }
+        } else if (type == "error") {
+            state->stream_error = true;
+            if (j.contains("error") && j["error"].contains("message")) {
+                state->stream_error_message = j["error"]["message"].get<std::string>();
+            }
+        }
+    } catch (const json::exception&) {
+        // Ignore partial/invalid payloads (e.g. ping events).
+    }
+}
+
+size_t stream_write_callback(char* data, size_t size, size_t nmemb, void* userp) {
+    const size_t total = size * nmemb;
+    auto* state = static_cast<StreamState*>(userp);
+    state->raw_buffer.append(data, total);
+    state->sse_buffer.append(data, total);
+
+    size_t pos;
+    while ((pos = state->sse_buffer.find("\n\n")) != std::string::npos) {
+        const std::string event = state->sse_buffer.substr(0, pos);
+        state->sse_buffer.erase(0, pos + 2);
+        process_sse_event(event, state);
+    }
+    return total;
 }
 
 void print_usage(const char* prog) {
@@ -78,6 +131,7 @@ int send_message(const Auth& auth, const std::string& message) {
     json body = {
         {"model",      kDefaultModel},
         {"max_tokens", kMaxTokens},
+        {"stream",     true},
         {"messages",   json::array({{{"role", "user"}, {"content", message}}})},
     };
     if (auth.kind == AuthKind::OAuth) {
@@ -94,14 +148,15 @@ int send_message(const Auth& auth, const std::string& message) {
     }
     headers = curl_slist_append(headers, (std::string("anthropic-version: ") + kApiVersion).c_str());
     headers = curl_slist_append(headers, "content-type: application/json");
+    headers = curl_slist_append(headers, "accept: text/event-stream");
 
-    std::string response;
+    StreamState state;
     curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli/0.1");
 
     const CURLcode res = curl_easy_perform(curl);
@@ -111,41 +166,28 @@ int send_message(const Auth& auth, const std::string& message) {
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        std::cerr << "error: request failed: " << curl_easy_strerror(res) << "\n";
+        std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
         return 1;
     }
 
-    json parsed;
-    bool parse_ok = true;
-    try {
-        parsed = json::parse(response);
-    } catch (const json::exception&) {
-        parse_ok = false;
-    }
-
-    if (http_status < 200 || http_status >= 300 || (parse_ok && parsed.contains("error"))) {
-        std::cerr << "error: API returned HTTP " << http_status << "\n";
-        std::cerr << "response body: " << response << "\n";
+    if (http_status < 200 || http_status >= 300) {
+        std::cerr << "\nerror: API returned HTTP " << http_status << "\n";
+        std::cerr << "response body: " << state.raw_buffer << "\n";
         return 1;
     }
 
-    if (!parse_ok) {
-        std::cerr << "error: invalid JSON response (HTTP " << http_status << ")\n";
-        std::cerr << "response body: " << response << "\n";
+    if (state.stream_error) {
+        std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
         return 1;
     }
 
-    if (!parsed.contains("content") || !parsed["content"].is_array() || parsed["content"].empty()) {
-        std::cerr << "error: unexpected response shape\n";
+    if (state.saw_text) {
+        std::cout << "\n";
+    } else {
+        std::cerr << "error: no text received in stream\n";
+        std::cerr << "response body: " << state.raw_buffer << "\n";
         return 1;
     }
-
-    for (const auto& block : parsed["content"]) {
-        if (block.value("type", "") == "text") {
-            std::cout << block.value("text", "");
-        }
-    }
-    std::cout << "\n";
     return 0;
 }
 
