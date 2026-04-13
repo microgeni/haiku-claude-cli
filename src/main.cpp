@@ -541,8 +541,49 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     }
 
     if (http_status < 200 || http_status >= 300) {
-        std::cerr << "\nerror: API returned HTTP " << http_status << "\n";
-        std::cerr << "response body: " << state.raw_buffer << "\n";
+        // Parse Anthropic's error envelope for a user-friendly message,
+        // then map the HTTP code to a plain-language explanation.
+        std::string api_msg;
+        try {
+            const json err = json::parse(state.raw_buffer);
+            if (err.contains("error") && err["error"].is_object()
+                && err["error"].contains("message")
+                && err["error"]["message"].is_string()) {
+                api_msg = err["error"]["message"].get<std::string>();
+            }
+        } catch (const json::exception&) {}
+
+        std::cerr << "\n" << tui::error_label() << " ";
+        switch (http_status) {
+            case 401:
+                std::cerr << "unauthorized (HTTP 401) — your OAuth token may be "
+                             "expired. Run `claude logout` and then `claude login`.";
+                break;
+            case 403:
+                std::cerr << "forbidden (HTTP 403) — this client or account is not "
+                             "permitted to use the endpoint.";
+                break;
+            case 429:
+                if (api_msg == "Error") {
+                    std::cerr << "gated (HTTP 429) — Anthropic's OAuth-client check "
+                                 "rejected the request shape; see project notes.";
+                } else {
+                    std::cerr << "rate limited (HTTP 429)";
+                    if (!api_msg.empty()) std::cerr << ": " << api_msg;
+                }
+                break;
+            case 500: case 502: case 503: case 504:
+                std::cerr << "server error (HTTP " << http_status << ")";
+                if (!api_msg.empty()) std::cerr << ": " << api_msg;
+                break;
+            default:
+                std::cerr << "HTTP " << http_status;
+                if (!api_msg.empty()) std::cerr << ": " << api_msg;
+                break;
+        }
+        std::cerr << "\n";
+        log_line("error http=" + std::to_string(http_status)
+                 + (api_msg.empty() ? "" : " msg=" + api_msg));
         return {1, {}, 0, 0, {}, {}};
     }
 
