@@ -1,7 +1,13 @@
 #include "tools.h"
 
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <fstream>
+#include <glob.h>
 #include <sstream>
+#include <sys/stat.h>
+#include <vector>
 
 namespace tools {
 
@@ -40,6 +46,51 @@ ToolResult run_read(const json& input) {
     return {out.str(), false};
 }
 
+ToolResult run_glob(const json& input) {
+    const std::string pattern = input.value("pattern", std::string{});
+    if (pattern.empty()) {
+        return {"error: Glob requires a `pattern` argument", true};
+    }
+
+    glob_t results {};
+    const int rc = glob(pattern.c_str(), GLOB_NOSORT, nullptr, &results);
+    if (rc == GLOB_NOMATCH) {
+        globfree(&results);
+        return {"(no matches for " + pattern + ")", false};
+    }
+    if (rc != 0) {
+        globfree(&results);
+        return {std::string("error: glob failed (") + std::strerror(errno) + ")", true};
+    }
+
+    struct Entry {
+        std::string path;
+        time_t      mtime = 0;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(results.gl_pathc);
+    for (size_t i = 0; i < results.gl_pathc; ++i) {
+        Entry e;
+        e.path = results.gl_pathv[i];
+        struct stat st {};
+        if (stat(e.path.c_str(), &st) == 0) {
+            e.mtime = st.st_mtime;
+        }
+        entries.push_back(std::move(e));
+    }
+    globfree(&results);
+
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry& a, const Entry& b) { return a.mtime > b.mtime; });
+
+    std::ostringstream out;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) out << '\n';
+        out << entries[i].path;
+    }
+    return {out.str(), false};
+}
+
 } // namespace
 
 json definitions() {
@@ -70,11 +121,30 @@ json definitions() {
                 {"required", json::array({"path"})},
             }},
         },
+        {
+            {"name", "Glob"},
+            {"description",
+                "Find files matching a shell-style glob pattern (e.g. 'src/*.cpp', "
+                "'*.md', '/boot/home/**'). Returns the matching paths one per line, "
+                "sorted by modification time with the most recently changed first. "
+                "Uses POSIX glob; recursive '**' support depends on the platform."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"pattern", {
+                        {"type", "string"},
+                        {"description", "Glob pattern, e.g. 'src/*.cpp' or '/boot/home/*.md'."},
+                    }},
+                }},
+                {"required", json::array({"pattern"})},
+            }},
+        },
     });
 }
 
 ToolResult run(const std::string& name, const json& input) {
     if (name == "Read") return run_read(input);
+    if (name == "Glob") return run_glob(input);
     return {"error: unknown tool " + name, true};
 }
 
