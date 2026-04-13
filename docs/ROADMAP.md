@@ -45,20 +45,23 @@ Claude Code feature.
 
 ## Milestones
 
-### v0.2 — Quality of life
+### v0.2 — Quality of life ✓
 
 Make the existing text-in/text-out loop noticeably nicer to use
 without adding any new capabilities.
 
-- [ ] Config file at `~/config/settings/claude-cli/config.json` with
-      defaults for model, max-tokens, system prompt, and show-usage.
-- [ ] `/model MODEL` slash command in the REPL to swap models mid-session.
-- [ ] `/cost` slash command showing cumulative tokens for the current
-      session and, for the API-key path, a rough price estimate.
-- [ ] `/clear` slash command to reset the running conversation.
-- [ ] `/compact` slash command that asks Claude to summarize the
+- [x] Config file at `~/config/settings/claude-cli/config.json` with
+      defaults for model, max-tokens, system prompt, show-usage,
+      and per-model prices. CLI flags override the file.
+- [x] `/model MODEL` slash command in the REPL to swap models mid-session.
+- [x] `/cost` slash command showing cumulative tokens for the current
+      session plus a rough price estimate from the config's price
+      table (with built-in fallbacks that substring-match common
+      model families).
+- [x] `/clear` slash command to reset the running conversation.
+- [x] `/compact` slash command that asks Claude to summarize the
       running conversation and replaces history with the summary.
-- [ ] Ctrl+C during a streaming response cancels the in-flight request
+- [x] Ctrl+C during a streaming response cancels the in-flight request
       cleanly instead of killing the process.
 
 ### v0.3 — Terminal UI polish
