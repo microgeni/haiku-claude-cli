@@ -1044,8 +1044,15 @@ int main(int argc, char* argv[]) {
     }
 
     if (!interactive && message.empty()) {
-        print_usage(argv[0], model, max_tokens);
-        return 1;
+        // With no message and no -i flag, default to interactive mode
+        // when stdin is a real terminal. Pipe/redirected cases still
+        // get the usage error so scripts fail loudly on empty input.
+        if (isatty(fileno(stdin))) {
+            interactive = true;
+        } else {
+            print_usage(argv[0], model, max_tokens);
+            return 1;
+        }
     }
 
     const Auth auth = resolve_auth();

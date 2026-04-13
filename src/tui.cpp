@@ -59,7 +59,7 @@ std::string cyan(const std::string& s)    { return wrap("\x1b[36m", s); }
 std::string gray(const std::string& s)    { return wrap("\x1b[90m", s); }
 
 std::string user_prompt() {
-    return wrap("\x1b[1;36m", "you> ");
+    return wrap("\x1b[1;36m", "> ");
 }
 
 std::string claude_prompt() {
