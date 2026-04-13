@@ -48,6 +48,99 @@ ToolResult run_read(const json& input) {
     return {out.str(), false};
 }
 
+bool ensure_parent_dir(const std::string& path) {
+    const auto slash = path.rfind('/');
+    if (slash == std::string::npos) return true;
+    const std::string dir = path.substr(0, slash);
+    if (dir.empty()) return true;
+    std::string accum;
+    for (size_t i = 0; i < dir.size(); ++i) {
+        accum += dir[i];
+        const bool boundary = (dir[i] == '/') || (i + 1 == dir.size());
+        if (!boundary) continue;
+        if (accum.empty() || accum == "/") continue;
+        if (mkdir(accum.c_str(), 0755) != 0 && errno != EEXIST) return false;
+    }
+    return true;
+}
+
+bool path_inside_cwd(const std::string& path) {
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) return false;
+    if (path.empty()) return false;
+    if (path[0] == '/') {
+        return path.compare(0, std::strlen(cwd), cwd) == 0;
+    }
+    return true; // relative paths are always inside cwd
+}
+
+ToolResult run_write(const json& input) {
+    const std::string path = input.value("path", std::string{});
+    if (path.empty()) {
+        return {"error: Write requires a `path` argument", true};
+    }
+    if (!input.contains("content")) {
+        return {"error: Write requires a `content` argument", true};
+    }
+    const std::string content = input.value("content", std::string{});
+
+    if (!ensure_parent_dir(path)) {
+        return {"error: cannot create parent directory for " + path, true};
+    }
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        return {"error: cannot open " + path + " for writing", true};
+    }
+    f.write(content.data(), static_cast<std::streamsize>(content.size()));
+    f.close();
+    if (!f) {
+        return {"error: write to " + path + " failed", true};
+    }
+
+    return {"wrote " + std::to_string(content.size()) + " bytes to " + path, false};
+}
+
+std::string preview_write(const json& input) {
+    const std::string path    = input.value("path", std::string{});
+    const std::string content = input.value("content", std::string{});
+    const size_t      nbytes  = content.size();
+    const size_t      nlines  = std::count(content.begin(), content.end(), '\n')
+                                + (content.empty() || content.back() == '\n' ? 0 : 1);
+
+    std::ifstream existing(path);
+    std::string   header;
+    if (existing.is_open()) {
+        existing.seekg(0, std::ios::end);
+        const auto old_size = existing.tellg();
+        header = "overwrite " + path
+               + " (" + std::to_string(static_cast<long>(old_size)) + " -> "
+               + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
+    } else {
+        header = "new file " + path
+               + " (" + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
+    }
+    if (!path_inside_cwd(path)) {
+        header += "  [WARNING: outside current working directory]";
+    }
+
+    // Preview the first few lines of the new content so the user sees what
+    // they're approving, capped at 10 lines.
+    std::ostringstream body;
+    body << "  -> " << header;
+    size_t lines_shown = 0;
+    std::string line;
+    std::istringstream iss(content);
+    while (lines_shown < 10 && std::getline(iss, line)) {
+        body << "\n  | " << line;
+        ++lines_shown;
+    }
+    if (lines_shown < nlines) {
+        body << "\n  | ... (" << (nlines - lines_shown) << " more lines)";
+    }
+    return body.str();
+}
+
 ToolResult run_bash(const json& input) {
     const std::string command  = input.value("command", std::string{});
     const int         timeout  = input.value("timeout_seconds", 60);
@@ -257,6 +350,30 @@ json definitions() {
             }},
         },
         {
+            {"name", "Write"},
+            {"description",
+                "Create a file or overwrite an existing one with the given content. "
+                "Parent directories are created if needed. Requires user permission "
+                "on first use; the preview shows byte count, line count, and the "
+                "first 10 lines of the new content before the prompt. Writes outside "
+                "the current working directory are permitted but flagged in the "
+                "preview."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"path", {
+                        {"type", "string"},
+                        {"description", "File path to write, absolute or relative to cwd."},
+                    }},
+                    {"content", {
+                        {"type", "string"},
+                        {"description", "Full text contents to write."},
+                    }},
+                }},
+                {"required", json::array({"path", "content"})},
+            }},
+        },
+        {
             {"name", "Bash"},
             {"description",
                 "Run a shell command via `sh -c` and return its combined stdout+stderr "
@@ -323,15 +440,21 @@ json definitions() {
 }
 
 ToolResult run(const std::string& name, const json& input) {
-    if (name == "Read") return run_read(input);
-    if (name == "Glob") return run_glob(input);
-    if (name == "Grep") return run_grep(input);
-    if (name == "Bash") return run_bash(input);
+    if (name == "Read")  return run_read(input);
+    if (name == "Glob")  return run_glob(input);
+    if (name == "Grep")  return run_grep(input);
+    if (name == "Bash")  return run_bash(input);
+    if (name == "Write") return run_write(input);
     return {"error: unknown tool " + name, true};
 }
 
 bool requires_permission(const std::string& name) {
-    return name == "Bash";
+    return name == "Bash" || name == "Write";
+}
+
+std::string preview(const std::string& name, const json& input) {
+    if (name == "Write") return preview_write(input);
+    return {};
 }
 
 } // namespace tools

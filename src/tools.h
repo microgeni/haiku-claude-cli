@@ -26,9 +26,14 @@ json definitions();
 ToolResult run(const std::string& name, const json& input);
 
 // True when a tool must prompt the user for permission before its
-// first execution in a session. Currently only Bash; read-only tools
-// (Read, Glob, Grep) auto-run.
+// first execution in a session. Currently Bash and Write.
 bool requires_permission(const std::string& name);
+
+// Optional multi-line description of what the tool would do if the
+// caller approves it. Shown between the `[tool: Name ...]` notice and
+// the permission prompt. Empty for tools where the input dump is
+// already self-explanatory (Bash, Read, Glob, Grep).
+std::string preview(const std::string& name, const json& input);
 
 } // namespace tools
 

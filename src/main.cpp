@@ -484,8 +484,13 @@ Permission prompt_permission(const std::string& tool_name, const json& input) {
     if (always_allowed().count(tool_name)) return Permission::Allow;
     if (!tools::requires_permission(tool_name)) return Permission::Allow;
 
-    std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n"
-              << tui::bold("allow " + tool_name + "? ")
+    const std::string extra = tools::preview(tool_name, input);
+    if (!extra.empty()) {
+        std::cout << tui::dim(extra) << "\n";
+    } else {
+        std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n";
+    }
+    std::cout << tui::bold("allow " + tool_name + "? ")
               << tui::dim("(y)es once, (a)lways this session, (n)o: ")
               << std::flush;
 
