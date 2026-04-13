@@ -31,11 +31,22 @@ git archive --format=tar.gz --prefix="haiku-claude-cli-${version_num}/" HEAD > "
 hpkg_sha=$(shasum -a 256 "build/$PKG_NAME" | awk '{print $1}')
 arch_sha=$(shasum -a 256 "$archive"         | awk '{print $1}')
 
-body=$(cat <<EOF
-## haiku-claude-cli ${version_num}
+changelog_section=""
+if [ -f CHANGELOG.md ]; then
+    changelog_section=$(awk -v ver="$version_num" '
+        $0 ~ "^## \\["ver"\\]"     { in_section=1; print; next }
+        in_section && $0 ~ "^## \\[" { exit }
+        in_section                 { print }
+    ' CHANGELOG.md)
+fi
+if [ -z "$changelog_section" ]; then
+    changelog_section="## haiku-claude-cli ${version_num}
 
-Minimal Claude CLI for Haiku OS — streaming responses, OAuth (Pro/Max
-subscription) auth, stdin piping, and an interactive REPL.
+Minimal Claude CLI for Haiku OS."
+fi
+
+body=$(cat <<EOF
+${changelog_section}
 
 ## Downloads
 - Haiku package: \`${PKG_NAME}\`
