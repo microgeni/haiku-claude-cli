@@ -685,6 +685,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /model <name>      swap the active model\n"
             "  /compact           summarize and replace the running history\n"
             "  /cost              session token cost estimate\n"
+            "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
             "  /exit, /quit       leave the REPL\n")
                   << "\n";
@@ -694,6 +695,12 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             for (const auto& c : custom) body += "  /" + c + "\n";
             std::cout << tui::meta(body) << "\n";
         }
+        return SlashAction::Continue;
+    }
+    if (cmd == "/todos") {
+        const auto result = tools::run("TodoRead", json::object());
+        std::cout << tui::meta("current todos:") << "\n"
+                  << result.content << "\n";
         return SlashAction::Continue;
     }
     if (cmd == "/memory") {
@@ -818,7 +825,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/cost",
-        "/memory", "/exit", "/quit",
+        "/todos", "/memory", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);

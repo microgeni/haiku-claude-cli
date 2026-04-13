@@ -267,6 +267,47 @@ size_t append_to_string(void* ptr, size_t size, size_t nmemb, void* userp) {
     return size * nmemb;
 }
 
+struct Todo {
+    std::string content;
+    std::string status; // "pending", "in_progress", "completed"
+};
+
+std::vector<Todo> g_todos;
+
+std::string format_todos() {
+    if (g_todos.empty()) return "(no todos)";
+    std::ostringstream out;
+    for (size_t i = 0; i < g_todos.size(); ++i) {
+        const char* mark = "[ ]";
+        if (g_todos[i].status == "completed")   mark = "[x]";
+        else if (g_todos[i].status == "in_progress") mark = "[-]";
+        if (i > 0) out << "\n";
+        out << mark << " " << g_todos[i].content;
+    }
+    return out.str();
+}
+
+ToolResult run_todowrite(const json& input) {
+    if (!input.contains("todos") || !input["todos"].is_array()) {
+        return {"error: TodoWrite requires a `todos` array", true};
+    }
+    g_todos.clear();
+    for (const auto& t : input["todos"]) {
+        if (!t.is_object()) continue;
+        Todo todo;
+        todo.content = t.value("content", std::string{});
+        todo.status  = t.value("status",  std::string{"pending"});
+        if (todo.content.empty()) continue;
+        g_todos.push_back(std::move(todo));
+    }
+    return {"updated todo list (" + std::to_string(g_todos.size()) + " items)\n"
+            + format_todos(), false};
+}
+
+ToolResult run_todoread(const json& /*input*/) {
+    return {format_todos(), false};
+}
+
 ToolResult run_webfetch(const json& input) {
     const std::string url = input.value("url", std::string{});
     if (url.empty()) {
@@ -528,6 +569,45 @@ json builtin_definitions() {
             }},
         },
         {
+            {"name", "TodoWrite"},
+            {"description",
+                "Replace the current in-session todo list. Use this to plan "
+                "multi-step work and check items off as they finish. The list is "
+                "process-scoped — it does not persist across sessions. The user "
+                "can view the current list at any time with the /todos slash "
+                "command."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"todos", {
+                        {"type", "array"},
+                        {"description", "Full replacement list of todo items."},
+                        {"items", {
+                            {"type", "object"},
+                            {"properties", {
+                                {"content", {{"type", "string"}}},
+                                {"status",  {
+                                    {"type", "string"},
+                                    {"enum", json::array({"pending", "in_progress", "completed"})},
+                                }},
+                            }},
+                            {"required", json::array({"content"})},
+                        }},
+                    }},
+                }},
+                {"required", json::array({"todos"})},
+            }},
+        },
+        {
+            {"name", "TodoRead"},
+            {"description",
+                "Return the current in-session todo list as a simple checklist."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", json::object()},
+            }},
+        },
+        {
             {"name", "WebFetch"},
             {"description",
                 "Fetch a URL via HTTPS and return the response body. Follows up to "
@@ -686,7 +766,9 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "Bash")     return run_bash(input);
     if (name == "Write")    return run_write(input);
     if (name == "Edit")     return run_edit(input);
-    if (name == "WebFetch") return run_webfetch(input);
+    if (name == "WebFetch")  return run_webfetch(input);
+    if (name == "TodoWrite") return run_todowrite(input);
+    if (name == "TodoRead")  return run_todoread(input);
     if (auto mcp_res = mcp::run(name, input); mcp_res) return *mcp_res;
     return {"error: unknown tool " + name, true};
 }
