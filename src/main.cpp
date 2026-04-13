@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "oauth.h"
+#include "tui.h"
 
 using json = nlohmann::json;
 
@@ -198,6 +199,8 @@ void print_usage(const char* prog) {
               << "                       usage to stderr.\n"
               << "  -r, --resume         Start the REPL pre-loaded with the last saved\n"
               << "                       session (implies -i).\n"
+              << "      --plain          Disable ANSI color output.\n"
+              << "      --color          Force ANSI color output, even when piped.\n"
               << "  -h, --help           Show this help and exit.\n"
               << "\n"
               << "Authentication (in priority order):\n"
@@ -319,15 +322,17 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
     if (resume) {
         if (auto loaded = load_history(); loaded && loaded->is_array()) {
             messages = *loaded;
-            std::cout << "[resumed " << messages.size() << " messages from "
-                      << history_path() << "]\n";
+            std::cout << tui::meta("[resumed " + std::to_string(messages.size())
+                                   + " messages from " + history_path() + "]")
+                      << "\n";
         } else {
-            std::cout << "[no prior session to resume at " << history_path() << "]\n";
+            std::cout << tui::meta("[no prior session to resume at " + history_path() + "]")
+                      << "\n";
         }
     }
 
-    std::cout << "Claude CLI interactive mode (model: " << model << ").\n"
-              << "Type 'exit', 'quit', or press Ctrl+D to leave.\n\n";
+    std::cout << tui::bold("Claude CLI interactive mode") << tui::dim(" (model: " + model + ")") << ".\n"
+              << tui::dim("Type 'exit', 'quit', or press Ctrl+D to leave.") << "\n\n";
 
     std::string pending = initial_message;
 
@@ -336,9 +341,9 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
         if (!pending.empty()) {
             line    = std::move(pending);
             pending.clear();
-            std::cout << "you> " << line << "\n";
+            std::cout << tui::user_prompt() << line << "\n";
         } else {
-            std::cout << "you> " << std::flush;
+            std::cout << tui::user_prompt() << std::flush;
             if (!std::getline(std::cin, line)) {
                 std::cout << "\n";
                 break;
@@ -353,7 +358,7 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
 
         messages.push_back({{"role", "user"}, {"content", line}});
 
-        std::cout << "\nclaude> ";
+        std::cout << "\n" << tui::claude_prompt();
         const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
         std::cout << "\n";
 
@@ -374,6 +379,8 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
 } // namespace
 
 int main(int argc, char* argv[]) {
+    tui::init();
+
     if (argc >= 2) {
         const std::string cmd = argv[1];
         if (cmd == "login")  return do_login();
@@ -405,6 +412,14 @@ int main(int argc, char* argv[]) {
         if (arg == "-r" || arg == "--resume") {
             resume      = true;
             interactive = true;
+            continue;
+        }
+        if (arg == "--plain") {
+            tui::set_color_enabled(false);
+            continue;
+        }
+        if (arg == "--color") {
+            tui::set_color_enabled(true);
             continue;
         }
         if (arg == "-m" || arg == "--model") {
