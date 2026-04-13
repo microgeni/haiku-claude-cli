@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-04-14
+
+### Added
+- **MCP (Model Context Protocol) stdio client.** The CLI spawns
+  configured MCP servers as subprocesses, speaks newline-delimited
+  JSON-RPC 2.0 over their stdin/stdout, runs the `initialize`
+  handshake (protocolVersion `2024-11-05`, client info
+  `haiku-claude-cli`), then discovers their tools via `tools/list`.
+- Server configuration lives under a new `mcp_servers` key in
+  `config.json`, keyed by server name, each entry an object with
+  `command` (required), `args` (string array), and `env` (string
+  map). Servers that fail to spawn or initialize log to stderr and
+  are skipped.
+- MCP-provided tools are **namespaced** as `mcp__<server>__<tool>`
+  when advertised to Claude, so they can't collide with built-ins.
+  `tools::definitions()` merges them into the `tools` array sent
+  with every request.
+- MCP tool calls route through `tools/call` transparently from
+  `tools::run()`. The tool result's text content blocks are
+  concatenated into a single `ToolResult` with `isError` propagated.
+- Every `mcp__*` tool `require_permission` by default — the user
+  is always prompted before a third-party MCP server runs.
+- At-exit teardown: an `atexit` handler closes pipes and `waitpid`s
+  every spawned child so the CLI doesn't leak subprocesses.
+
+### Deferred
+- HTTP/SSE transport for remote MCP servers.
+- `resources/` and `prompts/` MCP capabilities (tools-only slice).
+- Per-server allowlisting inside the permission prompt.
+
 ## [0.8.1] - 2026-04-14
 
 ### Changed
