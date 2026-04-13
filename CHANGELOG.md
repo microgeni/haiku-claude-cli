@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-04-14
+
+### Added
+- **WebFetch tool** — libcurl-based HTTP/HTTPS GET. Follows up to 5
+  redirects, 30 s overall timeout, 10 s connect timeout, transparent
+  content decoding. Returns `HTTP <status>  (<content-type>)` header
+  followed by the response body, truncated to `max_bytes` (default
+  32768). Auto-approved (no permission prompt for reads).
+- **WebSearch tool** — Brave Search API wrapper. Registered in
+  `tools::definitions()` only when `BRAVE_SEARCH_API_KEY` is set, so
+  Claude doesn't see an unusable tool on machines without a key.
+  Returns up to 10 `title` / `url` / `description` blocks from
+  `/res/v1/web/search`.
+- **Task tool** — one-shot sub-agent. Spawns a fresh
+  `send_conversation` call with the same auth/model/memory/system but
+  `include_tools=false`, streams the sub-agent's response to the
+  terminal under a dim `sub-agent:` label, and returns the final
+  assistant text as the tool result. Sub-agent token usage is
+  aggregated into the session totals. Recursion-safe because the
+  sub-agent has no tool access at all (including no Task).
+- **TodoWrite / TodoRead tools** — in-process todo list for
+  multi-step work. TodoWrite replaces the entire list from a
+  `{todos: [{content, status}]}` input; statuses are `pending`,
+  `in_progress`, or `completed`. TodoRead returns the current list
+  as a checklist ([x]/[-]/[ ]).
+- **`/todos` slash command** prints the current in-session list
+  under a "current todos:" header, plus added to tab completion.
+
 ## [0.9.0] - 2026-04-14
 
 ### Added
