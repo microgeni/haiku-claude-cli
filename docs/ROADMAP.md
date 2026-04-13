@@ -130,16 +130,27 @@ is fed back as a `tool_result` turn.
       tool_use / tool_result turn-taking across streaming
       (`send_with_tools` loop + `StreamState.content_blocks`).
 
-### v0.5 — Write tools
+### v0.5 — Write tools ✓
 
 Claude can now modify files — with safety rails.
 
-- [ ] `Write` tool — create or overwrite a file.
-- [ ] `Edit` tool — exact-string replacement, with a `replace_all` mode.
-- [ ] Preview every write/edit as a unified diff before the permission
-      prompt.
-- [ ] Auto-deny writes outside the current working directory unless
-      the user opts in.
+- [x] `Write` tool — create or overwrite a file, auto-creates parent
+      directories. Prompts for permission with a preview showing new
+      vs overwrite, byte/line counts, and the first 10 lines of the
+      content.
+- [x] `Edit` tool — exact-string replacement in an existing file, with
+      a `replace_all` flag. Prompts for permission with a block-style
+      diff (`-` old_string / `+` new_string) and the line number of
+      the first match.
+- [x] Preview every write/edit before the permission prompt — shown
+      dim between the `[tool: ...]` notice and the yes/always/no
+      choice. Edit's preview is a block diff; a full unified LCS diff
+      across arbitrary rewrites is deferred.
+- [x] Writes outside the current working directory are flagged with a
+      `[WARNING: outside cwd]` marker in the preview so the user can
+      make an informed decision. A hard auto-deny was rejected as too
+      restrictive for personal use on Haiku; the warning + permission
+      prompt is the safety net.
 
 ### v0.6 — Project memory
 

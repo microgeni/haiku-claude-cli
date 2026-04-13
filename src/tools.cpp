@@ -141,6 +141,122 @@ std::string preview_write(const json& input) {
     return body.str();
 }
 
+std::string read_file_all(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return {};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+size_t count_occurrences(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) return 0;
+    size_t count = 0;
+    size_t pos   = 0;
+    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+
+ToolResult run_edit(const json& input) {
+    const std::string path  = input.value("path",       std::string{});
+    const std::string old_s = input.value("old_string", std::string{});
+    const std::string new_s = input.value("new_string", std::string{});
+    const bool replace_all  = input.value("replace_all", false);
+
+    if (path.empty())  return {"error: Edit requires a `path` argument", true};
+    if (old_s.empty()) return {"error: Edit requires a non-empty `old_string`", true};
+
+    std::string content = read_file_all(path);
+    if (content.empty()) {
+        std::ifstream test(path);
+        if (!test.is_open()) return {"error: cannot open " + path, true};
+    }
+
+    const size_t count = count_occurrences(content, old_s);
+    if (count == 0) {
+        return {"error: old_string not found in " + path, true};
+    }
+    if (count > 1 && !replace_all) {
+        return {"error: old_string matches " + std::to_string(count)
+                + " times in " + path + "; set replace_all=true to replace all", true};
+    }
+
+    std::string out;
+    out.reserve(content.size());
+    size_t start = 0;
+    size_t match;
+    while ((match = content.find(old_s, start)) != std::string::npos) {
+        out.append(content, start, match - start);
+        out.append(new_s);
+        start = match + old_s.size();
+        if (!replace_all) break;
+    }
+    out.append(content, start, std::string::npos);
+
+    std::ofstream of(path, std::ios::binary);
+    if (!of.is_open()) return {"error: cannot open " + path + " for writing", true};
+    of.write(out.data(), static_cast<std::streamsize>(out.size()));
+    of.close();
+    if (!of) return {"error: write to " + path + " failed", true};
+
+    const std::string plural = (count == 1) ? "" : "s";
+    return {"edited " + path + " (" + std::to_string(count) + " replacement" + plural + ")", false};
+}
+
+std::string preview_edit(const json& input) {
+    const std::string path  = input.value("path",       std::string{});
+    const std::string old_s = input.value("old_string", std::string{});
+    const std::string new_s = input.value("new_string", std::string{});
+    const bool replace_all  = input.value("replace_all", false);
+
+    const std::string content = read_file_all(path);
+    if (content.empty() && !std::ifstream(path).is_open()) {
+        return "  -> Edit " + path + "  [error: cannot open]";
+    }
+
+    const size_t count = count_occurrences(content, old_s);
+    if (count == 0) {
+        return "  -> Edit " + path + "  [error: old_string not found]";
+    }
+    if (count > 1 && !replace_all) {
+        return "  -> Edit " + path + "  [error: " + std::to_string(count)
+             + " matches; set replace_all=true]";
+    }
+
+    const size_t first = content.find(old_s);
+    int line_num = 1;
+    for (size_t i = 0; i < first; ++i) {
+        if (content[i] == '\n') ++line_num;
+    }
+
+    std::ostringstream body;
+    body << "  -> Edit " << path << " @ line " << line_num;
+    if (count > 1) body << " (" << count << " matches, replace_all)";
+    if (!path_inside_cwd(path)) body << "  [WARNING: outside cwd]";
+
+    auto emit_lines = [&](const std::string& text, const char marker) {
+        size_t shown = 0;
+        std::istringstream iss(text);
+        std::string line;
+        while (shown < 12 && std::getline(iss, line)) {
+            body << "\n  " << marker << " " << line;
+            ++shown;
+        }
+        size_t total_lines = std::count(text.begin(), text.end(), '\n')
+                           + (text.empty() || text.back() == '\n' ? 0 : 1);
+        if (shown < total_lines) {
+            body << "\n  " << marker << " ... (" << (total_lines - shown) << " more lines)";
+        }
+    };
+
+    emit_lines(old_s, '-');
+    emit_lines(new_s, '+');
+    return body.str();
+}
+
 ToolResult run_bash(const json& input) {
     const std::string command  = input.value("command", std::string{});
     const int         timeout  = input.value("timeout_seconds", 60);
@@ -350,6 +466,38 @@ json definitions() {
             }},
         },
         {
+            {"name", "Edit"},
+            {"description",
+                "Replace an exact string in a file with a new string. old_string "
+                "must appear verbatim (case-sensitive, whitespace-sensitive). By "
+                "default the match must be unique; set replace_all=true to replace "
+                "every occurrence. Requires user permission on first use; the "
+                "preview shows the line number plus a block-style diff of the "
+                "change."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"path", {
+                        {"type", "string"},
+                        {"description", "File path to edit."},
+                    }},
+                    {"old_string", {
+                        {"type", "string"},
+                        {"description", "Exact text to find in the file."},
+                    }},
+                    {"new_string", {
+                        {"type", "string"},
+                        {"description", "Replacement text."},
+                    }},
+                    {"replace_all", {
+                        {"type", "boolean"},
+                        {"description", "Replace every occurrence instead of requiring a unique match."},
+                    }},
+                }},
+                {"required", json::array({"path", "old_string", "new_string"})},
+            }},
+        },
+        {
             {"name", "Write"},
             {"description",
                 "Create a file or overwrite an existing one with the given content. "
@@ -445,15 +593,17 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "Grep")  return run_grep(input);
     if (name == "Bash")  return run_bash(input);
     if (name == "Write") return run_write(input);
+    if (name == "Edit")  return run_edit(input);
     return {"error: unknown tool " + name, true};
 }
 
 bool requires_permission(const std::string& name) {
-    return name == "Bash" || name == "Write";
+    return name == "Bash" || name == "Write" || name == "Edit";
 }
 
 std::string preview(const std::string& name, const json& input) {
     if (name == "Write") return preview_write(input);
+    if (name == "Edit")  return preview_edit(input);
     return {};
 }
 
