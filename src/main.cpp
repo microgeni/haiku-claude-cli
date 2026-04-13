@@ -1,9 +1,14 @@
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <fstream>
 #include <iostream>
+#include <optional>
 #include <poll.h>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -22,6 +27,67 @@ constexpr const char* kApiVersion   = "2023-06-01";
 constexpr const char* kOAuthBeta    = "oauth-2025-04-20";
 constexpr const char* kOAuthSystem  = "You are Claude Code, Anthropic's official CLI for Claude.";
 constexpr int         kMaxTokens    = 1024;
+
+std::string history_path() {
+#ifdef __HAIKU__
+    const char* home = std::getenv("HOME");
+    const std::string dir = std::string(home ? home : "/boot/home") + "/config/settings/claude-cli";
+#else
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    std::string dir;
+    if (xdg && *xdg) {
+        dir = std::string(xdg) + "/claude-cli";
+    } else {
+        const char* home = std::getenv("HOME");
+        dir = std::string(home ? home : ".") + "/.config/claude-cli";
+    }
+#endif
+    return dir + "/history.json";
+}
+
+bool mkdir_p(const std::string& path) {
+    std::string accum;
+    for (size_t i = 0; i < path.size(); ++i) {
+        accum += path[i];
+        const bool boundary = (path[i] == '/') || (i + 1 == path.size());
+        if (!boundary) continue;
+        if (accum.empty() || accum == "/") continue;
+        if (mkdir(accum.c_str(), 0700) != 0 && errno != EEXIST) return false;
+    }
+    return true;
+}
+
+std::optional<json> load_history() {
+    std::ifstream f(history_path());
+    if (!f.is_open()) return std::nullopt;
+    try {
+        json j = json::parse(f);
+        if (j.contains("messages") && j["messages"].is_array()) {
+            return j["messages"];
+        }
+    } catch (...) {
+        // fall through
+    }
+    return std::nullopt;
+}
+
+bool save_history(const json& messages, const std::string& model) {
+    const std::string path = history_path();
+    const auto        slash = path.rfind('/');
+    if (slash == std::string::npos) return false;
+    if (!mkdir_p(path.substr(0, slash))) return false;
+
+    const json j = {
+        {"messages", messages},
+        {"model",    model},
+        {"saved_at", static_cast<long>(std::time(nullptr))},
+    };
+    std::ofstream f(path);
+    if (!f.is_open()) return false;
+    f << j.dump(2) << "\n";
+    chmod(path.c_str(), 0600);
+    return true;
+}
 
 enum class AuthKind { None, OAuth, ApiKey };
 
@@ -130,6 +196,8 @@ void print_usage(const char* prog) {
               << "                       required Claude Code prefix when OAuth is used).\n"
               << "  -u, --usage          After the response, print input/output token\n"
               << "                       usage to stderr.\n"
+              << "  -r, --resume         Start the REPL pre-loaded with the last saved\n"
+              << "                       session (implies -i).\n"
               << "  -h, --help           Show this help and exit.\n"
               << "\n"
               << "Authentication (in priority order):\n"
@@ -244,9 +312,19 @@ void print_usage_line(const SendResult& result) {
 }
 
 int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
-                     const std::string& custom_system, bool show_usage,
+                     const std::string& custom_system, bool show_usage, bool resume,
                      const std::string& initial_message) {
     json messages = json::array();
+
+    if (resume) {
+        if (auto loaded = load_history(); loaded && loaded->is_array()) {
+            messages = *loaded;
+            std::cout << "[resumed " << messages.size() << " messages from "
+                      << history_path() << "]\n";
+        } else {
+            std::cout << "[no prior session to resume at " << history_path() << "]\n";
+        }
+    }
 
     std::cout << "Claude CLI interactive mode (model: " << model << ").\n"
               << "Type 'exit', 'quit', or press Ctrl+D to leave.\n\n";
@@ -288,6 +366,7 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
             continue;
         }
         messages.push_back({{"role", "assistant"}, {"content", result.assistant_text}});
+        save_history(messages, model);
     }
     return 0;
 }
@@ -305,6 +384,7 @@ int main(int argc, char* argv[]) {
     int                      max_tokens    = kMaxTokens;
     bool                     interactive   = false;
     bool                     show_usage    = false;
+    bool                     resume        = false;
     std::string              custom_system;
     std::vector<std::string> parts;
 
@@ -320,6 +400,11 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-u" || arg == "--usage") {
             show_usage = true;
+            continue;
+        }
+        if (arg == "-r" || arg == "--resume") {
+            resume      = true;
+            interactive = true;
             continue;
         }
         if (arg == "-m" || arg == "--model") {
@@ -407,7 +492,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, model, max_tokens, custom_system, show_usage, message);
+        return interactive_loop(auth, model, max_tokens, custom_system, show_usage, resume, message);
     }
 
     const json messages = json::array({{{"role", "user"}, {"content", message}}});
