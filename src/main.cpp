@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <poll.h>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -303,21 +304,35 @@ int main(int argc, char* argv[]) {
     }
 
     if (!interactive && !isatty(fileno(stdin))) {
-        std::string stdin_data;
-        char        buf[4096];
-        size_t      n;
-        while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0) {
-            stdin_data.append(buf, n);
-        }
-        while (!stdin_data.empty() && (stdin_data.back() == '\n' || stdin_data.back() == '\r')) {
-            stdin_data.pop_back();
-        }
-        if (!stdin_data.empty()) {
-            if (message.empty()) {
-                message = std::move(stdin_data);
-            } else {
-                message += "\n\n";
-                message += stdin_data;
+        // Only slurp stdin if data is actually ready. Without this
+        // check, fread blocks forever when stdin is an open-but-empty
+        // pipe (e.g. `ssh host 'claude hi'` without -t, or CI jobs
+        // that inherit a runner's idle stdin). 100ms is imperceptible
+        // for real pipelines like `cat file | claude "summarize"` but
+        // saves the invocation from hanging in non-interactive shells.
+        struct pollfd pfd;
+        pfd.fd      = STDIN_FILENO;
+        pfd.events  = POLLIN;
+        pfd.revents = 0;
+        const bool has_input =
+            poll(&pfd, 1, 100) > 0 && (pfd.revents & (POLLIN | POLLHUP));
+        if (has_input) {
+            std::string stdin_data;
+            char        buf[4096];
+            size_t      n;
+            while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0) {
+                stdin_data.append(buf, n);
+            }
+            while (!stdin_data.empty() && (stdin_data.back() == '\n' || stdin_data.back() == '\r')) {
+                stdin_data.pop_back();
+            }
+            if (!stdin_data.empty()) {
+                if (message.empty()) {
+                    message = std::move(stdin_data);
+                } else {
+                    message += "\n\n";
+                    message += stdin_data;
+                }
             }
         }
     }
