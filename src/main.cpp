@@ -34,14 +34,18 @@ struct StreamState {
     std::string sse_buffer;
     std::string raw_buffer;
     std::string text;
-    bool        saw_text             = false;
-    bool        stream_error         = false;
+    int         input_tokens        = 0;
+    int         output_tokens       = 0;
+    bool        saw_text            = false;
+    bool        stream_error        = false;
     std::string stream_error_message;
 };
 
 struct SendResult {
     int         exit_code = 0;
     std::string assistant_text;
+    int         input_tokens  = 0;
+    int         output_tokens = 0;
 };
 
 void process_sse_event(const std::string& event, StreamState* state) {
@@ -69,6 +73,17 @@ void process_sse_event(const std::string& event, StreamState* state) {
                 std::cout << chunk << std::flush;
                 state->text += chunk;
                 state->saw_text = true;
+            }
+        } else if (type == "message_start") {
+            if (j.contains("message") && j["message"].contains("usage")) {
+                const auto& u = j["message"]["usage"];
+                state->input_tokens  = u.value("input_tokens",  0);
+                state->output_tokens = u.value("output_tokens", 0);
+            }
+        } else if (type == "message_delta") {
+            if (j.contains("usage")) {
+                const auto& u = j["usage"];
+                state->output_tokens = u.value("output_tokens", state->output_tokens);
             }
         } else if (type == "error") {
             state->stream_error = true;
@@ -113,6 +128,8 @@ void print_usage(const char* prog) {
               << "  -t, --max-tokens N   Max tokens in response (default: " << kMaxTokens << ").\n"
               << "  -s, --system TEXT    Custom system prompt (appended after the\n"
               << "                       required Claude Code prefix when OAuth is used).\n"
+              << "  -u, --usage          After the response, print input/output token\n"
+              << "                       usage to stderr.\n"
               << "  -h, --help           Show this help and exit.\n"
               << "\n"
               << "Authentication (in priority order):\n"
@@ -208,21 +225,27 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
 
     if (state.stream_error) {
         std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
-        return {1, state.text};
+        return {1, state.text, state.input_tokens, state.output_tokens};
     }
 
     if (!state.saw_text) {
         std::cerr << "error: no text received in stream\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
-        return {1, {}};
+        return {1, {}, 0, 0};
     }
 
     std::cout << "\n";
-    return {0, state.text};
+    return {0, state.text, state.input_tokens, state.output_tokens};
+}
+
+void print_usage_line(const SendResult& result) {
+    std::cerr << "[usage] input: " << result.input_tokens
+              << " tokens  output: " << result.output_tokens << " tokens\n";
 }
 
 int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
-                     const std::string& custom_system, const std::string& initial_message) {
+                     const std::string& custom_system, bool show_usage,
+                     const std::string& initial_message) {
     json messages = json::array();
 
     std::cout << "Claude CLI interactive mode (model: " << model << ").\n"
@@ -256,6 +279,10 @@ int interactive_loop(const Auth& auth, const std::string& model, int max_tokens,
         const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
         std::cout << "\n";
 
+        if (show_usage) {
+            print_usage_line(result);
+        }
+
         if (result.exit_code != 0) {
             messages.erase(messages.end() - 1);
             continue;
@@ -277,6 +304,7 @@ int main(int argc, char* argv[]) {
     std::string              model         = kDefaultModel;
     int                      max_tokens    = kMaxTokens;
     bool                     interactive   = false;
+    bool                     show_usage    = false;
     std::string              custom_system;
     std::vector<std::string> parts;
 
@@ -288,6 +316,10 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-i" || arg == "--interactive") {
             interactive = true;
+            continue;
+        }
+        if (arg == "-u" || arg == "--usage") {
+            show_usage = true;
             continue;
         }
         if (arg == "-m" || arg == "--model") {
@@ -375,9 +407,13 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, model, max_tokens, custom_system, message);
+        return interactive_loop(auth, model, max_tokens, custom_system, show_usage, message);
     }
 
     const json messages = json::array({{{"role", "user"}, {"content", message}}});
-    return send_conversation(auth, model, max_tokens, messages, custom_system).exit_code;
+    const auto result = send_conversation(auth, model, max_tokens, messages, custom_system);
+    if (show_usage) {
+        print_usage_line(result);
+    }
+    return result.exit_code;
 }
