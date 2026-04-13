@@ -6,6 +6,50 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-14
+
+### Added
+- **Tool use** — Claude can now read, search, and execute on the local
+  machine via the Messages API `tools` parameter. The CLI handles the
+  full `tool_use` / `tool_result` round-trip loop across streaming and
+  feeds results back until Claude returns `stop_reason=end_turn`.
+- **Read tool** — returns the contents of a text file, with optional
+  `start_line` / `end_line` range (both 1-indexed, inclusive).
+- **Glob tool** — POSIX `glob(3)` wrapper. Takes a shell-style pattern
+  and returns matching paths sorted newest-first by mtime.
+- **Grep tool** — `fork`/`execvp` wrapper around POSIX
+  `grep -rnH -e PATTERN --`, with a 32 KiB output cap and clean
+  handling of no-match (exit 1 → `(no matches)`) vs real errors.
+- **Bash tool** — runs a shell command via `sh -c`, captures combined
+  stdout+stderr, returns exit code + output (32 KiB cap). The only
+  tool that requires an interactive permission prompt.
+- **Permission prompt system** — a session-scoped allowlist of
+  pre-approved tool names, with a prompt on first use of any tool
+  marked "dangerous". Answer `(y)es` for one-shot allow, `(a)lways`
+  to add to the session allowlist, anything else denies. Denied
+  tools return a `user denied permission` result so Claude can
+  adapt gracefully. Read/Glob/Grep auto-approve; only Bash prompts.
+- **Spinner stops on `message_start`** — previously waited for first
+  renderer output, which left a stale spinner on tool-use-only
+  responses that had no text block.
+
+### Changed
+- `StreamState` now carries structured `content_blocks`, per-block
+  accumulators (`current_type`, `current_text`, `current_tool_id`,
+  `current_tool_name`, `current_tool_input_raw`), and the finalized
+  `stop_reason`. `SendResult` exposes `content_blocks` and
+  `stop_reason` so callers can drive the tool-use loop.
+- `send_conversation` takes an `include_tools` parameter that toggles
+  the request's `tools` field. `/compact` calls it with
+  `include_tools=false` so summary passes can't reach for tools.
+- New `send_with_tools` wrapper is the entry point for both one-shot
+  and REPL turns. It loops on `stop_reason == "tool_use"`, appending
+  the assistant message and the synthesized `tool_result` user
+  message, until Claude is done.
+- The REPL snapshots `messages` before each `send_with_tools` call
+  and restores the snapshot on failure, so a partial tool-use loop
+  doesn't leave the conversation in a half-committed state.
+
 ## [0.3.0] - 2026-04-14
 
 ### Added
