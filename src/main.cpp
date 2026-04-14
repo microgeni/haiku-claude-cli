@@ -197,7 +197,7 @@ size_t header_callback(char* buffer, size_t size, size_t nitems, void* /*userp*/
 
     std::string name = line.substr(0, colon);
     for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (name.compare(0, 20, "anthropic-ratelimit-") != 0) return total;
+    if (name.compare(0, 10, "anthropic-") != 0) return total;
 
     std::string value = line.substr(colon + 1);
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
@@ -898,33 +898,81 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         return SlashAction::Continue;
     }
     if (cmd == "/usage") {
+        auto header = [](const std::string& key) -> std::string {
+            const auto it = g_last_rate_headers.find(key);
+            return it == g_last_rate_headers.end() ? std::string() : it->second;
+        };
+
+        auto render_bar = [](double pct) {
+            constexpr int kBarWidth = 50;
+            if (pct < 0.0)   pct = 0.0;
+            if (pct > 100.0) pct = 100.0;
+            const int filled = static_cast<int>(pct * kBarWidth / 100.0 + 0.5);
+            std::string out;
+            for (int i = 0; i < filled;                ++i) out += "\u2588";
+            for (int i = 0; i < kBarWidth - filled;    ++i) out += ' ';
+            return out;
+        };
+
+        auto format_reset = [](const std::string& ts_str) {
+            if (ts_str.empty()) return std::string();
+            const time_t ts = static_cast<time_t>(std::atoll(ts_str.c_str()));
+            std::tm tm {};
+            localtime_r(&ts, &tm);
+            char out[64];
+            std::strftime(out, sizeof(out), "%a %b %d at %H:%M (%Z)", &tm);
+            return std::string(out);
+        };
+
+        auto print_window = [&](const std::string& label,
+                                const std::string& util_key,
+                                const std::string& reset_key) {
+            const std::string util_s  = header(util_key);
+            const std::string reset_s = header(reset_key);
+            if (util_s.empty()) return;
+            const double util = std::atof(util_s.c_str());
+            const double pct  = util * 100.0;
+            char pct_str[16];
+            std::snprintf(pct_str, sizeof(pct_str), "%3.0f%% used", pct);
+            std::cout << "  " << tui::bold(label) << "\n"
+                      << "  " << render_bar(pct) << " " << pct_str << "\n"
+                      << "  " << tui::dim("Resets " + format_reset(reset_s)) << "\n"
+                      << "\n";
+        };
+
+        // Session summary (our own state).
         const PriceEntry price = get_price(ctx.model, ctx.prices);
         const double in_cost   = (ctx.session_input  / 1'000'000.0) * price.input;
         const double out_cost  = (ctx.session_output / 1'000'000.0) * price.output;
-        char buf[512];
-        std::snprintf(buf, sizeof(buf),
-            "session:\n"
-            "  model:       %s\n"
-            "  turns:       %d\n"
-            "  input:       %d tokens\n"
-            "  output:      %d tokens\n"
-            "  est. cost:   $%.4f\n",
+        char session_buf[512];
+        std::snprintf(session_buf, sizeof(session_buf),
+            "  model %s  turns %d  in %d  out %d  est $%.4f",
             ctx.model.c_str(),
             ctx.turn_count,
             ctx.session_input,
             ctx.session_output,
             in_cost + out_cost);
-        std::cout << tui::meta(buf);
-        if (ctx.auth.kind == AuthKind::OAuth) {
-            std::cout << tui::meta("(OAuth: billed against Pro/Max quota)") << "\n";
+        std::cout << tui::dim(session_buf) << "\n\n";
+
+        if (header("anthropic-ratelimit-unified-5h-utilization").empty()) {
+            std::cout << tui::dim("(no rate-limit data yet — make a request first)")
+                      << "\n";
+            return SlashAction::Continue;
         }
-        if (!g_last_rate_headers.empty()) {
-            std::cout << "\n" << tui::meta("rate limits (from last API call):") << "\n";
-            for (const auto& kv : g_last_rate_headers) {
-                std::cout << tui::meta("  " + kv.first + ": " + kv.second) << "\n";
-            }
-        } else {
-            std::cout << tui::meta("(no rate-limit headers captured yet — make a request first)") << "\n";
+
+        print_window("Current session",
+                     "anthropic-ratelimit-unified-5h-utilization",
+                     "anthropic-ratelimit-unified-5h-reset");
+        print_window("Current week (all models)",
+                     "anthropic-ratelimit-unified-7d-utilization",
+                     "anthropic-ratelimit-unified-7d-reset");
+        print_window("Current week (Sonnet only)",
+                     "anthropic-ratelimit-unified-7d_sonnet-utilization",
+                     "anthropic-ratelimit-unified-7d_sonnet-reset");
+
+        const std::string claim = header("anthropic-ratelimit-unified-representative-claim");
+        if (!claim.empty()) {
+            std::cout << tui::dim("  binding window: " + claim) << "\n";
         }
         return SlashAction::Continue;
     }
