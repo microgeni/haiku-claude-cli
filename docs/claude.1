@@ -116,6 +116,28 @@ in
 .B /exit, /quit
 Leave the REPL (Ctrl+D also works).
 .PP
+Additional slash commands in the Telegram bridge
+.RB ( "claude telegram" ),
+valid from both the local prompt and a Telegram chat:
+.TP
+.B /mute
+Suppress every outbound call to the Telegram Bot API
+.RB ( sendMessage ", " editMessageText ", " sendChatAction ,
+placeholder edits, final responses, typing indicator, numbered-list
+buttons) until
+.BR /unmute .
+Incoming messages are still processed — tools run, the operator's
+terminal still shows the conversation — but nothing leaves the
+machine. The mute acknowledgment is sent before the flag flips
+so the state change is visible on the Telegram side.
+.TP
+.B /unmute
+Resume outbound Bot API calls. The unmute acknowledgment is sent
+after the flag flips for the same visibility reason.
+.TP
+.B /new
+Reset the current chat's rolling history (Telegram-side only).
+.PP
 User-defined slash commands may live in
 .I .claude/commands/*.md
 (project) or

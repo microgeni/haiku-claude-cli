@@ -689,6 +689,17 @@ std::unordered_set<std::string>& always_allowed() {
 bool g_non_interactive_tools             = false;
 bool g_non_interactive_allow_destructive = false;
 
+// Telegram bridge mute toggle. When true, every outbound call to the
+// bot API (sendMessage / editMessageText / sendChatAction / the
+// message_id-returning variant) is suppressed by the tg_* wrapper
+// lambdas in run_telegram_bridge. Incoming messages still get
+// processed locally — tools run, the operator's terminal still shows
+// everything — but nothing leaves the machine until /unmute. The
+// /mute and /unmute acks themselves bypass the wrapper (they go out
+// via client.send_message directly) so the state transition is
+// always visible on the Telegram side.
+std::atomic<bool> g_telegram_muted { false };
+
 // Set at startup from Config::allow_destructive_tools or the -y/--yes
 // flag. Grants destructive-tool permission without prompting whenever
 // stdin isn't usable for a y/a/n dialog (piped stdin, closed stdin,
@@ -1407,6 +1418,37 @@ int run_telegram_bridge(const Config& cfg) {
     std::mutex              process_mutex;
     std::map<int64_t, json> user_messages;
 
+    // Start every bridge session unmuted — the flag is process-scoped
+    // so a previous in-process toggle could otherwise leak into the
+    // next run_telegram_bridge invocation if we ever call it twice.
+    g_telegram_muted.store(false);
+
+    // Mute-aware wrappers around the Telegram client. Every outbound
+    // call in process_turn / process_telegram goes through these so
+    // that a single /mute toggle silences the whole bridge in one
+    // shot. The /mute and /unmute ack messages themselves deliberately
+    // bypass these wrappers (calling client.send_message directly) so
+    // the operator's own state transitions are always visible.
+    auto tg_send = [&](int64_t chat, const std::string& text,
+                       const std::vector<std::vector<telegram::Button>>& kb = {}) {
+        if (g_telegram_muted.load()) return;
+        client.send_message(chat, text, kb);
+    };
+    auto tg_send_id = [&](int64_t chat, const std::string& text) -> int64_t {
+        if (g_telegram_muted.load()) return 0;
+        return client.send_message_with_id(chat, text);
+    };
+    auto tg_edit = [&](int64_t chat, int64_t message_id, const std::string& text,
+                       const std::vector<std::vector<telegram::Button>>& kb = {}) {
+        if (g_telegram_muted.load()) return;
+        if (message_id == 0) return;
+        client.edit_message_text(chat, message_id, text, kb);
+    };
+    auto tg_typing = [&](int64_t chat) {
+        if (g_telegram_muted.load()) return;
+        client.send_chat_action(chat, "typing");
+    };
+
     // Shared worker: runs one send_with_tools call and mirrors the
     // whole thing (user echo + typing + streaming edits + buttons
     // on the final response) to a Telegram chat. Used by both the
@@ -1419,13 +1461,16 @@ int run_telegram_bridge(const Config& cfg) {
         // 1. Echo the user's prompt into the chat so the remote
         //    side sees what was typed (even for local-origin turns).
         if (chat_id != 0) {
-            client.send_message(chat_id, "> " + prompt_text);
+            tg_send(chat_id, "> " + prompt_text);
         }
 
         // 2. Initial placeholder; we'll edit it as tokens stream in.
+        //    tg_send_id returns 0 when muted so the updater thread's
+        //    `if (placeholder_id == 0) continue;` guard naturally
+        //    skips edits even if unmute happens mid-turn.
         const int64_t placeholder_id = chat_id == 0
             ? 0
-            : client.send_message_with_id(chat_id, "\xE2\x80\xA6"); // …
+            : tg_send_id(chat_id, "\xE2\x80\xA6"); // …
 
         // 3. Updater thread: typing indicator + streaming edits.
         StreamProgress    progress;
@@ -1438,7 +1483,7 @@ int run_telegram_bridge(const Config& cfg) {
                 while (updater_running.load()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                     if (!updater_running.load()) break;
-                    client.send_chat_action(chat_id, "typing");
+                    tg_typing(chat_id);
                     if (placeholder_id == 0) continue;
                     const int v = progress.version.load(std::memory_order_relaxed);
                     if (v == last_version) continue;
@@ -1449,7 +1494,7 @@ int run_telegram_bridge(const Config& cfg) {
                         snapshot_text = progress.text;
                     }
                     if (!snapshot_text.empty()) {
-                        client.edit_message_text(chat_id, placeholder_id, snapshot_text);
+                        tg_edit(chat_id, placeholder_id, snapshot_text);
                     }
                 }
             });
@@ -1482,8 +1527,8 @@ int run_telegram_bridge(const Config& cfg) {
             messages = snapshot;
             if (chat_id != 0) {
                 const std::string err = "(error: Claude did not return a response)";
-                if (placeholder_id) client.edit_message_text(chat_id, placeholder_id, err);
-                else                 client.send_message(chat_id, err);
+                if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+                else                 tg_send(chat_id, err);
             }
             log_line(std::string(source_label) + " tx -> error");
             return;
@@ -1502,10 +1547,9 @@ int run_telegram_bridge(const Config& cfg) {
         // 7. Final edit with the complete text + buttons.
         if (chat_id != 0) {
             if (placeholder_id) {
-                client.edit_message_text(chat_id, placeholder_id,
-                                         result.assistant_text, keyboard);
+                tg_edit(chat_id, placeholder_id, result.assistant_text, keyboard);
             } else {
-                client.send_message(chat_id, result.assistant_text, keyboard);
+                tg_send(chat_id, result.assistant_text, keyboard);
             }
         }
         log_line(std::string(source_label) + " tx out="
@@ -1531,13 +1575,44 @@ int run_telegram_bridge(const Config& cfg) {
         log_line("telegram rx user=" + std::to_string(u.user_id)
                  + " " + arrow + "=" + u.text);
 
+        // /mute and /unmute bypass the mute wrapper for their own
+        // ack so the state transition is always visible on the
+        // Telegram side even though every *other* outbound call in
+        // this handler is gated on g_telegram_muted. /mute acks
+        // *before* flipping the flag; /unmute flips first so its
+        // ack also goes through.
+        if (u.text == "/mute") {
+            if (g_telegram_muted.load()) {
+                client.send_message(u.chat_id, "(bridge already muted)");
+            } else {
+                client.send_message(u.chat_id,
+                    "Bridge muted. No replies will be sent until /unmute. "
+                    "Incoming messages are still processed locally.");
+                g_telegram_muted.store(true);
+                std::cout << tui::meta("[telegram bridge muted]") << "\n";
+                log_line("telegram mute (from user=" + std::to_string(u.user_id) + ")");
+            }
+            return;
+        }
+        if (u.text == "/unmute") {
+            const bool was = g_telegram_muted.exchange(false);
+            if (!was) {
+                client.send_message(u.chat_id, "(bridge was not muted)");
+            } else {
+                client.send_message(u.chat_id,
+                    "Bridge unmuted. Replies will be sent again.");
+                std::cout << tui::meta("[telegram bridge unmuted]") << "\n";
+                log_line("telegram unmute (from user=" + std::to_string(u.user_id) + ")");
+            }
+            return;
+        }
         if (u.text == "/new" || u.text == "/clear") {
             user_messages.erase(u.user_id);
-            client.send_message(u.chat_id, "(history cleared)");
+            tg_send(u.chat_id, "(history cleared)");
             return;
         }
         if (u.text == "/help" || u.text == "/start") {
-            client.send_message(u.chat_id,
+            tg_send(u.chat_id,
                 "haiku-claude-cli bridge\n"
                 "\n"
                 "Send any message and I'll run it through Claude on the "
@@ -1545,6 +1620,8 @@ int run_telegram_bridge(const Config& cfg) {
                 "\n"
                 "Commands:\n"
                 "  /new     reset this chat's rolling history\n"
+                "  /mute    stop sending replies until /unmute\n"
+                "  /unmute  resume sending replies\n"
                 "  /help    this message");
             return;
         }
@@ -1557,8 +1634,7 @@ int run_telegram_bridge(const Config& cfg) {
         // inline the logic here without the echo.
         const int64_t chat_id = u.chat_id;
 
-        const int64_t placeholder_id =
-            client.send_message_with_id(chat_id, "\xE2\x80\xA6");
+        const int64_t placeholder_id = tg_send_id(chat_id, "\xE2\x80\xA6");
 
         StreamProgress progress;
         g_stream_progress = &progress;
@@ -1568,7 +1644,7 @@ int run_telegram_bridge(const Config& cfg) {
             while (updater_running.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 if (!updater_running.load()) break;
-                client.send_chat_action(chat_id, "typing");
+                tg_typing(chat_id);
                 if (placeholder_id == 0) continue;
                 const int v = progress.version.load(std::memory_order_relaxed);
                 if (v == last_version) continue;
@@ -1579,7 +1655,7 @@ int run_telegram_bridge(const Config& cfg) {
                     snapshot_text = progress.text;
                 }
                 if (!snapshot_text.empty()) {
-                    client.edit_message_text(chat_id, placeholder_id, snapshot_text);
+                    tg_edit(chat_id, placeholder_id, snapshot_text);
                 }
             }
         });
@@ -1608,8 +1684,8 @@ int run_telegram_bridge(const Config& cfg) {
         if (result.exit_code != 0 || result.assistant_text.empty()) {
             messages = snapshot;
             const std::string err = "(error: Claude did not return a response)";
-            if (placeholder_id) client.edit_message_text(chat_id, placeholder_id, err);
-            else                 client.send_message(chat_id, err);
+            if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+            else                 tg_send(chat_id, err);
             log_line("telegram tx user=" + std::to_string(u.user_id) + " -> error");
             return;
         }
@@ -1623,10 +1699,9 @@ int run_telegram_bridge(const Config& cfg) {
             keyboard.push_back({ std::move(b) });
         }
         if (placeholder_id) {
-            client.edit_message_text(chat_id, placeholder_id,
-                                     result.assistant_text, keyboard);
+            tg_edit(chat_id, placeholder_id, result.assistant_text, keyboard);
         } else {
-            client.send_message(chat_id, result.assistant_text, keyboard);
+            tg_send(chat_id, result.assistant_text, keyboard);
         }
         log_line("telegram tx user=" + std::to_string(u.user_id)
                  + " out=" + std::to_string(result.output_tokens));
@@ -1660,7 +1735,7 @@ int run_telegram_bridge(const Config& cfg) {
     {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
-            "/todos", "/memory", "/exit", "/quit",
+            "/todos", "/memory", "/mute", "/unmute", "/exit", "/quit",
         };
         for (const auto& c : commands::names()) all_slash.push_back("/" + c);
         repl::set_slash_commands(all_slash);
@@ -1681,6 +1756,49 @@ int run_telegram_bridge(const Config& cfg) {
 
         bool already_recorded = false;
         if (!line.empty() && line.front() == '/') {
+            // /mute and /unmute are bridge-specific so dispatch_slash
+            // (shared with the REPL) doesn't know them. Handle them
+            // here before falling through to dispatch_slash. The
+            // local terminal always prints the state change; the
+            // primary Telegram chat also gets an ack so an operator
+            // driving from the laptop tells their phone what they
+            // did. The ack bypasses the mute wrapper so /unmute is
+            // able to announce itself.
+            if (line == "/mute") {
+                std::lock_guard<std::mutex> lk(process_mutex);
+                if (g_telegram_muted.load()) {
+                    std::cout << tui::meta("[bridge already muted]") << "\n";
+                } else {
+                    if (primary_user_id != 0) {
+                        client.send_message(primary_user_id,
+                            "Bridge muted from local prompt. No replies will "
+                            "be sent until /unmute.");
+                    }
+                    g_telegram_muted.store(true);
+                    std::cout << tui::meta("[telegram bridge muted]") << "\n";
+                    log_line("telegram mute (from local prompt)");
+                }
+                repl::record(line);
+                continue;
+            }
+            if (line == "/unmute") {
+                std::lock_guard<std::mutex> lk(process_mutex);
+                const bool was = g_telegram_muted.exchange(false);
+                if (!was) {
+                    std::cout << tui::meta("[bridge was not muted]") << "\n";
+                } else {
+                    if (primary_user_id != 0) {
+                        client.send_message(primary_user_id,
+                            "Bridge unmuted from local prompt. Replies will "
+                            "be sent again.");
+                    }
+                    std::cout << tui::meta("[telegram bridge unmuted]") << "\n";
+                    log_line("telegram unmute (from local prompt)");
+                }
+                repl::record(line);
+                continue;
+            }
+
             std::lock_guard<std::mutex> lk(process_mutex);
             json& messages_ref = user_messages[primary_user_id];
             if (!messages_ref.is_array()) messages_ref = json::array();

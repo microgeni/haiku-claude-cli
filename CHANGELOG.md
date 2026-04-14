@@ -53,6 +53,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or pass `-t 1024`.
 
 ### Added
+- **`/mute` and `/unmute` bridge commands** — suppress every
+  outbound Telegram Bot API call (`sendMessage`, `editMessageText`,
+  `sendChatAction`, placeholder sends, streaming edits, final
+  responses, numbered-list buttons, typing indicator) until
+  `/unmute`. Incoming messages are still processed normally:
+  tools still run, the operator's local terminal still shows
+  the full conversation, nothing just leaves the machine. Valid
+  from both the local libedit prompt and any authorized Telegram
+  chat, backed by a shared `g_telegram_muted` atomic flag.
+  `/mute`'s ack is sent *before* the flag flips and `/unmute`'s
+  ack is sent *after* it flips, so every state transition is
+  visible on the Telegram side instead of being suppressed by
+  its own command. All per-call gating lives in four `tg_*`
+  wrapper lambdas (`tg_send`, `tg_send_id`, `tg_edit`,
+  `tg_typing`) inside `run_telegram_bridge` so the check is in
+  one place for every path through the bridge.
 - **`-y`, `--yes` flag** — auto-approves destructive tools
   (`Bash`, `Write`, `Edit`) for the current invocation without
   the y/a/n prompt. Intended for one-shot and piped-stdin runs
