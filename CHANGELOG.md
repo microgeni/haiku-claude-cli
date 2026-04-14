@@ -6,6 +6,107 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-14
+
+Remote control via Telegram. Drive the local CLI from your phone
+while tools execute on your machine — same outcome as Claude
+Code's undocumented `/remote-control`, built on Telegram's
+public Bot API instead.
+
+### Added
+- **`claude telegram` subcommand** — new headless bridge loop
+  alongside `login`/`logout`. Long-polls Telegram for incoming
+  messages from allowed users, routes each through
+  `send_with_tools` on the local machine, and mirrors the
+  assistant's final text back via `sendMessage`. Hooks,
+  `CLAUDE.md` memory, and MCP continue to apply — the bridge
+  just replaces the REPL input source; the rest of the stack
+  is unchanged.
+- **`src/telegram.{h,cpp}` Bot API client** over libcurl —
+  `getUpdates` with 30 s long-poll and offset persistence,
+  `sendMessage` with ~3800-char chunking to stay under
+  Telegram's 4096-char cap, `sendChatAction`, `editMessageText`
+  (ignores cosmetic "not modified" failures),
+  `answerCallbackQuery`, and `send_message_with_id` that
+  returns the first chunk's `message_id` so later edits can
+  target it.
+- **`telegram` config key** in `config.json` with required
+  `bot_token` + `allowed_user_ids` (integer array) and optional
+  `allow_destructive_tools` boolean. Unauthorized user IDs are
+  dropped silently (logged to the opt-in log file) so random
+  chats can't fingerprint the bot.
+- **Per-user rolling history** — each authorized Telegram user
+  has their own in-memory `messages[]`. `/new` and `/clear`
+  reset that user's history; `/help` and `/start` reply with
+  the per-user command list.
+- **Non-interactive permission mode** for the bridge —
+  destructive tools (`Bash`, `Write`, `Edit`, any MCP tool)
+  are blanket-allowed or blanket-denied based on
+  `allow_destructive_tools`. Read-only tools (`Read`, `Glob`,
+  `Grep`, `WebFetch`, `WebSearch`, `Task`, `TodoWrite`,
+  `TodoRead`) are always auto-approved. Defaults to blocking
+  destructive tools.
+- **Inline-keyboard buttons for numbered choices** — when
+  Claude's reply contains a numbered list (two or more
+  `1. …`, `2. …` entries at line start), each option is
+  rendered as a tap-to-answer button under the message, up
+  to ~28 chars per label. Only the last chunk of a split
+  message carries the keyboard so it sits under the final
+  visible piece. Tapping sends the number back as the user's
+  next message so multi-step prompts feel conversational.
+- **Local libedit prompt alongside the Telegram poller** —
+  `claude telegram` now runs a background poller thread while
+  the main thread drives a standard `>` prompt, so the bridge
+  operator can type from the laptop too. A shared
+  `process_mutex` serializes the two so there's never a
+  concurrent `send_with_tools` call. Local input runs with
+  `g_non_interactive_tools=false` so destructive tools still
+  prompt y/a/n on the local terminal; Telegram input keeps
+  the config-flag path.
+- **Local prompt mirrors to the primary Telegram chat** —
+  a deterministic `primary_user_id` (smallest allowed ID) is
+  picked at startup. Local input echoes as `> <text>` into
+  that chat, a `…` placeholder is sent, the streaming reply
+  updates in place, and history is shared with
+  `user_messages[primary]` so a conversation can hop between
+  the laptop and the phone without losing context.
+- **Typing indicator** — an updater thread live for the
+  duration of each Telegram-sourced `send_with_tools` call
+  pushes `sendChatAction(..., "typing")` once per second so
+  the remote user sees the animation instead of dead silence.
+- **Streaming edits** — `process_sse_event`'s `text_delta`
+  branch now appends incoming chunks to a `StreamProgress`
+  buffer guarded by a mutex and a monotonic version counter.
+  The bridge first sends a tiny `…` placeholder and captures
+  its `message_id`, then the same updater thread periodically
+  `editMessageText`s it with the growing buffer. The final
+  edit after `send_with_tools` returns commits the complete
+  text plus the inline keyboard in one call. The remote chat
+  sees the reply build up token-by-token instead of waiting
+  for a wall of text.
+- **Slash commands from the local prompt** — `/usage`,
+  `/help`, `/clear`, `/model`, `/compact`, `/todos`,
+  `/memory`, and any custom `.claude/commands/*.md` commands
+  now work from inside `claude telegram` the same way they do
+  in `claude -i`. `/clear` clears the primary chat's running
+  history (since the local prompt shares it), `/model NAME`
+  swaps models mid-bridge for subsequent turns across both
+  surfaces, and `/usage` reflects real cumulative session
+  totals because `active_model` / `turn_count` /
+  `session_input` / `session_output` are now real locals in
+  `run_telegram_bridge` updated after every successful reply
+  from either source.
+
+### Known limitations
+- libedit's local prompt can be clobbered when a Telegram
+  update prints to stdout between redraws. Proper
+  `rl_save_prompt` / `rl_forced_update_display` integration
+  is deferred.
+- Inline-keyboard *permission* prompts for destructive tools
+  (letting `Bash`/`Write` run interactively without the
+  config flag) are still deferred, as are voice notes /
+  image attachments and multi-chat / group-chat support.
+
 ## [1.0.1] - 2026-04-14
 
 ### Added

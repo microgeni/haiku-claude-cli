@@ -242,7 +242,7 @@ dev machine.
       in-process vector. Statuses: pending / in_progress / completed.
       `/todos` slash command prints the current list as a checklist.
 
-### v1.1 — Remote Control via Telegram bot
+### v1.1 — Remote Control via Telegram bot ✓
 
 Instead of reverse-engineering Claude Code's undocumented
 `/remote-control` bridge protocol, use Telegram's fully-
@@ -251,15 +251,15 @@ local CLI from your phone while tools execute on your
 machine), same outbound-only HTTPS security story, but
 implementable from public docs in an afternoon.
 
-- [ ] New `claude telegram` subcommand (alongside
+- [x] New `claude telegram` subcommand (alongside
       `login`/`logout`) that runs a headless bridge loop.
       No REPL overlay — meant to run in a tmux window or
       background shell on the dev machine.
-- [ ] `src/telegram.{h,cpp}` — tiny Telegram Bot API client
+- [x] `src/telegram.{h,cpp}` — tiny Telegram Bot API client
       over libcurl: `getUpdates` with 30 s long-poll,
       `sendMessage` with Markdown V2 formatting, offset
       persistence so polls don't redeliver.
-- [ ] Config key in `config.json`:
+- [x] Config key in `config.json`:
       ```json
       "telegram": {
         "bot_token":             "123456:ABC...",
@@ -270,25 +270,49 @@ implementable from public docs in an afternoon.
       Unauthorized user IDs are ignored silently so a stray
       random chat can't fingerprint the bot. At least one
       allowed user is required.
-- [ ] Per-user in-memory `messages[]` so each authorized
+- [x] Per-user in-memory `messages[]` so each authorized
       Telegram user has their own rolling conversation. A
       `/new` message from the user resets their history.
-- [ ] Bridge loop: incoming message → run `send_with_tools`
+- [x] Bridge loop: incoming message → run `send_with_tools`
       with that user's history → stream the response to the
       local terminal as usual → send the final assistant
       text back via `sendMessage`.
-- [ ] Read-only tool pre-approval: `Read`, `Glob`, `Grep`,
+- [x] Read-only tool pre-approval: `Read`, `Glob`, `Grep`,
       `WebFetch`, `WebSearch`, `Task`, `TodoWrite`,
       `TodoRead` auto-run. `Bash`, `Write`, `Edit`, and any
       MCP tool are blocked unless
       `allow_destructive_tools: true` is set — there's no
       way to prompt y/a/n through Telegram cleanly.
-- [ ] `/help` from Telegram replies with the per-user
+- [x] `/help` from Telegram replies with the per-user
       command list; `/new` resets history; any other
       message goes to Claude.
-- [ ] Hooks, memory (`CLAUDE.md`), and MCP still apply in
+- [x] Hooks, memory (`CLAUDE.md`), and MCP still apply in
       Telegram mode — the bridge just replaces the REPL
       input source, the rest of the stack is unchanged.
+
+Shipped beyond the original slice:
+- [x] **Inline-keyboard buttons for numbered choices** —
+      when Claude replies with a numbered list, each option
+      becomes a tap-to-answer button under the message.
+- [x] **Local libedit prompt alongside the Telegram poller**
+      so the bridge operator can type from the laptop too,
+      serialized against the remote poller via a shared
+      process mutex. Local input mirrors to the primary
+      Telegram chat and shares rolling history with that
+      user — hop between laptop and phone without losing
+      context.
+- [x] **Typing indicator** — `sendChatAction(..., "typing")`
+      once per second for the duration of each send, so the
+      remote user sees the "typing..." animation.
+- [x] **Streaming edits** — the placeholder message is
+      edited in-place with `editMessageText` as tokens
+      arrive, so the Telegram chat sees the reply build up
+      token-by-token instead of a wall of text.
+- [x] **Slash commands from the local prompt** — `/usage`,
+      `/help`, `/clear`, `/model`, `/compact`, `/todos`,
+      `/memory`, and custom `.claude/commands/*.md`
+      commands all work inside `claude telegram` the same
+      way they do in `claude -i`.
 
 Deferred for a later slice:
 - Inline-keyboard permission prompts for destructive tools
