@@ -6,6 +6,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <poll.h>
 #include <sstream>
@@ -181,6 +182,29 @@ bool save_history(const json& messages, const std::string& model) {
     f << j.dump(2) << "\n";
     chmod(path.c_str(), 0600);
     return true;
+}
+
+std::map<std::string, std::string> g_last_rate_headers;
+
+size_t header_callback(char* buffer, size_t size, size_t nitems, void* /*userp*/) {
+    const size_t total = size * nitems;
+    std::string  line(buffer, total);
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+        line.pop_back();
+    }
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) return total;
+
+    std::string name = line.substr(0, colon);
+    for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (name.compare(0, 20, "anthropic-ratelimit-") != 0) return total;
+
+    std::string value = line.substr(colon + 1);
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.erase(0, 1);
+    }
+    g_last_rate_headers[name] = value;
+    return total;
 }
 
 volatile sig_atomic_t g_interrupted = 0;
@@ -519,6 +543,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
 
     g_interrupted = 0;
     const CURLcode res = curl_easy_perform(curl);
@@ -814,6 +839,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /model <name>      swap the active model\n"
             "  /compact           summarize and replace the running history\n"
             "  /cost              session token cost estimate\n"
+            "  /usage             session usage + most recent rate-limit headers\n"
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
             "  /exit, /quit       leave the REPL\n")
@@ -868,6 +894,37 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         } else {
             ctx.model = args;
             std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
+        }
+        return SlashAction::Continue;
+    }
+    if (cmd == "/usage") {
+        const PriceEntry price = get_price(ctx.model, ctx.prices);
+        const double in_cost   = (ctx.session_input  / 1'000'000.0) * price.input;
+        const double out_cost  = (ctx.session_output / 1'000'000.0) * price.output;
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "session:\n"
+            "  model:       %s\n"
+            "  turns:       %d\n"
+            "  input:       %d tokens\n"
+            "  output:      %d tokens\n"
+            "  est. cost:   $%.4f\n",
+            ctx.model.c_str(),
+            ctx.turn_count,
+            ctx.session_input,
+            ctx.session_output,
+            in_cost + out_cost);
+        std::cout << tui::meta(buf);
+        if (ctx.auth.kind == AuthKind::OAuth) {
+            std::cout << tui::meta("(OAuth: billed against Pro/Max quota)") << "\n";
+        }
+        if (!g_last_rate_headers.empty()) {
+            std::cout << "\n" << tui::meta("rate limits (from last API call):") << "\n";
+            for (const auto& kv : g_last_rate_headers) {
+                std::cout << tui::meta("  " + kv.first + ": " + kv.second) << "\n";
+            }
+        } else {
+            std::cout << tui::meta("(no rate-limit headers captured yet — make a request first)") << "\n";
         }
         return SlashAction::Continue;
     }
@@ -954,7 +1011,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/cost",
-        "/todos", "/memory", "/exit", "/quit",
+        "/usage", "/todos", "/memory", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
