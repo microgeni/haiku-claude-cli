@@ -242,6 +242,35 @@ dev machine.
       in-process vector. Statuses: pending / in_progress / completed.
       `/todos` slash command prints the current list as a checklist.
 
+### v1.1 — Remote Control (deferred)
+
+Match the official Claude Code `/remote-control` slash command —
+register a bridge session with Anthropic, surface a
+`claude.ai/code/session_…` URL (and QR) so the same local CLI
+can be driven from the Claude web or mobile apps while tools
+continue to run locally.
+
+- [ ] Short-lived credential exchange from the full-scope OAuth
+      token to a per-session bridge credential.
+- [ ] Outbound-only transport: poll for work items at adaptive
+      intervals, WebSocket upgrade when a remote client is
+      attached, automatic reconnect on laptop wake / network
+      drop with a ~10 minute hard timeout.
+- [ ] Bridge message envelope (`control_response`, tool_use
+      routing, permission prompts crossing the wire, transcript
+      "initial connection flush" on reconnect).
+- [ ] Workspace-trust prerequisite — per-project flag persisted
+      locally; block the command until accepted once.
+- [ ] `/remote-control` slash command wiring the dialog
+      (status line, URL, QR code, `d`/`space`/`Esc` keybinds).
+
+**Prerequisite**: the wire protocol isn't published; it must
+come from either reverse-engineering the `@anthropic-ai/
+claude-code` npm bundle or mitmproxy-capturing an official
+`claude remote-control` session. Keywords to grep for in the
+bundle: `/poll`, `control_response`, `work items`, `bridge`,
+`Remote credentials fetch`, `--sdk-url`.
+
 ### v1.0 — Stable release ✓
 
 Polish, docs, and Haiku-native integration.

@@ -6,6 +6,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-04-14
+
+### Added
+- **`/usage` slash command** rendering the three subscription
+  windows as a Claude Code-style dialog — filled-block progress
+  bars with percentage and local-time reset for each window.
+  Data comes from Anthropic's `anthropic-ratelimit-unified-*`
+  response headers (5h session, 7d all-models, 7d Sonnet-only),
+  captured via `CURLOPT_HEADERFUNCTION` and refreshed on every
+  successful or error request. Session summary line shows
+  model / turns / input / output / estimated cost above the
+  bars, plus a `binding window` note from the
+  `representative-claim` header.
+
+### Removed
+- **`/cost` slash command** — fully subsumed by `/usage`, which
+  now shows the same session summary as its first line plus the
+  additional rate-limit windows.
+
+### Deferred
+- `/remote-control` — filed as v1.1 in ROADMAP.md. Protocol is
+  not publicly documented; implementation is blocked on
+  reverse-engineering the official Claude Code bundle or
+  mitmproxy-capturing the handshake.
+
 ## [1.0.0] - 2026-04-14
 
 First stable release. All roadmap milestones from v0.2 through v1.0
