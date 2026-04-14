@@ -1278,6 +1278,16 @@ int run_telegram_bridge(const Config& cfg) {
         if (primary_user_id == 0 || id < primary_user_id) primary_user_id = id;
     }
 
+    // Mutable runtime state for the shared LoopCtx passed into
+    // dispatch_slash — /model, /compact, and /usage all need to
+    // mutate or read this. active_model replaces cfg.model in the
+    // worker so /model NAME from the bridge prompt actually swaps
+    // the model for subsequent turns (local or Telegram).
+    std::string active_model  = cfg.model;
+    int         turn_count    = 0;
+    int         session_input = 0;
+    int         session_output= 0;
+
     std::mutex              process_mutex;
     std::map<int64_t, json> user_messages;
 
@@ -1338,10 +1348,14 @@ int run_telegram_bridge(const Config& cfg) {
         g_non_interactive_allow_destructive = allow_destructive;
         std::cout << tui::claude_prompt();
         const std::string effective_system = compose_system(cfg.system);
-        const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
+        const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
                                             messages, effective_system);
         std::cout << "\n";
         g_non_interactive_tools = false;
+
+        ++turn_count;
+        session_input  += result.input_tokens;
+        session_output += result.output_tokens;
 
         // 5. Tear down the updater thread.
         updater_running.store(false);
@@ -1462,10 +1476,14 @@ int run_telegram_bridge(const Config& cfg) {
         g_non_interactive_allow_destructive  = allow_destructive;
         std::cout << tui::claude_prompt();
         const std::string effective_system = compose_system(cfg.system);
-        const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
+        const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
                                             messages, effective_system);
         std::cout << "\n";
         g_non_interactive_tools = false;
+
+        ++turn_count;
+        session_input  += result.input_tokens;
+        session_output += result.output_tokens;
 
         updater_running.store(false);
         if (updater.joinable()) updater.join();
@@ -1522,6 +1540,16 @@ int run_telegram_bridge(const Config& cfg) {
     // grabs the same process_mutex so it serializes cleanly against
     // concurrent Telegram traffic.
     repl::init(repl_history_path());
+    commands::load(config_dir() + "/commands");
+    {
+        std::vector<std::string> all_slash = {
+            "/help", "/clear", "/model", "/compact", "/usage",
+            "/todos", "/memory", "/exit", "/quit",
+        };
+        for (const auto& c : commands::names()) all_slash.push_back("/" + c);
+        repl::set_slash_commands(all_slash);
+    }
+
     while (!g_interrupted) {
         std::string line;
         if (!repl::read_message(tui::user_prompt(),
@@ -1534,7 +1562,26 @@ int run_telegram_bridge(const Config& cfg) {
         }
         if (line.empty()) continue;
         if (line == "exit" || line == "quit" || line == ":q") break;
-        repl::record(line);
+
+        bool already_recorded = false;
+        if (!line.empty() && line.front() == '/') {
+            std::lock_guard<std::mutex> lk(process_mutex);
+            json& messages_ref = user_messages[primary_user_id];
+            if (!messages_ref.is_array()) messages_ref = json::array();
+            LoopCtx ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,
+                        active_model, turn_count, session_input, session_output,
+                        messages_ref};
+            std::string expanded;
+            const SlashAction action = dispatch_slash(line, ctx, expanded);
+            repl::record(line);
+            already_recorded = true;
+            if (action == SlashAction::Quit)     break;
+            if (action == SlashAction::Continue) continue;
+            if (action == SlashAction::Passthrough) {
+                line = std::move(expanded);
+            }
+        }
+        if (!already_recorded) repl::record(line);
 
         std::lock_guard<std::mutex> lk(process_mutex);
         std::cout << "\n";
