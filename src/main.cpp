@@ -24,6 +24,7 @@
 #include "mcp.h"
 #include "oauth.h"
 #include "repl.h"
+#include "telegram.h"
 #include "tools.h"
 #include "tui.h"
 
@@ -246,6 +247,7 @@ struct Config {
     json        prices;
     json        hooks;
     json        mcp_servers;
+    json        telegram;
 };
 
 Config load_config() {
@@ -264,6 +266,7 @@ Config load_config() {
         if (j.contains("prices"))       cfg.prices      = j["prices"];
         if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
         if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
+        if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
         if (j.contains("logging") && j["logging"].is_object()) {
             cfg.logging_enabled = j["logging"].value("enabled", false);
         }
@@ -645,9 +648,21 @@ std::unordered_set<std::string>& always_allowed() {
     return s;
 }
 
+// Non-interactive mode is set by the Telegram bridge: there's no
+// stdin to prompt on, so destructive tools are either blanket-allowed
+// or blanket-denied based on config.
+bool g_non_interactive_tools        = false;
+bool g_non_interactive_allow_destructive = false;
+
 Permission prompt_permission(const std::string& tool_name, const json& input) {
     if (always_allowed().count(tool_name)) return Permission::Allow;
     if (!tools::requires_permission(tool_name)) return Permission::Allow;
+
+    if (g_non_interactive_tools) {
+        return g_non_interactive_allow_destructive
+               ? Permission::Allow
+               : Permission::Deny;
+    }
 
     const std::string extra = tools::preview(tool_name, input);
     if (!extra.empty()) {
@@ -1151,6 +1166,138 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
 } // namespace
 
+int run_telegram_bridge(const Config& cfg) {
+    if (!cfg.telegram.is_object()) {
+        std::cerr << "error: config.telegram is missing from config.json\n";
+        return 1;
+    }
+    const std::string token = cfg.telegram.value("bot_token", std::string{});
+    if (token.empty()) {
+        std::cerr << "error: config.telegram.bot_token is not set\n";
+        return 1;
+    }
+
+    std::unordered_set<int64_t> allowed;
+    if (cfg.telegram.contains("allowed_user_ids")
+        && cfg.telegram["allowed_user_ids"].is_array()) {
+        for (const auto& v : cfg.telegram["allowed_user_ids"]) {
+            if (v.is_number_integer()) allowed.insert(v.get<int64_t>());
+        }
+    }
+    if (allowed.empty()) {
+        std::cerr << "error: config.telegram.allowed_user_ids must list "
+                     "at least one Telegram user ID\n";
+        return 1;
+    }
+
+    const bool allow_destructive =
+        cfg.telegram.value("allow_destructive_tools", false);
+
+    const Auth auth = resolve_auth();
+    if (auth.kind == AuthKind::None) {
+        std::cerr << "error: no authentication configured. Run `claude login` "
+                     "or set ANTHROPIC_API_KEY before `claude telegram`.\n";
+        return 1;
+    }
+
+    telegram::Client client(token);
+    g_non_interactive_tools              = true;
+    g_non_interactive_allow_destructive  = allow_destructive;
+
+    InterruptGuard interrupt_guard;
+
+    std::cout << tui::bold("Telegram bridge active") << "\n"
+              << tui::dim("  authorized user ids: ");
+    bool first = true;
+    for (const auto& id : allowed) {
+        if (!first) std::cout << ",";
+        std::cout << " " << id;
+        first = false;
+    }
+    std::cout << "\n"
+              << tui::dim(allow_destructive
+                          ? "  destructive tools: ALLOWED"
+                          : "  destructive tools: blocked (Bash/Write/Edit/MCP)")
+              << "\n"
+              << tui::dim("  Ctrl+C to stop") << "\n\n";
+
+    log_line("telegram bridge start (destructive="
+             + std::string(allow_destructive ? "yes" : "no") + ")");
+
+    // One in-memory history per Telegram user, so each chat keeps
+    // rolling context until they /new.
+    std::map<int64_t, json> user_messages;
+
+    while (!g_interrupted) {
+        const auto updates = client.poll(20);
+        if (g_interrupted) break;
+
+        for (const auto& u : updates) {
+            if (g_interrupted) break;
+            if (!allowed.count(u.user_id)) {
+                // Silent drop — no fingerprint leak to random chats.
+                log_line("telegram reject user=" + std::to_string(u.user_id));
+                continue;
+            }
+
+            const std::string who = u.username.empty()
+                ? std::to_string(u.user_id)
+                : u.username;
+            std::cout << tui::meta("[telegram " + who + "] " + u.text) << "\n";
+            log_line("telegram rx user=" + std::to_string(u.user_id)
+                     + " text=" + u.text);
+
+            // Telegram-side slash commands.
+            if (u.text == "/new" || u.text == "/clear") {
+                user_messages.erase(u.user_id);
+                client.send_message(u.chat_id, "(history cleared)");
+                continue;
+            }
+            if (u.text == "/help" || u.text == "/start") {
+                client.send_message(u.chat_id,
+                    "haiku-claude-cli bridge\n"
+                    "\n"
+                    "Send any message and I'll run it through Claude on the "
+                    "local machine, with read-only tools enabled.\n"
+                    "\n"
+                    "Commands:\n"
+                    "  /new     reset this chat's rolling history\n"
+                    "  /help    this message");
+                continue;
+            }
+
+            // Dispatch to Claude.
+            json& messages = user_messages[u.user_id];
+            if (!messages.is_array()) messages = json::array();
+            const json snapshot = messages;
+            messages.push_back({{"role", "user"}, {"content", u.text}});
+
+            std::cout << tui::claude_prompt();
+            const std::string effective_system = compose_system(cfg.system);
+            const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
+                                                messages, effective_system);
+            std::cout << "\n";
+
+            if (result.exit_code != 0 || result.assistant_text.empty()) {
+                messages = snapshot;
+                client.send_message(u.chat_id,
+                    "(error: Claude did not return a response)");
+                log_line("telegram tx user=" + std::to_string(u.user_id)
+                         + " -> error");
+                continue;
+            }
+
+            client.send_message(u.chat_id, result.assistant_text);
+            log_line("telegram tx user=" + std::to_string(u.user_id)
+                     + " out=" + std::to_string(result.output_tokens));
+        }
+    }
+
+    std::cout << "\n" << tui::meta("[telegram bridge stopped]") << "\n";
+    log_line("telegram bridge stop");
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     tui::init();
 
@@ -1164,6 +1311,10 @@ int main(int argc, char* argv[]) {
     init_logging(cfg.logging_enabled);
     hooks::load(cfg.hooks);
     mcp::init(cfg.mcp_servers);
+
+    if (argc >= 2 && std::string(argv[1]) == "telegram") {
+        return run_telegram_bridge(cfg);
+    }
 
     std::string              model         = cfg.model;
     int                      max_tokens    = cfg.max_tokens;
