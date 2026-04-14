@@ -171,6 +171,95 @@ bool Client::send_message(int64_t chat_id, const std::string& text,
     return all_ok;
 }
 
+int64_t Client::send_message_with_id(int64_t chat_id, const std::string& text,
+                                     const std::vector<std::vector<Button>>& keyboard) {
+    // Only the first chunk's message_id is returned; subsequent
+    // chunks (if any) aren't tracked by callers that want to edit.
+    const std::string effective = text.empty() ? std::string{"(empty)"} : text;
+    const size_t      first_len = std::min<size_t>(effective.size(), 3800);
+    const std::string first     = effective.substr(0, first_len);
+    const bool        only_chunk = (first_len == effective.size());
+
+    json body = {
+        {"chat_id", chat_id},
+        {"text",    first},
+    };
+    if (only_chunk && !keyboard.empty()) {
+        json rows = json::array();
+        for (const auto& row : keyboard) {
+            json cols = json::array();
+            for (const auto& btn : row) {
+                cols.push_back({{"text", btn.text}, {"callback_data", btn.callback_data}});
+            }
+            rows.push_back(cols);
+        }
+        body["reply_markup"] = {{"inline_keyboard", rows}};
+    }
+
+    std::string response;
+    if (!post_json("sendMessage", body.dump(), &response, 15)) return 0;
+
+    int64_t message_id = 0;
+    try {
+        const json j = json::parse(response);
+        if (j.value("ok", false) && j.contains("result")) {
+            message_id = j["result"].value("message_id", int64_t{0});
+        }
+    } catch (const json::exception&) {}
+
+    // Send any remaining chunks as follow-up messages (no message_id
+    // returned — caller only edits the first chunk).
+    if (!only_chunk) {
+        send_message(chat_id, effective.substr(first_len), keyboard);
+    }
+    return message_id;
+}
+
+bool Client::edit_message_text(int64_t chat_id, int64_t message_id,
+                               const std::string& text,
+                               const std::vector<std::vector<Button>>& keyboard) {
+    if (message_id == 0) return false;
+    // Telegram caps edited text at 4096. Truncate with a marker so
+    // we always stay under the cap.
+    std::string body_text = text;
+    constexpr size_t kCap = 3800;
+    if (body_text.size() > kCap) {
+        body_text = body_text.substr(0, kCap) + "\n\n[... truncated]";
+    }
+
+    json body = {
+        {"chat_id",    chat_id},
+        {"message_id", message_id},
+        {"text",       body_text},
+    };
+    if (!keyboard.empty()) {
+        json rows = json::array();
+        for (const auto& row : keyboard) {
+            json cols = json::array();
+            for (const auto& btn : row) {
+                cols.push_back({{"text", btn.text}, {"callback_data", btn.callback_data}});
+            }
+            rows.push_back(cols);
+        }
+        body["reply_markup"] = {{"inline_keyboard", rows}};
+    }
+
+    std::string response;
+    post_json("editMessageText", body.dump(), &response, 10);
+    // "message is not modified" and rate-limit errors are non-fatal.
+    // We don't bubble failures up because missing an edit is
+    // cosmetically fine.
+    return true;
+}
+
+bool Client::send_chat_action(int64_t chat_id, const std::string& action) {
+    const json body = {
+        {"chat_id", chat_id},
+        {"action",  action},
+    };
+    return post_json("sendChatAction", body.dump(), nullptr, 5);
+}
+
 bool Client::answer_callback(const std::string& callback_query_id,
                              const std::string& notice) {
     json body = {

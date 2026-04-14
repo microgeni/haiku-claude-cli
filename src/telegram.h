@@ -55,6 +55,27 @@ public:
     bool send_message(int64_t chat_id, const std::string& text,
                       const std::vector<std::vector<Button>>& keyboard = {});
 
+    // Like send_message, but returns the message_id of the first
+    // chunk — callers can pass it to edit_message_text() later for
+    // streaming updates. Returns 0 on failure. Only the final chunk
+    // carries the keyboard.
+    int64_t send_message_with_id(int64_t chat_id, const std::string& text,
+                                 const std::vector<std::vector<Button>>& keyboard = {});
+
+    // editMessageText — replace the text of a previously-sent
+    // message. Telegram rate-limits edits to about once per second
+    // per message, so callers should throttle. Silently ignores the
+    // "message is not modified" error which Telegram returns when
+    // new text matches the old.
+    bool edit_message_text(int64_t chat_id, int64_t message_id,
+                           const std::string& text,
+                           const std::vector<std::vector<Button>>& keyboard = {});
+
+    // sendChatAction — push a transient "typing..." (or other)
+    // indicator to the chat for about 5 seconds. Call periodically
+    // while a long operation is in flight.
+    bool send_chat_action(int64_t chat_id, const std::string& action = "typing");
+
     // answerCallbackQuery — call after receiving a callback Update so
     // Telegram dismisses the spinner on the tapped button. Optional
     // `notice` pops a short toast on the user's side.

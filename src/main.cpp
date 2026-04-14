@@ -7,11 +7,13 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <poll.h>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
@@ -185,6 +187,17 @@ bool save_history(const json& messages, const std::string& model) {
     return true;
 }
 
+// Cross-thread progress handle used by the Telegram bridge to watch a
+// streaming response and push incremental edits to the chat. Written
+// by process_sse_event's text_delta branch; read by the bridge's
+// updater thread. Nulled out when no remote consumer is attached.
+struct StreamProgress {
+    std::mutex        mu;
+    std::string       text;
+    std::atomic<int>  version {0};
+};
+StreamProgress* g_stream_progress = nullptr;
+
 std::map<std::string, std::string> g_last_rate_headers;
 
 size_t header_callback(char* buffer, size_t size, size_t nitems, void* /*userp*/) {
@@ -352,6 +365,11 @@ void process_sse_event(const std::string& event, StreamState* state) {
                 state->current_text += chunk;
                 state->text += chunk;
                 state->saw_text = true;
+                if (g_stream_progress) {
+                    std::lock_guard<std::mutex> lk(g_stream_progress->mu);
+                    g_stream_progress->text += chunk;
+                    g_stream_progress->version.fetch_add(1, std::memory_order_relaxed);
+                }
             } else if (dtype == "input_json_delta") {
                 state->current_tool_input_raw += delta.value("partial_json", "");
             }
@@ -1227,8 +1245,6 @@ int run_telegram_bridge(const Config& cfg) {
     }
 
     telegram::Client client(token);
-    g_non_interactive_tools              = true;
-    g_non_interactive_allow_destructive  = allow_destructive;
 
     InterruptGuard interrupt_guard;
 
@@ -1245,104 +1261,209 @@ int run_telegram_bridge(const Config& cfg) {
                           ? "  destructive tools: ALLOWED"
                           : "  destructive tools: blocked (Bash/Write/Edit/MCP)")
               << "\n"
-              << tui::dim("  Ctrl+C to stop") << "\n\n";
+              << tui::dim("  local prompt below; also polling Telegram "
+                          "in the background")
+              << "\n\n";
 
     log_line("telegram bridge start (destructive="
              + std::string(allow_destructive ? "yes" : "no") + ")");
 
-    // One in-memory history per Telegram user, so each chat keeps
-    // rolling context until they /new.
-    std::map<int64_t, json> user_messages;
+    std::mutex                process_mutex;
+    std::map<int64_t, json>   user_messages;
+    json                      local_messages = json::array();
 
-    while (!g_interrupted) {
-        const auto updates = client.poll(20);
-        if (g_interrupted) break;
+    // Process one Telegram update — called from the poller thread
+    // with `process_mutex` held. Runs send_with_tools in
+    // non-interactive tool mode and mirrors the streaming response
+    // to the originating chat via editMessageText, plus a periodic
+    // `typing` action so the user sees live activity.
+    auto process_telegram = [&](const telegram::Update& u) {
+        if (u.is_callback) {
+            client.answer_callback(u.callback_query_id);
+        }
 
-        for (const auto& u : updates) {
-            if (g_interrupted) break;
-            if (!allowed.count(u.user_id)) {
-                // Silent drop — no fingerprint leak to random chats.
-                log_line("telegram reject user=" + std::to_string(u.user_id));
-                continue;
+        const std::string who = u.username.empty()
+            ? std::to_string(u.user_id)
+            : u.username;
+        const std::string arrow = u.is_callback ? "tap" : "text";
+        std::cout << tui::meta("[telegram " + who + " " + arrow + "] " + u.text)
+                  << "\n";
+        log_line("telegram rx user=" + std::to_string(u.user_id)
+                 + " " + arrow + "=" + u.text);
+
+        if (u.text == "/new" || u.text == "/clear") {
+            user_messages.erase(u.user_id);
+            client.send_message(u.chat_id, "(history cleared)");
+            return;
+        }
+        if (u.text == "/help" || u.text == "/start") {
+            client.send_message(u.chat_id,
+                "haiku-claude-cli bridge\n"
+                "\n"
+                "Send any message and I'll run it through Claude on the "
+                "local machine.\n"
+                "\n"
+                "Commands:\n"
+                "  /new     reset this chat's rolling history\n"
+                "  /help    this message");
+            return;
+        }
+
+        json& messages = user_messages[u.user_id];
+        if (!messages.is_array()) messages = json::array();
+        const json snapshot = messages;
+        messages.push_back({{"role", "user"}, {"content", u.text}});
+
+        // Send an initial placeholder; we'll edit it as tokens
+        // stream in. Capture its message_id.
+        const int64_t placeholder_id =
+            client.send_message_with_id(u.chat_id, "\xE2\x80\xA6"); // …
+
+        // Thread hooks: the updater thread watches g_stream_progress
+        // and pushes periodic editMessageText + typing actions
+        // without blocking the main Claude call.
+        StreamProgress progress;
+        g_stream_progress = &progress;
+        std::atomic<bool> updater_running { true };
+        int last_version = 0;
+
+        std::thread updater([&]() {
+            while (updater_running.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                if (!updater_running.load()) break;
+
+                // Keep the typing indicator alive (~5s TTL in Telegram).
+                client.send_chat_action(u.chat_id, "typing");
+
+                if (placeholder_id == 0) continue;
+                const int v = progress.version.load(std::memory_order_relaxed);
+                if (v == last_version) continue;
+                last_version = v;
+
+                std::string snapshot_text;
+                {
+                    std::lock_guard<std::mutex> lk(progress.mu);
+                    snapshot_text = progress.text;
+                }
+                if (!snapshot_text.empty()) {
+                    client.edit_message_text(u.chat_id, placeholder_id, snapshot_text);
+                }
             }
+        });
 
-            const std::string who = u.username.empty()
-                ? std::to_string(u.user_id)
-                : u.username;
-            const std::string arrow = u.is_callback ? "tap" : "text";
-            std::cout << tui::meta("[telegram " + who + " " + arrow + "] " + u.text)
-                      << "\n";
-            log_line("telegram rx user=" + std::to_string(u.user_id)
-                     + " " + arrow + "=" + u.text);
+        g_non_interactive_tools              = true;
+        g_non_interactive_allow_destructive  = allow_destructive;
+        std::cout << tui::claude_prompt();
+        const std::string effective_system = compose_system(cfg.system);
+        const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
+                                            messages, effective_system);
+        std::cout << "\n";
+        g_non_interactive_tools = false;
 
-            // Acknowledge a button tap so Telegram dismisses its
-            // loading spinner immediately.
-            if (u.is_callback) {
-                client.answer_callback(u.callback_query_id);
-            }
+        updater_running.store(false);
+        if (updater.joinable()) updater.join();
+        g_stream_progress = nullptr;
 
-            // Telegram-side slash commands.
-            if (u.text == "/new" || u.text == "/clear") {
-                user_messages.erase(u.user_id);
-                client.send_message(u.chat_id, "(history cleared)");
-                continue;
-            }
-            if (u.text == "/help" || u.text == "/start") {
-                client.send_message(u.chat_id,
-                    "haiku-claude-cli bridge\n"
-                    "\n"
-                    "Send any message and I'll run it through Claude on the "
-                    "local machine, with read-only tools enabled.\n"
-                    "\n"
-                    "Commands:\n"
-                    "  /new     reset this chat's rolling history\n"
-                    "  /help    this message");
-                continue;
-            }
-
-            // Dispatch to Claude.
-            json& messages = user_messages[u.user_id];
-            if (!messages.is_array()) messages = json::array();
-            const json snapshot = messages;
-            messages.push_back({{"role", "user"}, {"content", u.text}});
-
-            std::cout << tui::claude_prompt();
-            const std::string effective_system = compose_system(cfg.system);
-            const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
-                                                messages, effective_system);
-            std::cout << "\n";
-
-            if (result.exit_code != 0 || result.assistant_text.empty()) {
-                messages = snapshot;
+        if (result.exit_code != 0 || result.assistant_text.empty()) {
+            messages = snapshot;
+            if (placeholder_id) {
+                client.edit_message_text(u.chat_id, placeholder_id,
+                    "(error: Claude did not return a response)");
+            } else {
                 client.send_message(u.chat_id,
                     "(error: Claude did not return a response)");
-                log_line("telegram tx user=" + std::to_string(u.user_id)
-                         + " -> error");
-                continue;
             }
-
-            // Auto-detect numbered lists and turn them into an inline
-            // keyboard so the user can tap an answer instead of
-            // typing "1".
-            std::vector<std::vector<telegram::Button>> keyboard;
-            const auto options = extract_numbered_options(result.assistant_text);
-            for (const auto& opt : options) {
-                telegram::Button b;
-                b.text          = opt.first + ". " + opt.second;
-                b.callback_data = opt.first;
-                keyboard.push_back({ std::move(b) });
-            }
-
-            client.send_message(u.chat_id, result.assistant_text, keyboard);
             log_line("telegram tx user=" + std::to_string(u.user_id)
-                     + " out=" + std::to_string(result.output_tokens)
-                     + (keyboard.empty()
-                            ? ""
-                            : " buttons=" + std::to_string(keyboard.size())));
+                     + " -> error");
+            return;
+        }
+
+        // Auto-detect numbered lists -> inline keyboard buttons.
+        std::vector<std::vector<telegram::Button>> keyboard;
+        const auto options = extract_numbered_options(result.assistant_text);
+        for (const auto& opt : options) {
+            telegram::Button b;
+            b.text          = opt.first + ". " + opt.second;
+            b.callback_data = opt.first;
+            keyboard.push_back({ std::move(b) });
+        }
+
+        // Final edit — commits the complete text and attaches the
+        // inline keyboard in one call. Falls back to a fresh
+        // sendMessage if we never got a placeholder id (shouldn't
+        // happen in practice).
+        if (placeholder_id) {
+            client.edit_message_text(u.chat_id, placeholder_id,
+                                     result.assistant_text, keyboard);
+        } else {
+            client.send_message(u.chat_id, result.assistant_text, keyboard);
+        }
+        log_line("telegram tx user=" + std::to_string(u.user_id)
+                 + " out=" + std::to_string(result.output_tokens)
+                 + (keyboard.empty()
+                        ? ""
+                        : " buttons=" + std::to_string(keyboard.size())));
+    };
+
+    // Background Telegram poller. Long-polls getUpdates; when
+    // messages arrive, grabs process_mutex and hands off to
+    // process_telegram.
+    std::thread poller([&]() {
+        while (!g_interrupted) {
+            const auto updates = client.poll(10);
+            if (g_interrupted) break;
+
+            for (const auto& u : updates) {
+                if (g_interrupted) break;
+                if (!allowed.count(u.user_id)) {
+                    log_line("telegram reject user=" + std::to_string(u.user_id));
+                    continue;
+                }
+                std::lock_guard<std::mutex> lk(process_mutex);
+                process_telegram(u);
+            }
+        }
+    });
+
+    // Main thread — libedit-backed local REPL. Each committed line
+    // grabs the same process_mutex so it serializes cleanly against
+    // concurrent Telegram traffic.
+    repl::init(repl_history_path());
+    while (!g_interrupted) {
+        std::string line;
+        if (!repl::read_message(tui::user_prompt(),
+                                tui::continuation_prompt(), line)) {
+            std::cout << "\n";
+            break;
+        }
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        if (line.empty()) continue;
+        if (line == "exit" || line == "quit" || line == ":q") break;
+        repl::record(line);
+
+        std::lock_guard<std::mutex> lk(process_mutex);
+        g_non_interactive_tools = false; // local prompt can answer y/a/n
+
+        const json snapshot = local_messages;
+        local_messages.push_back({{"role", "user"}, {"content", line}});
+
+        std::cout << "\n" << tui::claude_prompt();
+        const std::string effective_system = compose_system(cfg.system);
+        const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
+                                            local_messages, effective_system);
+        std::cout << "\n";
+
+        if (result.exit_code != 0) {
+            local_messages = snapshot;
         }
     }
 
-    std::cout << "\n" << tui::meta("[telegram bridge stopped]") << "\n";
+    g_interrupted = 1;
+    if (poller.joinable()) poller.join();
+
+    std::cout << tui::meta("[telegram bridge stopped]") << "\n";
     log_line("telegram bridge stop");
     return 0;
 }
