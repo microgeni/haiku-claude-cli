@@ -1166,6 +1166,32 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
 } // namespace
 
+// Scan `text` for a numbered list at line start (`1. foo`, `2. bar`,
+// ...). If at least two consecutive options are found, return them
+// so the bridge can render inline-keyboard buttons. Each pair is
+// {number_string, item_label}; the label is trimmed to ~24 chars
+// so the buttons stay readable in Telegram.
+std::vector<std::pair<std::string, std::string>>
+extract_numbered_options(const std::string& text) {
+    std::vector<std::pair<std::string, std::string>> out;
+    std::istringstream iss(text);
+    std::string        line;
+    while (std::getline(iss, line)) {
+        size_t i = 0;
+        while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
+        if (i == 0 || i > 2)                       continue;    // need 1-2 digits
+        if (i >= line.size() || line[i] != '.')    continue;
+        if (i + 1 >= line.size() || line[i + 1] != ' ') continue;
+        std::string number = line.substr(0, i);
+        std::string label  = line.substr(i + 2);
+        // Truncate the label to fit inside a Telegram button cleanly.
+        if (label.size() > 28) label = label.substr(0, 27) + "\xE2\x80\xA6"; // …
+        out.emplace_back(std::move(number), std::move(label));
+    }
+    if (out.size() < 2) return {};
+    return out;
+}
+
 int run_telegram_bridge(const Config& cfg) {
     if (!cfg.telegram.is_object()) {
         std::cerr << "error: config.telegram is missing from config.json\n";
@@ -1243,9 +1269,17 @@ int run_telegram_bridge(const Config& cfg) {
             const std::string who = u.username.empty()
                 ? std::to_string(u.user_id)
                 : u.username;
-            std::cout << tui::meta("[telegram " + who + "] " + u.text) << "\n";
+            const std::string arrow = u.is_callback ? "tap" : "text";
+            std::cout << tui::meta("[telegram " + who + " " + arrow + "] " + u.text)
+                      << "\n";
             log_line("telegram rx user=" + std::to_string(u.user_id)
-                     + " text=" + u.text);
+                     + " " + arrow + "=" + u.text);
+
+            // Acknowledge a button tap so Telegram dismisses its
+            // loading spinner immediately.
+            if (u.is_callback) {
+                client.answer_callback(u.callback_query_id);
+            }
 
             // Telegram-side slash commands.
             if (u.text == "/new" || u.text == "/clear") {
@@ -1287,9 +1321,24 @@ int run_telegram_bridge(const Config& cfg) {
                 continue;
             }
 
-            client.send_message(u.chat_id, result.assistant_text);
+            // Auto-detect numbered lists and turn them into an inline
+            // keyboard so the user can tap an answer instead of
+            // typing "1".
+            std::vector<std::vector<telegram::Button>> keyboard;
+            const auto options = extract_numbered_options(result.assistant_text);
+            for (const auto& opt : options) {
+                telegram::Button b;
+                b.text          = opt.first + ". " + opt.second;
+                b.callback_data = opt.first;
+                keyboard.push_back({ std::move(b) });
+            }
+
+            client.send_message(u.chat_id, result.assistant_text, keyboard);
             log_line("telegram tx user=" + std::to_string(u.user_id)
-                     + " out=" + std::to_string(result.output_tokens));
+                     + " out=" + std::to_string(result.output_tokens)
+                     + (keyboard.empty()
+                            ? ""
+                            : " buttons=" + std::to_string(keyboard.size())));
         }
     }
 

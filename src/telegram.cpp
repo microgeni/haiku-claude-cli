@@ -64,7 +64,7 @@ std::vector<Update> Client::poll(int timeout_sec) {
     const json body = {
         {"offset",          next_offset_},
         {"timeout",         timeout_sec},
-        {"allowed_updates", json::array({"message"})},
+        {"allowed_updates", json::array({"message", "callback_query"})},
     };
 
     std::string response;
@@ -82,6 +82,25 @@ std::vector<Update> Client::poll(int timeout_sec) {
         for (const auto& entry : j["result"]) {
             const int64_t id = entry.value("update_id", int64_t{0});
             if (id >= next_offset_) next_offset_ = id + 1;
+
+            // Button tap from a previous inline keyboard.
+            if (entry.contains("callback_query")) {
+                const auto& cb = entry["callback_query"];
+                Update u;
+                u.update_id        = id;
+                u.is_callback      = true;
+                u.callback_query_id = cb.value("id", std::string{});
+                u.text             = cb.value("data", std::string{});
+                if (cb.contains("from")) {
+                    u.user_id  = cb["from"].value("id", int64_t{0});
+                    u.username = cb["from"].value("username", std::string{});
+                }
+                if (cb.contains("message") && cb["message"].contains("chat")) {
+                    u.chat_id = cb["message"]["chat"].value("id", int64_t{0});
+                }
+                out.push_back(std::move(u));
+                continue;
+            }
 
             if (!entry.contains("message")) continue;
             const auto& msg = entry["message"];
@@ -107,35 +126,58 @@ std::vector<Update> Client::poll(int timeout_sec) {
     return out;
 }
 
-bool Client::send_message(int64_t chat_id, const std::string& text) {
-    // Telegram's per-message cap is 4096 characters; chunk at 3800 to
-    // leave room for any prefix formatting we might add later.
-    constexpr size_t kChunk = 3800;
-    size_t i = 0;
-    bool   all_ok = true;
-    while (i < text.size()) {
-        const std::string piece = text.substr(i, kChunk);
-        i += kChunk;
+bool Client::send_message(int64_t chat_id, const std::string& text,
+                          const std::vector<std::vector<Button>>& keyboard) {
+    // Build the reply_markup once; it's only attached to the final
+    // chunk so the buttons render under the last visible piece.
+    json reply_markup;
+    if (!keyboard.empty()) {
+        json rows = json::array();
+        for (const auto& row : keyboard) {
+            json cols = json::array();
+            for (const auto& btn : row) {
+                cols.push_back({
+                    {"text",          btn.text},
+                    {"callback_data", btn.callback_data},
+                });
+            }
+            rows.push_back(cols);
+        }
+        reply_markup = {{"inline_keyboard", rows}};
+    }
 
-        const json body = {
+    const std::string effective = text.empty() ? std::string{"(empty)"} : text;
+    constexpr size_t  kChunk    = 3800;
+    size_t            i         = 0;
+    bool              all_ok    = true;
+
+    while (i < effective.size()) {
+        const std::string piece = effective.substr(i, kChunk);
+        i += kChunk;
+        const bool last = (i >= effective.size());
+
+        json body = {
             {"chat_id", chat_id},
             {"text",    piece},
         };
+        if (last && !reply_markup.is_null()) {
+            body["reply_markup"] = reply_markup;
+        }
         if (!post_json("sendMessage", body.dump(), nullptr, 15)) {
             all_ok = false;
             break;
         }
     }
-    if (text.empty()) {
-        const json body = {
-            {"chat_id", chat_id},
-            {"text",    "(empty)"},
-        };
-        if (!post_json("sendMessage", body.dump(), nullptr, 15)) {
-            all_ok = false;
-        }
-    }
     return all_ok;
+}
+
+bool Client::answer_callback(const std::string& callback_query_id,
+                             const std::string& notice) {
+    json body = {
+        {"callback_query_id", callback_query_id},
+    };
+    if (!notice.empty()) body["text"] = notice;
+    return post_json("answerCallbackQuery", body.dump(), nullptr, 10);
 }
 
 } // namespace telegram

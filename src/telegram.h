@@ -13,12 +13,23 @@
 // in their own loop. Thread-unsafe — one client per thread.
 namespace telegram {
 
+struct Button {
+    std::string text;          // label rendered on the button
+    std::string callback_data; // opaque string Telegram echoes back on tap
+};
+
 struct Update {
     int64_t     update_id = 0;
     int64_t     chat_id   = 0;
     int64_t     user_id   = 0;
     std::string username;     // without leading @, may be empty
     std::string text;
+
+    // When true this update is a button tap from an inline keyboard
+    // on a prior message. `text` holds the callback_data; the REPL
+    // treats it as if the user had just typed that string.
+    bool        is_callback = false;
+    std::string callback_query_id;
 };
 
 class Client {
@@ -37,7 +48,18 @@ public:
     // POST sendMessage to the given chat. Long messages are chunked
     // into ~4000-char pieces to stay under Telegram's 4096-char
     // per-message limit. Returns false on any HTTP/transport failure.
-    bool send_message(int64_t chat_id, const std::string& text);
+    //
+    // Optional `keyboard` renders an inline keyboard below the
+    // message — the outer vector is rows, the inner one is columns.
+    // Only the final chunk of a split message carries the keyboard.
+    bool send_message(int64_t chat_id, const std::string& text,
+                      const std::vector<std::vector<Button>>& keyboard = {});
+
+    // answerCallbackQuery — call after receiving a callback Update so
+    // Telegram dismisses the spinner on the tapped button. Optional
+    // `notice` pops a short toast on the user's side.
+    bool answer_callback(const std::string& callback_query_id,
+                         const std::string& notice = {});
 
     const std::string& token() const { return token_; }
 
