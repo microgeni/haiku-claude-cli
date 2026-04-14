@@ -242,34 +242,60 @@ dev machine.
       in-process vector. Statuses: pending / in_progress / completed.
       `/todos` slash command prints the current list as a checklist.
 
-### v1.1 — Remote Control (deferred)
+### v1.1 — Remote Control via Telegram bot
 
-Match the official Claude Code `/remote-control` slash command —
-register a bridge session with Anthropic, surface a
-`claude.ai/code/session_…` URL (and QR) so the same local CLI
-can be driven from the Claude web or mobile apps while tools
-continue to run locally.
+Instead of reverse-engineering Claude Code's undocumented
+`/remote-control` bridge protocol, use Telegram's fully-
+documented Bot API as the transport. Same outcome (drive the
+local CLI from your phone while tools execute on your
+machine), same outbound-only HTTPS security story, but
+implementable from public docs in an afternoon.
 
-- [ ] Short-lived credential exchange from the full-scope OAuth
-      token to a per-session bridge credential.
-- [ ] Outbound-only transport: poll for work items at adaptive
-      intervals, WebSocket upgrade when a remote client is
-      attached, automatic reconnect on laptop wake / network
-      drop with a ~10 minute hard timeout.
-- [ ] Bridge message envelope (`control_response`, tool_use
-      routing, permission prompts crossing the wire, transcript
-      "initial connection flush" on reconnect).
-- [ ] Workspace-trust prerequisite — per-project flag persisted
-      locally; block the command until accepted once.
-- [ ] `/remote-control` slash command wiring the dialog
-      (status line, URL, QR code, `d`/`space`/`Esc` keybinds).
+- [ ] New `claude telegram` subcommand (alongside
+      `login`/`logout`) that runs a headless bridge loop.
+      No REPL overlay — meant to run in a tmux window or
+      background shell on the dev machine.
+- [ ] `src/telegram.{h,cpp}` — tiny Telegram Bot API client
+      over libcurl: `getUpdates` with 30 s long-poll,
+      `sendMessage` with Markdown V2 formatting, offset
+      persistence so polls don't redeliver.
+- [ ] Config key in `config.json`:
+      ```json
+      "telegram": {
+        "bot_token":             "123456:ABC...",
+        "allowed_user_ids":      [12345678],
+        "allow_destructive_tools": false
+      }
+      ```
+      Unauthorized user IDs are ignored silently so a stray
+      random chat can't fingerprint the bot. At least one
+      allowed user is required.
+- [ ] Per-user in-memory `messages[]` so each authorized
+      Telegram user has their own rolling conversation. A
+      `/new` message from the user resets their history.
+- [ ] Bridge loop: incoming message → run `send_with_tools`
+      with that user's history → stream the response to the
+      local terminal as usual → send the final assistant
+      text back via `sendMessage`.
+- [ ] Read-only tool pre-approval: `Read`, `Glob`, `Grep`,
+      `WebFetch`, `WebSearch`, `Task`, `TodoWrite`,
+      `TodoRead` auto-run. `Bash`, `Write`, `Edit`, and any
+      MCP tool are blocked unless
+      `allow_destructive_tools: true` is set — there's no
+      way to prompt y/a/n through Telegram cleanly.
+- [ ] `/help` from Telegram replies with the per-user
+      command list; `/new` resets history; any other
+      message goes to Claude.
+- [ ] Hooks, memory (`CLAUDE.md`), and MCP still apply in
+      Telegram mode — the bridge just replaces the REPL
+      input source, the rest of the stack is unchanged.
 
-**Prerequisite**: the wire protocol isn't published; it must
-come from either reverse-engineering the `@anthropic-ai/
-claude-code` npm bundle or mitmproxy-capturing an official
-`claude remote-control` session. Keywords to grep for in the
-bundle: `/poll`, `control_response`, `work items`, `bridge`,
-`Remote credentials fetch`, `--sdk-url`.
+Deferred for a later slice:
+- Inline-keyboard permission prompts for destructive tools
+  (would let `Bash`/`Write` run interactively without the
+  config flag).
+- Voice notes / image attachments from Telegram.
+- Multi-chat / group-chat support.
 
 ### v1.0 — Stable release ✓
 
