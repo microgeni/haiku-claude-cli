@@ -838,8 +838,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /clear             reset the running conversation\n"
             "  /model <name>      swap the active model\n"
             "  /compact           summarize and replace the running history\n"
-            "  /cost              session token cost estimate\n"
-            "  /usage             session usage + most recent rate-limit headers\n"
+            "  /usage             session tokens, cost estimate, subscription windows\n"
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
             "  /exit, /quit       leave the REPL\n")
@@ -976,28 +975,6 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         }
         return SlashAction::Continue;
     }
-    if (cmd == "/cost") {
-        const PriceEntry price = get_price(ctx.model, ctx.prices);
-        const double in_cost  = (ctx.session_input  / 1'000'000.0) * price.input;
-        const double out_cost = (ctx.session_output / 1'000'000.0) * price.output;
-        const double total    = in_cost + out_cost;
-        char buf[512];
-        std::snprintf(buf, sizeof(buf),
-            "session cost estimate (%s):\n"
-            "  input  : %d tokens  x $%.2f/M = $%.4f\n"
-            "  output : %d tokens  x $%.2f/M = $%.4f\n"
-            "  total  :                     = $%.4f",
-            ctx.model.c_str(),
-            ctx.session_input,  price.input,  in_cost,
-            ctx.session_output, price.output, out_cost,
-            total);
-        std::cout << tui::meta(buf) << "\n";
-        if (ctx.auth.kind == AuthKind::OAuth) {
-            std::cout << tui::meta("(OAuth sessions bill against your Pro/Max quota; this is informational)")
-                      << "\n";
-        }
-        return SlashAction::Continue;
-    }
     if (cmd == "/compact") {
         if (ctx.messages.empty()) {
             std::cout << tui::meta("[nothing to compact]") << "\n";
@@ -1058,8 +1035,8 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
-        "/help", "/clear", "/model", "/compact", "/cost",
-        "/usage", "/todos", "/memory", "/exit", "/quit",
+        "/help", "/clear", "/model", "/compact", "/usage",
+        "/todos", "/memory", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
