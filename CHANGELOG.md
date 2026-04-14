@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-14
+
+First stable release. All roadmap milestones from v0.2 through v1.0
+are now complete; the CLI has feature parity with Claude Code's core
+functionality on the parts that make sense for a native Haiku build.
+
+### Added
+- **Man page** at `docs/claude.1` — full troff-format reference
+  covering commands, options, slash commands, config.json keys,
+  hooks/mcp_servers layout, environment variables, files, and
+  examples. Installed by `make install` to
+  `$(PREFIX)/documentation/man/man1/claude.1` and shipped inside
+  the HPKG under the same path.
+- **`-V` / `--version` flag** prints the binary's semver. The same
+  `kVersion` constant also drives the Messages API User-Agent so
+  Anthropic sees the correct version string per release.
+- **Opt-in structured logs** at
+  `~/config/settings/claude-cli/logs/claude-YYYY-MM-DD.log`, enabled
+  via `{ "logging": { "enabled": true } }` in config.json. Records
+  session start, per-turn token totals, tool invocations, and HTTP
+  error details with ISO-style timestamps.
+- **Rewritten README** — full walkthrough of install (HPKG,
+  from-source, nix dev shell), authentication, REPL usage, slash
+  commands, every built-in tool, memory files, hooks, MCP, config
+  keys, and environment variables.
+
+### Changed
+- **Human-friendly non-2xx error messages.** Anthropic's error
+  envelope is parsed for `error.message`; well-known HTTP codes get
+  plain-language explanations (401 suggests logout/login, 403
+  forbidden, 429 distinguishes the opaque Claude Code gate from a
+  real rate limit, 5xx labels server errors). The blanket
+  "response body: ..." dump is gone. Errors are also mirrored into
+  the log file when logging is enabled.
+
+### Deferred
+- Automatic OAuth token refresh mid-stream on 401 (still a manual
+  logout/login).
+- HaikuDepot submission (requires a HaikuPorts recipe and external
+  review; the HPKG is downloadable from the Gitea release page).
+
 ## [0.10.0] - 2026-04-14
 
 ### Added
