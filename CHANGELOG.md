@@ -6,6 +6,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **One-shot runs no longer silently deny destructive tools.**
+  `prompt_permission` used to call `std::getline(std::cin, …)`
+  unconditionally, which returned EOF immediately whenever stdin
+  wasn't a usable terminal (piped input already consumed, script
+  invocation, subprocess with closed stdin). The CLI would emit
+  the `allow Write?` prompt, read nothing, fall through to
+  `Permission::Deny`, and return `"user denied permission to run
+  Write"` as the tool result — leaving the assistant to narrate a
+  plausible-sounding "I'll create X" that never actually touched
+  the disk. The permission path now detects `!isatty(stdin)`, prints
+  a clear `[tool: Write -> denied: no TTY to prompt]` line on stderr
+  with guidance, and surfaces the same message in the
+  `tool_result` so the model can tell the user why the call failed
+  instead of fabricating success.
+
+### Added
+- **`-y`, `--yes` flag** — auto-approves destructive tools
+  (`Bash`, `Write`, `Edit`) for the current invocation without
+  the y/a/n prompt. Intended for one-shot and piped-stdin runs
+  where no interactive dialog is possible. Seeds the session
+  allowlist so every destructive call in the same run is cleared
+  at once.
+- **`allow_destructive_tools` config key** (top-level in
+  `config.json`) — persistent equivalent of `-y` for setups that
+  always run headless. Also applied by the Telegram bridge when
+  its own `telegram.allow_destructive_tools` isn't set.
+- **Granular denial reasons** — `prompt_permission` now returns a
+  specific string for each denial path (`no TTY`, `stdin closed`,
+  `user declined`, `non-interactive mode`), threaded into the
+  `tool_result` content so the model sees *why* the call was
+  blocked instead of a generic message.
+
 ## [1.1.0] - 2026-04-14
 
 Remote control via Telegram. Drive the local CLI from your phone

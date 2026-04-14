@@ -30,7 +30,9 @@ OpenSSL, libedit, and nlohmann/json.
   (one-shot sub-agent), `TodoWrite`/`TodoRead`.
 - **Permission prompts** on destructive tools (`Bash`, `Write`,
   `Edit`) with `(y)es once / (a)lways session / (n)o` choices, plus
-  a block-style diff preview for writes and edits.
+  a block-style diff preview for writes and edits. Headless runs
+  (piped stdin, scripts, CI) can auto-approve via `-y/--yes` or
+  `"allow_destructive_tools": true` in `config.json`.
 - **Project + user memory** via `CLAUDE.md` files loaded automatically
   each turn.
 - **Custom slash commands** from `.claude/commands/*.md` with
@@ -192,6 +194,8 @@ key is optional; CLI flags override the file.
   "max_tokens": 1024,
   "system":     "Extra system instructions appended after the preamble.",
   "show_usage": false,
+
+  "allow_destructive_tools": false,
 
   "logging": { "enabled": false },
 

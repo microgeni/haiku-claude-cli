@@ -255,8 +255,9 @@ struct Config {
     std::string model;
     int         max_tokens = kMaxTokens;
     std::string system;
-    bool        show_usage      = false;
-    bool        logging_enabled = false;
+    bool        show_usage              = false;
+    bool        logging_enabled         = false;
+    bool        allow_destructive_tools = false;
     json        prices;
     json        hooks;
     json        mcp_servers;
@@ -280,6 +281,8 @@ Config load_config() {
         if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
         if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
         if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
+        if (j.contains("allow_destructive_tools"))
+            cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
         if (j.contains("logging") && j["logging"].is_object()) {
             cfg.logging_enabled = j["logging"].value("enabled", false);
         }
@@ -462,6 +465,9 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "                       usage to stderr.\n"
               << "  -r, --resume         Start the REPL pre-loaded with the last saved\n"
               << "                       session (implies -i).\n"
+              << "  -y, --yes            Auto-approve destructive tools (Bash/Write/Edit)\n"
+              << "                       for this run. Needed for one-shot invocations\n"
+              << "                       without a TTY to answer the y/a/n prompt.\n"
               << "      --plain          Disable ANSI color output.\n"
               << "      --color          Force ANSI color output, even when piped.\n"
               << "  -V, --version        Print version and exit.\n"
@@ -469,7 +475,7 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "\n"
               << "Config file: " << config_path() << "\n"
               << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
-              << "  prices. CLI flags override config values.\n"
+              << "  allow_destructive_tools, prices. CLI flags override config values.\n"
               << "\n"
               << "Memory files (prepended to the system prompt, user before project):\n"
               << "  " << user_memory_path() << "\n"
@@ -669,17 +675,49 @@ std::unordered_set<std::string>& always_allowed() {
 // Non-interactive mode is set by the Telegram bridge: there's no
 // stdin to prompt on, so destructive tools are either blanket-allowed
 // or blanket-denied based on config.
-bool g_non_interactive_tools        = false;
+bool g_non_interactive_tools             = false;
 bool g_non_interactive_allow_destructive = false;
 
-Permission prompt_permission(const std::string& tool_name, const json& input) {
+// Set at startup from Config::allow_destructive_tools or the -y/--yes
+// flag. Grants destructive-tool permission without prompting whenever
+// stdin isn't usable for a y/a/n dialog (piped stdin, closed stdin,
+// etc.). Interactive TTY sessions still prompt normally.
+bool g_allow_destructive_tools = false;
+
+Permission prompt_permission(const std::string& tool_name, const json& input,
+                             std::string* denial_reason = nullptr) {
     if (always_allowed().count(tool_name)) return Permission::Allow;
     if (!tools::requires_permission(tool_name)) return Permission::Allow;
 
     if (g_non_interactive_tools) {
-        return g_non_interactive_allow_destructive
-               ? Permission::Allow
-               : Permission::Deny;
+        if (g_non_interactive_allow_destructive) return Permission::Allow;
+        if (denial_reason) {
+            *denial_reason =
+                "destructive tool " + tool_name + " is blocked in non-interactive "
+                "mode. Set \"allow_destructive_tools\": true in config.json "
+                "(or telegram.allow_destructive_tools for the bridge) to allow it.";
+        }
+        return Permission::Deny;
+    }
+
+    // One-shot runs with no usable stdin (piped, closed, redirected)
+    // cannot show a y/a/n dialog. Either auto-approve from config / -y,
+    // or fail loudly with a clear reason so the model sees why the call
+    // was denied instead of silently narrating fake success.
+    if (!isatty(fileno(stdin))) {
+        if (g_allow_destructive_tools) {
+            always_allowed().insert(tool_name);
+            return Permission::Allow;
+        }
+        const std::string msg =
+            "cannot prompt for " + tool_name + " permission: stdin is not a "
+            "terminal. Re-run with -y/--yes to auto-approve destructive tools "
+            "for this invocation, set \"allow_destructive_tools\": true in "
+            + config_path() + ", or use -i/--interactive from a real terminal.";
+        std::cerr << tui::meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
+                  << tui::dim("  " + msg) << "\n";
+        if (denial_reason) *denial_reason = msg;
+        return Permission::Deny;
     }
 
     const std::string extra = tools::preview(tool_name, input);
@@ -693,13 +731,21 @@ Permission prompt_permission(const std::string& tool_name, const json& input) {
               << std::flush;
 
     std::string line;
-    if (!std::getline(std::cin, line)) return Permission::Deny;
+    if (!std::getline(std::cin, line)) {
+        if (denial_reason) {
+            *denial_reason = "stdin closed before permission answer for " + tool_name;
+        }
+        return Permission::Deny;
+    }
     const char c = line.empty() ? 'n' : static_cast<char>(std::tolower(static_cast<unsigned char>(line[0])));
     if (c == 'a') {
         always_allowed().insert(tool_name);
         return Permission::Allow;
     }
     if (c == 'y') return Permission::Allow;
+    if (denial_reason) {
+        *denial_reason = "user declined permission for " + tool_name;
+    }
     return Permission::Deny;
 }
 
@@ -743,8 +789,11 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 tres.content  = "hook blocked " + tname;
                 tres.is_error = true;
                 std::cout << tui::meta("[tool: " + tname + " -> blocked by hook]") << "\n";
-            } else if (prompt_permission(tname, tinput) == Permission::Deny) {
-                tres.content  = "user denied permission to run " + tname;
+            } else if (std::string denial;
+                       prompt_permission(tname, tinput, &denial) == Permission::Deny) {
+                tres.content  = denial.empty()
+                                ? "user denied permission to run " + tname
+                                : denial;
                 tres.is_error = true;
                 std::cout << tui::meta("[tool: " + tname + " -> denied]") << "\n";
             } else if (tname == "Task") {
@@ -1626,6 +1675,11 @@ int main(int argc, char* argv[]) {
     std::string              custom_system = cfg.system;
     std::vector<std::string> parts;
 
+    // Seed the destructive-tool flag from config. -y/--yes below can
+    // still flip it on for ad-hoc runs; there's no reason to flip it
+    // off mid-invocation so we don't expose a --no-yes counterpart.
+    if (cfg.allow_destructive_tools) g_allow_destructive_tools = true;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -1647,6 +1701,10 @@ int main(int argc, char* argv[]) {
         if (arg == "-r" || arg == "--resume") {
             resume      = true;
             interactive = true;
+            continue;
+        }
+        if (arg == "-y" || arg == "--yes") {
+            g_allow_destructive_tools = true;
             continue;
         }
         if (arg == "--plain") {

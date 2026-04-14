@@ -60,6 +60,16 @@ After a one-shot response, print input/output token counts to stderr.
 Pre-load the REPL with the last saved session (implies
 .BR \-i ).
 .TP
+.B \-y, \-\-yes
+Auto-approve destructive tools
+.RB ( Bash ", " Write ", " Edit )
+for this invocation without prompting. Required for one-shot runs
+where stdin is not a terminal (piped, redirected, or inside a
+subprocess); otherwise the y/a/n dialog has no way to get an
+answer and the tool is denied with a clear error. Equivalent to
+.I allow_destructive_tools: true
+in the config file, but scoped to a single run.
+.TP
 .B \-\-plain
 Disable ANSI color output.
 .TP
@@ -130,6 +140,16 @@ Default custom system prompt.
 .I show_usage
 Boolean; default for
 .BR \-\-usage .
+.TP
+.I allow_destructive_tools
+Boolean; when
+.BR true ,
+.BR Bash ", " Write ", and " Edit
+skip the interactive permission prompt. Useful for headless or
+piped-stdin runs where no y/a/n dialog is possible. Equivalent to
+passing
+.B \-y/\-\-yes
+on every invocation.
 .TP
 .I prices
 Object keyed by model name with
