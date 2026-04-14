@@ -191,7 +191,7 @@ key is optional; CLI flags override the file.
 ```json
 {
   "model":      "claude-sonnet-4-6",
-  "max_tokens": 1024,
+  "max_tokens": 8192,
   "system":     "Extra system instructions appended after the preamble.",
   "show_usage": false,
 

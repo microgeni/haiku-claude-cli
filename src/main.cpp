@@ -40,7 +40,7 @@ constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
 constexpr const char* kOAuthBeta    = "oauth-2025-04-20";
 constexpr const char* kOAuthSystem  = "You are Claude Code, Anthropic's official CLI for Claude.";
-constexpr int         kMaxTokens    = 1024;
+constexpr int         kMaxTokens    = 8192;
 
 std::string config_dir() {
 #ifdef __HAIKU__
@@ -646,6 +646,17 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     }
 
     if (state.content_blocks.empty()) {
+        // Empty is fine if the turn ended cleanly — but attribute
+        // the cause. The most common reason in practice is a
+        // max_tokens cap so tight that the first tool_use block
+        // never got a content_block_stop event, leaving it stuck
+        // in the accumulator. Surface stop_reason so the caller
+        // (and the user) can react, rather than emitting a generic
+        // "no content" error that hides the real cause.
+        if (state.stop_reason == "max_tokens") {
+            return {0, state.text, state.input_tokens, state.output_tokens,
+                    state.content_blocks, state.stop_reason};
+        }
         std::cerr << "error: no content received in stream\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
         return {1, {}, 0, 0, {}, {}};
@@ -767,9 +778,65 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
             return aggregate;
         }
 
-        messages.push_back({{"role", "assistant"}, {"content", result.content_blocks}});
+        // If the response was cut off at the max_tokens cap, any
+        // tool_use block in the round is almost certainly incomplete
+        // (partial JSON input) and never got executed. Drop those
+        // orphan blocks from the history so a REPL continuation
+        // doesn't send an assistant turn with tool_use_ids that have
+        // no matching tool_result — the API rejects that with 400.
+        // We keep plain text blocks since they're still valid.
+        const bool truncated = (result.stop_reason == "max_tokens");
+        if (truncated) {
+            std::vector<json> safe_blocks;
+            for (const auto& block : result.content_blocks) {
+                if (block.value("type", "") != "tool_use") {
+                    safe_blocks.push_back(block);
+                }
+            }
+            if (safe_blocks.empty()) {
+                // Nothing salvageable — don't push an empty assistant turn.
+            } else {
+                messages.push_back({{"role", "assistant"}, {"content", safe_blocks}});
+            }
+        } else {
+            messages.push_back({{"role", "assistant"}, {"content", result.content_blocks}});
+        }
 
         if (result.stop_reason != "tool_use") {
+            // Surface non-normal terminations loudly instead of
+            // exiting silently. "end_turn" is the expected happy
+            // path; everything else (max_tokens, refusal, pause_turn,
+            // stop_sequence without an explicit one configured) is
+            // something the user should know about.
+            if (result.stop_reason == "max_tokens") {
+                const int used = result.output_tokens;
+                std::cerr << "\n" << tui::error_label()
+                          << " response truncated at the max_tokens cap"
+                          << " (output=" << used << " / max=" << max_tokens << ")."
+                          << "\n  Re-run with -t N (or set \"max_tokens\" in config.json)"
+                             " to raise the cap."
+                          << (truncated ? "\n  The in-flight tool call was"
+                                          " dropped from history; the file/command"
+                                          " it would have produced was NOT executed."
+                                        : "")
+                          << "\n";
+                log_line("truncated stop_reason=max_tokens output=" + std::to_string(used));
+            } else if (result.stop_reason == "refusal") {
+                std::cerr << "\n" << tui::error_label()
+                          << " the model declined to answer (stop_reason=refusal).\n";
+                log_line("stop_reason=refusal");
+            } else if (result.stop_reason == "pause_turn") {
+                std::cerr << "\n" << tui::error_label()
+                          << " the model paused its turn (stop_reason=pause_turn);"
+                             " re-send to continue.\n";
+                log_line("stop_reason=pause_turn");
+            } else if (result.stop_reason != "end_turn"
+                       && result.stop_reason != "stop_sequence"
+                       && !result.stop_reason.empty()) {
+                std::cerr << "\n" << tui::error_label()
+                          << " unexpected stop_reason=" << result.stop_reason << "\n";
+                log_line("stop_reason=" + result.stop_reason);
+            }
             return aggregate;
         }
 

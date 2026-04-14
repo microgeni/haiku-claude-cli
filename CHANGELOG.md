@@ -7,6 +7,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Max-tokens truncation is no longer silent.** When an API
+  round ended with `stop_reason: "max_tokens"`, `send_with_tools`
+  exited its loop (since the stop reason wasn't `"tool_use"`) and
+  one-shot mode returned exit 0 with no warning. Any half-serialized
+  `tool_use` block in that round was never executed — the user saw
+  their Bash/Read exploration run fine, then silence, and no files
+  written. The loop now logs a loud
+  `error: response truncated at the max_tokens cap (output=N / max=M)`
+  line to stderr with the re-run guidance, and explicitly notes that
+  the in-flight tool call was dropped. `refusal`, `pause_turn`, and
+  any other unexpected `stop_reason` also emit a clear stderr line
+  instead of silent exit; `end_turn` and `stop_sequence` stay quiet
+  as the happy path.
+- **Orphan `tool_use` blocks on truncation no longer poison REPL
+  history.** When `stop_reason == "max_tokens"`, partial `tool_use`
+  blocks (empty or malformed `input`, no matching `tool_result`)
+  are stripped from the assistant turn before it's pushed onto
+  `messages[]`. Previously, the next REPL continuation would send
+  a `tool_use_id` the API couldn't match to a `tool_result` and
+  fail with HTTP 400. Plain text blocks from the same round are
+  preserved.
 - **One-shot runs no longer silently deny destructive tools.**
   `prompt_permission` used to call `std::getline(std::cin, …)`
   unconditionally, which returned EOF immediately whenever stdin
@@ -21,6 +42,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with guidance, and surfaces the same message in the
   `tool_result` so the model can tell the user why the call failed
   instead of fabricating success.
+
+### Changed
+- **Default `max_tokens` raised from 1024 to 8192.** 1024 was fine
+  for a text-only CLI but routinely busted during `tool_use` rounds
+  where the model emits a large Write/Edit JSON argument (e.g. a
+  full source file). 8192 gives tool-using sessions real headroom
+  without meaningfully affecting latency or cost. Users who want
+  the old behavior can set `"max_tokens": 1024` in `config.json`
+  or pass `-t 1024`.
 
 ### Added
 - **`-y`, `--yes` flag** — auto-approves destructive tools

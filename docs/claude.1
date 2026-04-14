@@ -47,7 +47,10 @@ is invoked with no message at a terminal).
 Override the default model (claude-sonnet-4-6).
 .TP
 .BI \-t " N" ", \-\-max-tokens " N
-Set the maximum tokens in the response (default 1024).
+Set the maximum tokens in a single response (default 8192). Hitting
+the cap mid-tool-use round drops the incomplete tool call and prints
+a truncation warning on stderr; raise this when the model needs
+room to emit large Write/Edit arguments.
 .TP
 .BI \-s " TEXT" ", \-\-system " TEXT
 Append a custom system prompt. With OAuth, the required Claude Code
