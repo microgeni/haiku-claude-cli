@@ -1268,15 +1268,125 @@ int run_telegram_bridge(const Config& cfg) {
     log_line("telegram bridge start (destructive="
              + std::string(allow_destructive ? "yes" : "no") + ")");
 
-    std::mutex                process_mutex;
-    std::map<int64_t, json>   user_messages;
-    json                      local_messages = json::array();
+    // The "primary" allowed user ID is the one local input mirrors
+    // to, so typing locally appears in the same Telegram chat as
+    // your phone-side conversation and shares the same rolling
+    // history. Pick the smallest ID deterministically rather than
+    // relying on set iteration order.
+    int64_t primary_user_id = 0;
+    for (const auto& id : allowed) {
+        if (primary_user_id == 0 || id < primary_user_id) primary_user_id = id;
+    }
+
+    std::mutex              process_mutex;
+    std::map<int64_t, json> user_messages;
+
+    // Shared worker: runs one send_with_tools call and mirrors the
+    // whole thing (user echo + typing + streaming edits + buttons
+    // on the final response) to a Telegram chat. Used by both the
+    // poller thread and the local REPL.
+    auto process_turn = [&](int64_t           chat_id,
+                            json&             messages,
+                            const std::string& prompt_text,
+                            bool              non_interactive,
+                            const char*       source_label) {
+        // 1. Echo the user's prompt into the chat so the remote
+        //    side sees what was typed (even for local-origin turns).
+        if (chat_id != 0) {
+            client.send_message(chat_id, "> " + prompt_text);
+        }
+
+        // 2. Initial placeholder; we'll edit it as tokens stream in.
+        const int64_t placeholder_id = chat_id == 0
+            ? 0
+            : client.send_message_with_id(chat_id, "\xE2\x80\xA6"); // …
+
+        // 3. Updater thread: typing indicator + streaming edits.
+        StreamProgress    progress;
+        g_stream_progress = &progress;
+        std::atomic<bool> updater_running { chat_id != 0 };
+        int               last_version = 0;
+        std::thread updater;
+        if (updater_running.load()) {
+            updater = std::thread([&]() {
+                while (updater_running.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    if (!updater_running.load()) break;
+                    client.send_chat_action(chat_id, "typing");
+                    if (placeholder_id == 0) continue;
+                    const int v = progress.version.load(std::memory_order_relaxed);
+                    if (v == last_version) continue;
+                    last_version = v;
+                    std::string snapshot_text;
+                    {
+                        std::lock_guard<std::mutex> lk(progress.mu);
+                        snapshot_text = progress.text;
+                    }
+                    if (!snapshot_text.empty()) {
+                        client.edit_message_text(chat_id, placeholder_id, snapshot_text);
+                    }
+                }
+            });
+        }
+
+        // 4. Snapshot + push the user turn onto the shared history.
+        const json snapshot = messages;
+        if (!messages.is_array()) messages = json::array();
+        messages.push_back({{"role", "user"}, {"content", prompt_text}});
+
+        g_non_interactive_tools             = non_interactive;
+        g_non_interactive_allow_destructive = allow_destructive;
+        std::cout << tui::claude_prompt();
+        const std::string effective_system = compose_system(cfg.system);
+        const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
+                                            messages, effective_system);
+        std::cout << "\n";
+        g_non_interactive_tools = false;
+
+        // 5. Tear down the updater thread.
+        updater_running.store(false);
+        if (updater.joinable()) updater.join();
+        g_stream_progress = nullptr;
+
+        if (result.exit_code != 0 || result.assistant_text.empty()) {
+            messages = snapshot;
+            if (chat_id != 0) {
+                const std::string err = "(error: Claude did not return a response)";
+                if (placeholder_id) client.edit_message_text(chat_id, placeholder_id, err);
+                else                 client.send_message(chat_id, err);
+            }
+            log_line(std::string(source_label) + " tx -> error");
+            return;
+        }
+
+        // 6. Numbered-list → inline-keyboard buttons.
+        std::vector<std::vector<telegram::Button>> keyboard;
+        const auto options = extract_numbered_options(result.assistant_text);
+        for (const auto& opt : options) {
+            telegram::Button b;
+            b.text          = opt.first + ". " + opt.second;
+            b.callback_data = opt.first;
+            keyboard.push_back({ std::move(b) });
+        }
+
+        // 7. Final edit with the complete text + buttons.
+        if (chat_id != 0) {
+            if (placeholder_id) {
+                client.edit_message_text(chat_id, placeholder_id,
+                                         result.assistant_text, keyboard);
+            } else {
+                client.send_message(chat_id, result.assistant_text, keyboard);
+            }
+        }
+        log_line(std::string(source_label) + " tx out="
+                 + std::to_string(result.output_tokens)
+                 + (keyboard.empty()
+                        ? ""
+                        : " buttons=" + std::to_string(keyboard.size())));
+    };
 
     // Process one Telegram update — called from the poller thread
-    // with `process_mutex` held. Runs send_with_tools in
-    // non-interactive tool mode and mirrors the streaming response
-    // to the originating chat via editMessageText, plus a periodic
-    // `typing` action so the user sees live activity.
+    // with `process_mutex` held.
     auto process_telegram = [&](const telegram::Update& u) {
         if (u.is_callback) {
             client.answer_callback(u.callback_query_id);
@@ -1310,46 +1420,43 @@ int run_telegram_bridge(const Config& cfg) {
         }
 
         json& messages = user_messages[u.user_id];
-        if (!messages.is_array()) messages = json::array();
-        const json snapshot = messages;
-        messages.push_back({{"role", "user"}, {"content", u.text}});
+        // Note: we intentionally do NOT echo the user's message back
+        // in the Telegram-origin case — they already see their own
+        // bubble in the chat UI. process_turn's echo is guarded by
+        // calling it through a telegram-origin wrapper instead:
+        // inline the logic here without the echo.
+        const int64_t chat_id = u.chat_id;
 
-        // Send an initial placeholder; we'll edit it as tokens
-        // stream in. Capture its message_id.
         const int64_t placeholder_id =
-            client.send_message_with_id(u.chat_id, "\xE2\x80\xA6"); // …
+            client.send_message_with_id(chat_id, "\xE2\x80\xA6");
 
-        // Thread hooks: the updater thread watches g_stream_progress
-        // and pushes periodic editMessageText + typing actions
-        // without blocking the main Claude call.
         StreamProgress progress;
         g_stream_progress = &progress;
         std::atomic<bool> updater_running { true };
         int last_version = 0;
-
         std::thread updater([&]() {
             while (updater_running.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 if (!updater_running.load()) break;
-
-                // Keep the typing indicator alive (~5s TTL in Telegram).
-                client.send_chat_action(u.chat_id, "typing");
-
+                client.send_chat_action(chat_id, "typing");
                 if (placeholder_id == 0) continue;
                 const int v = progress.version.load(std::memory_order_relaxed);
                 if (v == last_version) continue;
                 last_version = v;
-
                 std::string snapshot_text;
                 {
                     std::lock_guard<std::mutex> lk(progress.mu);
                     snapshot_text = progress.text;
                 }
                 if (!snapshot_text.empty()) {
-                    client.edit_message_text(u.chat_id, placeholder_id, snapshot_text);
+                    client.edit_message_text(chat_id, placeholder_id, snapshot_text);
                 }
             }
         });
+
+        if (!messages.is_array()) messages = json::array();
+        const json snapshot = messages;
+        messages.push_back({{"role", "user"}, {"content", u.text}});
 
         g_non_interactive_tools              = true;
         g_non_interactive_allow_destructive  = allow_destructive;
@@ -1366,19 +1473,13 @@ int run_telegram_bridge(const Config& cfg) {
 
         if (result.exit_code != 0 || result.assistant_text.empty()) {
             messages = snapshot;
-            if (placeholder_id) {
-                client.edit_message_text(u.chat_id, placeholder_id,
-                    "(error: Claude did not return a response)");
-            } else {
-                client.send_message(u.chat_id,
-                    "(error: Claude did not return a response)");
-            }
-            log_line("telegram tx user=" + std::to_string(u.user_id)
-                     + " -> error");
+            const std::string err = "(error: Claude did not return a response)";
+            if (placeholder_id) client.edit_message_text(chat_id, placeholder_id, err);
+            else                 client.send_message(chat_id, err);
+            log_line("telegram tx user=" + std::to_string(u.user_id) + " -> error");
             return;
         }
 
-        // Auto-detect numbered lists -> inline keyboard buttons.
         std::vector<std::vector<telegram::Button>> keyboard;
         const auto options = extract_numbered_options(result.assistant_text);
         for (const auto& opt : options) {
@@ -1387,22 +1488,14 @@ int run_telegram_bridge(const Config& cfg) {
             b.callback_data = opt.first;
             keyboard.push_back({ std::move(b) });
         }
-
-        // Final edit — commits the complete text and attaches the
-        // inline keyboard in one call. Falls back to a fresh
-        // sendMessage if we never got a placeholder id (shouldn't
-        // happen in practice).
         if (placeholder_id) {
-            client.edit_message_text(u.chat_id, placeholder_id,
+            client.edit_message_text(chat_id, placeholder_id,
                                      result.assistant_text, keyboard);
         } else {
-            client.send_message(u.chat_id, result.assistant_text, keyboard);
+            client.send_message(chat_id, result.assistant_text, keyboard);
         }
         log_line("telegram tx user=" + std::to_string(u.user_id)
-                 + " out=" + std::to_string(result.output_tokens)
-                 + (keyboard.empty()
-                        ? ""
-                        : " buttons=" + std::to_string(keyboard.size())));
+                 + " out=" + std::to_string(result.output_tokens));
     };
 
     // Background Telegram poller. Long-polls getUpdates; when
@@ -1444,20 +1537,12 @@ int run_telegram_bridge(const Config& cfg) {
         repl::record(line);
 
         std::lock_guard<std::mutex> lk(process_mutex);
-        g_non_interactive_tools = false; // local prompt can answer y/a/n
-
-        const json snapshot = local_messages;
-        local_messages.push_back({{"role", "user"}, {"content", line}});
-
-        std::cout << "\n" << tui::claude_prompt();
-        const std::string effective_system = compose_system(cfg.system);
-        const auto result = send_with_tools(auth, cfg.model, cfg.max_tokens,
-                                            local_messages, effective_system);
         std::cout << "\n";
-
-        if (result.exit_code != 0) {
-            local_messages = snapshot;
-        }
+        // Local input shares history with the primary Telegram user so
+        // the conversation is seamless across the two surfaces. The
+        // primary chat id equals the primary user id for direct DMs.
+        process_turn(primary_user_id, user_messages[primary_user_id],
+                     line, /*non_interactive=*/false, "local");
     }
 
     g_interrupted = 1;
