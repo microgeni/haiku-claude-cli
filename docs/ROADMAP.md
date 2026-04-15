@@ -64,42 +64,58 @@ without adding any new capabilities.
 - [x] Ctrl+C during a streaming response cancels the in-flight request
       cleanly instead of killing the process.
 
-### v0.3 — Terminal UI polish
+### v0.3 — Terminal UI polish ✓
 
 The current REPL is `getline` + raw stream output. Claude Code's TUI
 gets a lot of its feel from small things — live markdown rendering,
 a thinking spinner, proper line editing. Match the parts that work on
 Haiku's Terminal app (ANSI + UTF-8, 256 colors, no sixel/kitty).
 
-- [ ] **Markdown rendering** in assistant output: bold, italic, inline
+- [x] **Markdown rendering** in assistant output: bold, italic, inline
       code, code blocks with language label, bullet lists, headings.
       Falls back to raw text when stdout isn't a TTY so piped output
       stays scriptable.
-- [ ] **Syntax-highlighted code blocks** — minimal tokenizer per
+- [x] **Syntax-highlighted code blocks** — minimal tokenizer per
       language (C/C++, Python, shell, JSON to start), ANSI 256-color
       theme, auto-detected from the code block's language label.
-- [ ] **Line editing via libedit/readline** — arrow-key navigation,
+- [x] **Line editing via libedit/readline** — arrow-key navigation,
       in-memory history, emacs-style bindings, persisted REPL history
       at `~/config/settings/claude-cli/repl_history`.
-- [ ] **Multi-line input** — trailing backslash (or `"""` fence) opens
+- [x] **Multi-line input** — trailing backslash (or `"""` fence) opens
       a continuation prompt for pasting multi-paragraph messages.
-- [ ] **Live status line** at the bottom of the REPL frame showing
-      model, turn count, token totals, and elapsed time of the
-      in-flight request. Disappears cleanly when the session exits.
-- [ ] **Thinking spinner** between request submit and first token,
+- [x] **Transient status line** shown during the thinking window
+      (between request submit and first streamed token): model,
+      running message count, max-tokens cap, elapsed time, and an
+      `esc:cancel` hint. Truncates to the current `terminal_width()`
+      so it stays on one line on narrow terminals. Shipped instead
+      of a fixed-bottom frame — see box-drawing note below.
+- [x] **Thinking spinner** between request submit and first token,
       erased automatically when the stream starts.
-- [ ] **Distinct turn styling** — color and bold for `you>` / `claude>`
+- [x] **Distinct turn styling** — color and bold for `you>` / `claude>`
       prompts, dim for meta notes like `[resumed N messages]`. Honors
       `NO_COLOR` and non-TTY stdout.
-- [ ] **Terminal resize handling** — redraw status line on SIGWINCH.
+- [x] **Terminal resize handling** — SIGWINCH handler marks the
+      cached `terminal_width()` dirty so the next spinner tick
+      re-reads `TIOCGWINSZ` and truncates cleanly.
+- [x] **ESC to cancel in-flight work** — stdin is put into cbreak
+      mode for the duration of each HTTP stream; a background
+      thread watches for a bare `0x1B` byte and sets `g_interrupted`,
+      reusing the same curl-abort path as Ctrl+C. CSI escape
+      sequences (arrow keys etc.) are ignored so accidental
+      keystrokes during streaming don't kill the turn. Termios is
+      restored on scope exit so libedit gets stdin back in cooked
+      mode for the next prompt.
 - [x] **Palette portability** — the TUI sticks to standard 16-color
       ANSI codes (no 256-color / truecolor) so the user's terminal
       theme (dark or light) controls the actual rendered colors.
       True dark/light auto-detection via terminal queries or
       `COLORFGBG` is deferred until we hit a concrete need.
-- [ ] **Unicode box-drawing frame** around the REPL — deferred:
-      fixed-bottom frames need DECSTBM scroll regions and careful
-      SIGWINCH tracking, which is a bigger refactor than v0.3 warrants.
+- [ ] **Unicode box-drawing frame** around the REPL — explicitly
+      deferred. Fixed-bottom frames need DECSTBM scroll regions and
+      careful SIGWINCH tracking, which is a bigger refactor than
+      v0.3 warrants. The transient status line above covers the
+      actually-useful information window (the thinking phase) at a
+      fraction of the complexity.
 
 The TUI layer should be isolated behind a small abstraction so a
 `--plain` flag or a non-TTY stdout disables it entirely and falls back

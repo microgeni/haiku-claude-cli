@@ -6,6 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Transient status line during the thinking window.** The
+  existing spinner's label now carries live context — short
+  model name, rolling message count, `max_tokens` cap — and
+  appends the elapsed time plus an `esc:cancel` hint. The line
+  is truncated to the current `terminal_width()` so it stays on
+  one row even on narrow terminals or after a mid-session
+  resize. Rendered only between request submit and first
+  streamed token, then erased — no DECSTBM scroll region, no
+  libedit dance, clean teardown when streaming starts.
+- **SIGWINCH resize handling.** A new `tui::terminal_width()`
+  helper reads `TIOCGWINSZ` lazily and caches the result;
+  `tui::install_sigwinch_handler()` (called once from `main()`)
+  marks the cache dirty on every resize event so the next
+  spinner tick re-reads the width and re-truncates. No-op when
+  stdout isn't a TTY.
+- **ESC key cancels in-flight work.** A new `EscInterruptGuard`
+  RAII helper is scoped around `curl_easy_perform` in
+  `send_conversation`: it saves the current termios, puts stdin
+  into cbreak mode (`ICANON`/`ECHO` off, `VMIN=0`, `VTIME=0`),
+  spawns a background thread that polls stdin for a bare `0x1B`
+  byte, and sets `g_interrupted` on detection — reusing the
+  same curl-abort path as Ctrl+C. CSI escape sequences (arrow
+  keys etc.) are ignored by requiring a single-byte read so
+  accidental keystrokes during streaming don't kill the turn.
+  On scope exit the termios is restored so libedit's next
+  prompt reads in cooked mode. No-op when stdin isn't a TTY.
+
+### Changed
+- **`/exit` and `/quit` slash commands removed.** They were
+  awkward in combination with Haiku's Terminal. Bare `exit`,
+  `quit`, `:q`, and Ctrl+D still leave the REPL, so the
+  behavior is reachable — just without the slash prefix that
+  conflicted with libedit's handling. Dropped from
+  `dispatch_slash`, both REPL autocomplete lists, `/help`,
+  and the man page.
+
 ## [1.1.1] - 2026-04-14
 
 ### Fixed

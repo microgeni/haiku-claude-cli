@@ -17,6 +17,18 @@ void init();
 bool color_enabled();
 void set_color_enabled(bool on);
 
+// Current terminal width in columns (TIOCGWINSZ). Returns 0 when
+// stdout isn't a TTY. Re-reads TIOCGWINSZ on every call after a
+// SIGWINCH has been delivered (cheap — a single ioctl) and caches
+// the result in between. Safe to call concurrently with any
+// streaming output.
+int terminal_width();
+
+// Installs a SIGWINCH handler that marks the cached terminal_width()
+// dirty so the next call re-reads TIOCGWINSZ. Call once at startup
+// after init(); no-op when stdout isn't a TTY.
+void install_sigwinch_handler();
+
 std::string bold(const std::string& s);
 std::string dim(const std::string& s);
 std::string italic(const std::string& s);

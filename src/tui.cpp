@@ -2,9 +2,11 @@
 
 #include <chrono>
 #include <cctype>
+#include <csignal>
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include <unordered_set>
 
@@ -40,6 +42,47 @@ bool detect_color_support() {
 
 void init() {
     g_color_enabled = detect_color_support();
+}
+
+namespace {
+
+// Cached terminal width. Set to -1 initially so the first call to
+// terminal_width() triggers an ioctl. The SIGWINCH handler resets
+// this to -1 again on every resize event so the next call re-reads.
+// sig_atomic_t because a signal handler writes to it.
+volatile std::sig_atomic_t g_term_width_dirty = 1;
+int                        g_cached_term_width = 0;
+
+extern "C" void sigwinch_handler(int) {
+    g_term_width_dirty = 1;
+}
+
+} // namespace
+
+int terminal_width() {
+    if (!isatty(fileno(stdout))) return 0;
+    if (g_term_width_dirty) {
+        struct winsize ws{};
+        if (ioctl(fileno(stdout), TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+            g_cached_term_width = ws.ws_col;
+        } else if (g_cached_term_width == 0) {
+            g_cached_term_width = 80; // safe fallback
+        }
+        g_term_width_dirty = 0;
+    }
+    return g_cached_term_width;
+}
+
+void install_sigwinch_handler() {
+    if (!isatty(fileno(stdout))) return;
+    struct sigaction sa{};
+    sa.sa_handler = sigwinch_handler;
+    sigemptyset(&sa.sa_mask);
+    // SA_RESTART so a SIGWINCH during curl_easy_perform or a blocking
+    // read doesn't abort the syscall — we only want to mark the width
+    // dirty, not interrupt in-flight work.
+    sa.sa_flags   = SA_RESTART;
+    sigaction(SIGWINCH, &sa, nullptr);
 }
 
 bool color_enabled() { return g_color_enabled; }
@@ -504,7 +547,38 @@ void Spinner::run() {
             std::chrono::steady_clock::now() - start).count();
         char tail[24];
         std::snprintf(tail, sizeof(tail), " %.1fs", elapsed);
-        const std::string frame = std::string(kFrames[idx]) + " " + label_ + tail;
+        std::string frame = std::string(kFrames[idx]) + " " + label_ + tail
+                          + "  esc:cancel";
+
+        // Truncate to the current terminal width so the status
+        // line doesn't wrap when the user's terminal is narrow
+        // or has been resized mid-session. `terminal_width()` is
+        // re-read on SIGWINCH, so resizing works live. We count
+        // bytes, not grapheme clusters — close enough since every
+        // character in the status is ASCII except the leading
+        // single-codepoint spinner glyph (3 bytes UTF-8), which
+        // we special-case as one column.
+        const int width = terminal_width();
+        if (width > 4) {
+            // Reserve 1 col for the trailing cursor so we don't
+            // scroll-wrap on exact-width writes.
+            const int budget = width - 1;
+            // Count display columns assuming ASCII body; the
+            // 3-byte spinner glyph takes one col.
+            const int body_bytes = static_cast<int>(frame.size()) - 2;
+            if (body_bytes > budget) {
+                // Drop " esc:cancel" first, then bytes from the
+                // tail of label_ as needed. Simpler path: just
+                // truncate frame bytes from the end minus 1 for
+                // an ellipsis.
+                const int keep = budget + 2; // +2 to account for the extra spinner bytes
+                if (keep > 0 && static_cast<int>(frame.size()) > keep) {
+                    frame.resize(keep - 1);
+                    frame += "\xE2\x80\xA6"; // …
+                }
+            }
+        }
+
         std::cout << "\r\x1b[2K" << dim(frame) << std::flush;
         idx = (idx + 1) % kFrameCount;
 

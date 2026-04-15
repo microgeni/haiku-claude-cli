@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <termios.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
@@ -250,6 +252,80 @@ int xfer_callback(void* /*clientp*/,
                   curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
     return g_interrupted ? 1 : 0;
 }
+
+// RAII helper that temporarily puts stdin into cbreak mode while an
+// HTTP stream is in flight and spawns a background thread polling
+// stdin for a bare ESC keypress. On ESC it sets g_interrupted so the
+// existing xfer_callback aborts the curl transfer — the same path
+// that Ctrl+C uses. Destructor tears down the thread and restores
+// the saved termios so libedit gets stdin back in cooked mode for
+// the next prompt.
+//
+// No-op when stdin isn't a TTY (piped input, CI, subprocess) so
+// scripted invocations keep behaving normally.
+class EscInterruptGuard {
+public:
+    EscInterruptGuard() {
+        if (!isatty(STDIN_FILENO)) return;
+        if (tcgetattr(STDIN_FILENO, &saved_) != 0) return;
+        saved_valid_ = true;
+
+        termios raw = saved_;
+        raw.c_lflag &= ~(ICANON | ECHO);
+        raw.c_cc[VMIN]  = 0;
+        raw.c_cc[VTIME] = 0;
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+            saved_valid_ = false;
+            return;
+        }
+
+        running_.store(true);
+        thread_ = std::thread([this]() {
+            while (running_.load()) {
+                struct pollfd pfd {};
+                pfd.fd     = STDIN_FILENO;
+                pfd.events = POLLIN;
+                const int r = ::poll(&pfd, 1, 100);
+                if (!running_.load()) break;
+                if (r <= 0) continue;
+                if (!(pfd.revents & POLLIN)) continue;
+
+                char buf[16];
+                const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+                if (n <= 0) continue;
+
+                // A bare ESC keypress arrives as a single 0x1B byte.
+                // Arrow keys, Home/End, etc. arrive as multi-byte
+                // CSI sequences starting with 0x1B (usually
+                // 0x1B '[' <rest>). We only treat the lone-byte case
+                // as cancel so a twitchy arrow-key press during
+                // streaming doesn't kill the turn. If 0x1B appears
+                // mid-sequence it's almost certainly a CSI prefix.
+                if (n == 1 && buf[0] == '\x1b') {
+                    g_interrupted = 1;
+                    return;
+                }
+            }
+        });
+    }
+
+    ~EscInterruptGuard() {
+        running_.store(false);
+        if (thread_.joinable()) thread_.join();
+        if (saved_valid_) {
+            tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
+        }
+    }
+
+    EscInterruptGuard(const EscInterruptGuard&) = delete;
+    EscInterruptGuard& operator=(const EscInterruptGuard&) = delete;
+
+private:
+    std::atomic<bool> running_ { false };
+    std::thread       thread_;
+    termios           saved_ {};
+    bool              saved_valid_ = false;
+};
 
 struct Config {
     std::string model;
@@ -555,7 +631,24 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     headers = curl_slist_append(headers, "accept: text/event-stream");
 
     StreamState state;
-    tui::Spinner spinner("thinking");
+    // Compose a transient status line that shows while Claude is
+    // thinking but before the first token streams in. Fields: short
+    // model name, message count in the rolling history, and
+    // max_tokens cap. The Spinner itself appends the live elapsed
+    // time and an `esc:cancel` hint, and truncates to the current
+    // terminal_width() so it stays on one line even when the user's
+    // terminal is narrow or has been resized mid-session.
+    auto short_model = [](const std::string& m) {
+        const std::string prefix = "claude-";
+        if (m.rfind(prefix, 0) == 0) return m.substr(prefix.size());
+        return m;
+    };
+    const int msg_count = messages.is_array() ? static_cast<int>(messages.size()) : 0;
+    char stat_buf[160];
+    std::snprintf(stat_buf, sizeof(stat_buf),
+                  "thinking  %s  msgs=%d  max=%d",
+                  short_model(model).c_str(), msg_count, max_tokens);
+    tui::Spinner spinner(stat_buf);
     state.spinner = &spinner;
     state.renderer.set_spinner(&spinner);
 
@@ -573,8 +666,15 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
 
     g_interrupted = 0;
-    const CURLcode res = curl_easy_perform(curl);
-    spinner.stop();
+    // ESC guard lives only for the duration of the HTTP stream so
+    // stdin goes back to cooked mode the moment we return and the
+    // REPL's libedit prompt reads the next line normally.
+    CURLcode res;
+    {
+        EscInterruptGuard esc_guard;
+        res = curl_easy_perform(curl);
+        spinner.stop();
+    }
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
     curl_slist_free_all(headers);
@@ -1001,7 +1101,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /usage             session tokens, cost estimate, subscription windows\n"
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
-            "  /exit, /quit       leave the REPL\n")
+            "  (type `exit` or press Ctrl+D to leave the REPL)\n")
                   << "\n";
         const auto custom = commands::names();
         if (!custom.empty()) {
@@ -1035,9 +1135,6 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             std::cout << tui::meta("[memory will be reloaded on the next turn]") << "\n";
         }
         return SlashAction::Continue;
-    }
-    if (cmd == "/exit" || cmd == "/quit") {
-        return SlashAction::Quit;
     }
     if (cmd == "/clear") {
         ctx.messages        = json::array();
@@ -1196,7 +1293,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
-        "/todos", "/memory", "/exit", "/quit",
+        "/todos", "/memory",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
@@ -1735,7 +1832,7 @@ int run_telegram_bridge(const Config& cfg) {
     {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
-            "/todos", "/memory", "/mute", "/unmute", "/exit", "/quit",
+            "/todos", "/memory", "/mute", "/unmute",
         };
         for (const auto& c : commands::names()) all_slash.push_back("/" + c);
         repl::set_slash_commands(all_slash);
@@ -1836,6 +1933,7 @@ int run_telegram_bridge(const Config& cfg) {
 
 int main(int argc, char* argv[]) {
     tui::init();
+    tui::install_sigwinch_handler();
 
     if (argc >= 2) {
         const std::string cmd = argv[1];
