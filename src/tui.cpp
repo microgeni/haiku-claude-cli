@@ -60,8 +60,18 @@ int                        g_cached_term_rows  = 0;
 bool                       g_status_bar_active = false;
 std::string                g_status_bar_text;
 // Number of rows reserved at the bottom of the terminal for the
-// fixed frame: one rule row plus one status row.
-constexpr int              kStatusBarRows      = 2;
+// fixed frame:
+//
+//   row N-3  rule above input (dimmed ─)
+//   row N-2  input prompt row (libedit draws here)
+//   row N-1  rule below input (dimmed ─)
+//   row N    status content (model · counts · Remote Control)
+//
+// The scroll region is the complement: rows 1..N-4. All chat
+// history and assistant streaming output flows there, with the
+// bottom of the region being row N-4 — immediately above the
+// fixed rule row.
+constexpr int              kStatusBarRows      = 4;
 
 extern "C" void sigwinch_handler(int) {
     g_term_dirty     = 1;
@@ -121,33 +131,45 @@ namespace {
 void draw_fixed_frame(int rows, int cols, const std::string& status) {
     if (rows < kStatusBarRows + 1) return;
 
-    // Save cursor, then move to the rule row and the status row.
-    // DECSC / DECRC (\e7 / \e8) are more reliable across xterm and
-    // Haiku Terminal than CSI s/u.
+    // Save cursor, then walk the four fixed rows. DECSC / DECRC
+    // (\e7 / \e8) are more reliable across xterm and Haiku
+    // Terminal than CSI s/u.
     std::cout << "\x1b""7";
 
-    // Rule row: dimmed horizontal line across the full width.
-    std::cout << "\x1b[" << (rows - 1) << ";1H"
-              << "\x1b[2K"; // erase row
     std::string rule;
     rule.reserve(cols * 3);
     for (int i = 0; i < cols; ++i) rule += "\xE2\x94\x80"; // ─
-    std::cout << dim(rule);
 
-    // Status row: the caller-provided content. Truncated to cols
-    // by the caller; we just print and clear any trailing space.
+    // Row N-3: rule above the input row.
+    std::cout << "\x1b[" << (rows - 3) << ";1H"
+              << "\x1b[2K"
+              << dim(rule);
+
+    // Row N-2: input row. Clear any leftover content so a stale
+    // prompt doesn't bleed into the next turn; we don't draw
+    // anything here — libedit owns this row when read_message
+    // runs, and position_cursor_for_input parks the cursor at
+    // column 1.
+    std::cout << "\x1b[" << (rows - 2) << ";1H"
+              << "\x1b[2K";
+
+    // Row N-1: rule below the input row.
+    std::cout << "\x1b[" << (rows - 1) << ";1H"
+              << "\x1b[2K"
+              << dim(rule);
+
+    // Row N: status content. Truncated to cols by the caller.
     std::cout << "\x1b[" << rows << ";1H"
               << "\x1b[2K"
               << status;
 
-    // Restore cursor.
     std::cout << "\x1b""8";
 }
 
-// Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows) so
-// the bottom two rows stay fixed. Also places the cursor at the
-// bottom of the scroll region so subsequent output / prompt draw
-// at the visually correct position.
+// Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows)
+// so the bottom four rows stay fixed, and place the cursor at
+// the bottom of the scroll region so subsequent output lands in
+// the chat history area.
 void apply_scroll_region(int rows) {
     if (rows < kStatusBarRows + 1) return;
     const int top    = 1;
@@ -200,8 +222,12 @@ void teardown_status_bar() {
     // stream with the cursor hidden.
     const int rows = g_cached_term_rows > 0 ? g_cached_term_rows : 24;
     std::cout << "\x1b[r"                         // reset scroll region
+              << "\x1b[" << (rows - 3) << ";1H"
+              << "\x1b[2K"                        // clear rule-above
+              << "\x1b[" << (rows - 2) << ";1H"
+              << "\x1b[2K"                        // clear input row
               << "\x1b[" << (rows - 1) << ";1H"
-              << "\x1b[2K"                        // clear rule row
+              << "\x1b[2K"                        // clear rule-below
               << "\x1b[" << rows << ";1H"
               << "\x1b[2K"                        // clear status row
               << "\x1b[" << rows << ";1H"
@@ -210,6 +236,11 @@ void teardown_status_bar() {
 }
 
 void emit_chat_rule() {
+    // No-op when the fixed-bottom frame is active — the rule row
+    // already lives at row N-3 and is kept fresh by redraws, so
+    // emitting an in-chat rule would duplicate it into the
+    // scrolling history.
+    if (g_status_bar_active) return;
     if (!g_color_enabled) return;
     if (!isatty(fileno(stdout))) return;
     const int width = terminal_width();
@@ -218,6 +249,23 @@ void emit_chat_rule() {
     rule.reserve(width * 3);
     for (int i = 0; i < width; ++i) rule += "\xE2\x94\x80"; // ─
     std::cout << dim(rule) << "\n" << std::flush;
+}
+
+void position_cursor_for_input() {
+    if (!g_status_bar_active) return;
+    if (g_term_dirty) refresh_dims();
+    if (g_cached_term_rows < kStatusBarRows + 1) return;
+    std::cout << "\x1b[" << (g_cached_term_rows - 2) << ";1H"
+              << "\x1b[2K"
+              << std::flush;
+}
+
+void position_cursor_for_chat() {
+    if (!g_status_bar_active) return;
+    if (g_term_dirty) refresh_dims();
+    if (g_cached_term_rows < kStatusBarRows + 1) return;
+    const int bottom = g_cached_term_rows - kStatusBarRows;
+    std::cout << "\x1b[" << bottom << ";1H" << std::flush;
 }
 
 void hide_cursor() {

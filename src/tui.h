@@ -77,7 +77,24 @@ void teardown_status_bar();
 // from the REPL loop right before each prompt to visually
 // separate the previous turn from the next one. No-op on
 // non-TTY / non-color.
+//
+// When the fixed-bottom status frame is active this is a no-op
+// since the frame provides fixed rules above and below the
+// input row — duplicating them in-chat would clutter the
+// scroll history.
 void emit_chat_rule();
+
+// Position the cursor on the fixed input row of the status
+// frame (row N-2) and clear it so libedit starts with a clean
+// line. No-op when the frame isn't active — the caller just
+// lets libedit draw wherever the cursor currently is.
+void position_cursor_for_input();
+
+// Position the cursor at the bottom of the scroll region
+// (row N-4 when the 4-row frame is active) so subsequent stdout
+// writes flow into the chat history area instead of bleeding
+// into the fixed rows. No-op when the frame isn't active.
+void position_cursor_for_chat();
 
 // Show / hide the terminal cursor via DECTCEM (\e[?25h / \e[?25l).
 // Used to suppress cursor-bouncing during streaming output

@@ -1637,12 +1637,13 @@ int interactive_loop(const Auth& auth, const Config& cfg,
         // — cheap, runs once per prompt.
         if (tui::consume_resize_pending()) tui::redraw_status_bar();
         tui::show_cursor();
-        tui::emit_chat_rule();
+        tui::position_cursor_for_input();
 
         std::string line;
         if (!pending.empty()) {
             line    = std::move(pending);
             pending.clear();
+            tui::position_cursor_for_chat();
             std::cout << tui::user_prompt() << line << "\n";
         } else {
             if (!repl::read_message(tui::user_prompt(),
@@ -1650,6 +1651,15 @@ int interactive_loop(const Auth& auth, const Config& cfg,
                                     line)) {
                 std::cout << "\n";
                 break;
+            }
+            // libedit drew the prompt on the fixed input row and
+            // echoed a newline on enter. Push the cursor back
+            // into the scroll region and replay the submitted
+            // line so the chat history preserves a record of
+            // the user's message.
+            tui::position_cursor_for_chat();
+            if (!line.empty()) {
+                std::cout << tui::user_prompt() << line << "\n";
             }
         }
 
@@ -2264,7 +2274,7 @@ int run_telegram_bridge(const Config& cfg) {
     while (!g_interrupted) {
         if (tui::consume_resize_pending()) tui::redraw_status_bar();
         tui::show_cursor();
-        tui::emit_chat_rule();
+        tui::position_cursor_for_input();
 
         std::string line;
         if (!repl::read_message(tui::user_prompt(),
@@ -2343,7 +2353,12 @@ int run_telegram_bridge(const Config& cfg) {
         if (!already_recorded) repl::record(line);
 
         std::lock_guard<std::mutex> lk(process_mutex);
-        std::cout << "\n";
+        // Push the cursor back into the scroll region and replay
+        // the submitted line so the chat history shows what was
+        // typed. libedit only drew on the ephemeral input row,
+        // which gets overwritten on the next turn.
+        tui::position_cursor_for_chat();
+        std::cout << tui::user_prompt() << line << "\n\n";
         // Local input shares history with the primary Telegram user so
         // the conversation is seamless across the two surfaces. The
         // primary chat id equals the primary user id for direct DMs.
