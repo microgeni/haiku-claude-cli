@@ -1696,17 +1696,26 @@ int interactive_loop(const Auth& auth, const Config& cfg,
                 }
                 log_line("slash remote-control arg='" + arg + "'");
 
-                if (arg == "off") {
-                    if (remote && remote->running()) {
+                // /remote-control with no arg toggles. Explicit
+                // "on" / "off" force the state.
+                const bool currently_running = remote && remote->running();
+                const bool want_off = (arg == "off")
+                    || (arg.empty() && currently_running);
+                const bool want_on  = (arg == "on")
+                    || (arg.empty() && !currently_running);
+
+                if (want_off) {
+                    if (currently_running) {
                         remote->stop();
                         std::cout << tui::meta("[remote control: telegram poller stopped]") << "\n";
-                        log_line("remote control stopped from /remote-control off");
+                        log_line("remote control stopped from /remote-control" +
+                                 (arg.empty() ? std::string(" (toggle)") : std::string(" off")));
                         tui::set_status_bar(compose_status());
                     } else {
                         std::cout << tui::meta("[remote control is not active]") << "\n";
                     }
-                } else if (arg.empty() || arg == "on") {
-                    if (remote && remote->running()) {
+                } else if (want_on) {
+                    if (currently_running) {
                         std::cout << tui::meta("[remote control already active]") << "\n";
                     } else {
                         std::string why;
