@@ -195,7 +195,9 @@ void teardown_status_bar() {
 
     // Restore the full scroll region and clear our fixed rows, then
     // move the cursor below them so anything the caller (or the
-    // shell) prints next doesn't overwrite the stale footer.
+    // shell) prints next doesn't overwrite the stale footer. Also
+    // make sure the cursor is visible again in case we exited mid-
+    // stream with the cursor hidden.
     const int rows = g_cached_term_rows > 0 ? g_cached_term_rows : 24;
     std::cout << "\x1b[r"                         // reset scroll region
               << "\x1b[" << (rows - 1) << ";1H"
@@ -203,7 +205,31 @@ void teardown_status_bar() {
               << "\x1b[" << rows << ";1H"
               << "\x1b[2K"                        // clear status row
               << "\x1b[" << rows << ";1H"
+              << "\x1b[?25h"                      // show cursor (safety)
               << std::flush;
+}
+
+void emit_chat_rule() {
+    if (!g_color_enabled) return;
+    if (!isatty(fileno(stdout))) return;
+    const int width = terminal_width();
+    if (width <= 0) return;
+    std::string rule;
+    rule.reserve(width * 3);
+    for (int i = 0; i < width; ++i) rule += "\xE2\x94\x80"; // ─
+    std::cout << dim(rule) << "\n" << std::flush;
+}
+
+void hide_cursor() {
+    if (!g_color_enabled) return;
+    if (!isatty(fileno(stdout))) return;
+    std::cout << "\x1b[?25l" << std::flush;
+}
+
+void show_cursor() {
+    if (!g_color_enabled) return;
+    if (!isatty(fileno(stdout))) return;
+    std::cout << "\x1b[?25h" << std::flush;
 }
 
 bool color_enabled() { return g_color_enabled; }

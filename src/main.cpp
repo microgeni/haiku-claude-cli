@@ -669,12 +669,18 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     g_interrupted = 0;
     // ESC guard lives only for the duration of the HTTP stream so
     // stdin goes back to cooked mode the moment we return and the
-    // REPL's libedit prompt reads the next line normally.
+    // REPL's libedit prompt reads the next line normally. We also
+    // hide the terminal cursor during the stream so it doesn't
+    // visibly bounce around through the rendered output — it's
+    // shown again the moment curl returns, and the REPL loop's
+    // top-of-iteration show_cursor() catches any crash paths.
     CURLcode res;
     {
         EscInterruptGuard esc_guard;
+        tui::hide_cursor();
         res = curl_easy_perform(curl);
         spinner.stop();
+        tui::show_cursor();
     }
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
@@ -1419,8 +1425,12 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     while (true) {
         // Resize events rebuild the scroll region and redraw the
         // fixed rows so the frame stays correct after the user
-        // drags the terminal window.
+        // drags the terminal window. Also unconditionally show
+        // the cursor in case a previous interrupt left it hidden
+        // — cheap, runs once per prompt.
         if (tui::consume_resize_pending()) tui::redraw_status_bar();
+        tui::show_cursor();
+        tui::emit_chat_rule();
 
         std::string line;
         if (!pending.empty()) {
@@ -1967,6 +1977,8 @@ int run_telegram_bridge(const Config& cfg) {
 
     while (!g_interrupted) {
         if (tui::consume_resize_pending()) tui::redraw_status_bar();
+        tui::show_cursor();
+        tui::emit_chat_rule();
 
         std::string line;
         if (!repl::read_message(tui::user_prompt(),

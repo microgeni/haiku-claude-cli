@@ -72,6 +72,20 @@ int consume_resize_pending();
 // Safe to call even when the frame was never installed.
 void teardown_status_bar();
 
+// Emit an in-chat dim horizontal rule the full width of the
+// current terminal followed by a newline. Meant to be called
+// from the REPL loop right before each prompt to visually
+// separate the previous turn from the next one. No-op on
+// non-TTY / non-color.
+void emit_chat_rule();
+
+// Show / hide the terminal cursor via DECTCEM (\e[?25h / \e[?25l).
+// Used to suppress cursor-bouncing during streaming output
+// so the cursor appears steady and only reappears at the
+// prompt. No-op on non-TTY / non-color.
+void hide_cursor();
+void show_cursor();
+
 std::string bold(const std::string& s);
 std::string dim(const std::string& s);
 std::string italic(const std::string& s);
