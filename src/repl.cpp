@@ -100,6 +100,20 @@ void init(const std::string& history_file) {
         read_history(g_history_file.c_str());
     }
     rl_attempted_completion_function = slash_completion;
+
+    // Override libedit's word-break character set so only
+    // whitespace breaks words. libedit's default set includes
+    // `-`, `.`, and a handful of other punctuation marks, which
+    // means typing `/remote-control` and hitting Tab caused the
+    // completer to see just `control` (after the `-`) as the
+    // current word, compute a non-zero `start` position, and
+    // fall through to default filename completion. Whitespace-
+    // only breaks keep `/remote-control`, `/foo.bar`, and any
+    // other hyphen/dot-containing slash command working as a
+    // single word for completion purposes.
+    static const char* kWordBreaks = " \t\n";
+    rl_completer_word_break_characters = const_cast<char*>(kWordBreaks);
+    rl_basic_word_break_characters     = const_cast<char*>(kWordBreaks);
 }
 
 void set_slash_commands(const std::vector<std::string>& names) {

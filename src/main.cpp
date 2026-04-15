@@ -4,6 +4,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <iostream>
@@ -1664,36 +1665,66 @@ int interactive_loop(const Auth& auth, const Config& cfg,
             // it because the REPL's own telegram mode is a separate
             // subcommand with its own entry point; here we own the
             // lifecycle directly.
-            if (line == "/remote-control" || line == "/remote-control on") {
-                if (remote && remote->running()) {
-                    std::cout << tui::meta("[remote control already active]") << "\n";
-                } else {
-                    std::string why;
-                    if (!RemoteControl::config_is_valid(cfg, &why)) {
-                        std::cout << tui::meta("[remote control: " + why + "]") << "\n";
+            //
+            // Parse the head of the line as `/remote-control`
+            // followed by an optional ` on` / ` off` / ` status`
+            // suffix so users can type any of them without being
+            // too picky about exact whitespace.
+            auto starts_with = [](const std::string& s, const char* prefix) {
+                const size_t n = std::strlen(prefix);
+                return s.size() >= n && s.compare(0, n, prefix) == 0;
+            };
+            if (starts_with(line, "/remote-control")) {
+                std::string arg;
+                if (line.size() > std::strlen("/remote-control")) {
+                    arg = line.substr(std::strlen("/remote-control"));
+                    // Trim leading / trailing whitespace.
+                    size_t a = 0, b = arg.size();
+                    while (a < b && (arg[a] == ' ' || arg[a] == '\t')) ++a;
+                    while (b > a && (arg[b - 1] == ' ' || arg[b - 1] == '\t')) --b;
+                    arg = arg.substr(a, b - a);
+                }
+                log_line("slash remote-control arg='" + arg + "'");
+
+                if (arg == "off") {
+                    if (remote && remote->running()) {
+                        remote->stop();
+                        std::cout << tui::meta("[remote control: telegram poller stopped]") << "\n";
+                        log_line("remote control stopped from /remote-control off");
+                        tui::set_status_bar(compose_status());
                     } else {
-                        if (!remote) {
-                            remote = std::make_unique<RemoteControl>(
-                                cfg, auth, custom_system, remote_mutex);
-                        }
-                        if (remote->start()) {
-                            std::cout << tui::meta("[remote control: telegram poller started]") << "\n";
-                            log_line("remote control started from /remote-control");
-                            tui::set_status_bar(compose_status());
+                        std::cout << tui::meta("[remote control is not active]") << "\n";
+                    }
+                } else if (arg.empty() || arg == "on") {
+                    if (remote && remote->running()) {
+                        std::cout << tui::meta("[remote control already active]") << "\n";
+                    } else {
+                        std::string why;
+                        if (!RemoteControl::config_is_valid(cfg, &why)) {
+                            std::cout << tui::meta("[remote control error: " + why + "]") << "\n";
+                            log_line("remote control config invalid: " + why);
+                        } else {
+                            try {
+                                if (!remote) {
+                                    remote = std::make_unique<RemoteControl>(
+                                        cfg, auth, custom_system, remote_mutex);
+                                }
+                                if (remote->start()) {
+                                    std::cout << tui::meta("[remote control: telegram poller started]") << "\n";
+                                    log_line("remote control started from /remote-control");
+                                    tui::set_status_bar(compose_status());
+                                } else {
+                                    std::cout << tui::meta("[remote control: start() returned false — already running?]") << "\n";
+                                }
+                            } catch (const std::exception& e) {
+                                std::cout << tui::meta(std::string("[remote control error: ") + e.what() + "]") << "\n";
+                                log_line(std::string("remote control construction failed: ") + e.what());
+                            }
                         }
                     }
-                }
-                repl::record(line);
-                continue;
-            }
-            if (line == "/remote-control off") {
-                if (remote && remote->running()) {
-                    remote->stop();
-                    std::cout << tui::meta("[remote control: telegram poller stopped]") << "\n";
-                    log_line("remote control stopped from /remote-control off");
-                    tui::set_status_bar(compose_status());
                 } else {
-                    std::cout << tui::meta("[remote control is not active]") << "\n";
+                    std::cout << tui::meta("[remote control: unknown argument '" + arg
+                                           + "' — use /remote-control, /remote-control on, or /remote-control off]") << "\n";
                 }
                 repl::record(line);
                 continue;
