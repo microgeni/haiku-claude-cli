@@ -113,6 +113,40 @@ in
 .B $EDITOR
 (falls back to nano). Memory is reloaded on the next turn.
 .TP
+.B /remote-control " " [ off ]
+Toggle a background Telegram poller on or off inside the
+interactive REPL.
+.B /remote-control
+(or
+.BR "/remote-control on" )
+starts a lightweight poller thread that accepts incoming messages
+from the users listed in
+.I config.telegram.allowed_user_ids
+and runs each one through
+.B send_with_tools
+on the local machine, posting the final response back via
+.BR sendMessage .
+.B /remote-control off
+stops and joins the poller. Each Telegram user has an
+independent rolling history — local REPL turns and remote
+turns are serialized against each other via a shared mutex but
+do not share conversation state. The fixed-bottom status frame
+shows
+.B "Remote Control active"
+in green whenever the poller is running, plus
+.B "\(bu muted"
+in yellow when
+.B /mute
+(shared with the full
+.BR "claude telegram" )
+is toggled on.
+.IP
+This is a lean bridge — no streaming edits, no typing
+indicator, no inline-keyboard buttons, no local input mirroring.
+For the full experience run
+.B "claude telegram"
+as its own subcommand instead.
+.TP
 .B /exit, /quit
 Leave the REPL (Ctrl+D also works).
 .PP

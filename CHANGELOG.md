@@ -7,6 +7,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`/remote-control` slash command** toggles a background
+  Telegram poller on and off inside the regular interactive
+  REPL (`claude -i`). `/remote-control` or
+  `/remote-control on` starts a lightweight poller thread
+  that accepts messages from `config.telegram.allowed_user_ids`
+  and runs each one through `send_with_tools` on the local
+  machine, posting the final response via `sendMessage`.
+  `/remote-control off` stops and joins the poller. The
+  fixed-bottom status frame shows a green
+  `Remote Control active` label while running, with a
+  `· muted` suffix in yellow when `/mute` is toggled on.
+  Each Telegram user gets an independent rolling history;
+  local REPL turns and remote turns are serialized against
+  each other via a shared `remote_mutex` but don't share
+  conversation state. New `RemoteControl` class in `main.cpp`
+  owns the poller thread, allowed-users set, per-user
+  histories, and the start/stop lifecycle. Validates
+  `config.telegram` at `/remote-control` invocation time so
+  the error message (if any) appears on the REPL rather than
+  at startup. Deliberately leaner than `claude telegram`:
+  no streaming edits, no typing indicator, no inline-keyboard
+  buttons, no local input mirroring — use the dedicated
+  subcommand for the full experience.
 - **Fixed-bottom status frame** in interactive REPL and Telegram
   bridge mode. A `tui::install_status_bar()` helper sets a
   DECSTBM scroll region (`\e[1;N-2r`) that carves off the

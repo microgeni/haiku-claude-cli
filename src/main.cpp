@@ -1108,6 +1108,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /usage             session tokens, cost estimate, subscription windows\n"
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
+            "  /remote-control    toggle Telegram remote poller on/off\n"
             "  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
                   << "\n";
         const auto custom = commands::names();
@@ -1372,7 +1373,188 @@ std::string format_status_row(const std::string& model,
     return left + std::string(gap, ' ') + right_label + " ";
 }
 
-int interactive_loop(const Auth& auth, const std::string& initial_model, int max_tokens,
+// Self-contained background Telegram poller spawned on demand by
+// the /remote-control slash command inside interactive_loop. Runs
+// in its own thread, polls Telegram for incoming messages from
+// allowed users, and hands each one to send_with_tools on the
+// local machine. Each Telegram user gets an independent rolling
+// history in user_messages_ (no sharing with the REPL's own
+// `messages` — /remote-control is purely additive, not a mirror).
+//
+// Deliberately thinner than run_telegram_bridge: no streaming
+// edits, no typing indicator, no inline-keyboard buttons, no
+// local input mirroring. The response is posted via a single
+// sendMessage at the end of each turn. If you want the full UX,
+// run `claude telegram` as its own subcommand.
+//
+// Thread-safe: the poller thread grabs repl_mutex_ for the
+// duration of each send_with_tools call so it serializes cleanly
+// against whatever the REPL's own main thread is doing. The REPL
+// loop provides the mutex; RemoteControl only reads the
+// reference.
+class RemoteControl {
+public:
+    static bool config_is_valid(const Config& cfg, std::string* reason) {
+        if (!cfg.telegram.is_object()) {
+            if (reason) *reason = "config.telegram is missing from config.json";
+            return false;
+        }
+        if (cfg.telegram.value("bot_token", std::string{}).empty()) {
+            if (reason) *reason = "config.telegram.bot_token is not set";
+            return false;
+        }
+        if (!cfg.telegram.contains("allowed_user_ids")
+            || !cfg.telegram["allowed_user_ids"].is_array()
+            || cfg.telegram["allowed_user_ids"].empty()) {
+            if (reason) *reason = "config.telegram.allowed_user_ids must list at least one Telegram user ID";
+            return false;
+        }
+        return true;
+    }
+
+    RemoteControl(const Config& cfg, const Auth& auth,
+                  const std::string& custom_system, std::mutex& repl_mutex)
+        : client_(cfg.telegram.value("bot_token", std::string{})),
+          auth_(auth),
+          custom_system_(custom_system),
+          cfg_model_(cfg.model),
+          cfg_max_tokens_(cfg.max_tokens),
+          repl_mutex_(repl_mutex) {
+        for (const auto& v : cfg.telegram["allowed_user_ids"]) {
+            if (v.is_number_integer()) allowed_.insert(v.get<int64_t>());
+        }
+        allow_destructive_ = cfg.telegram.value("allow_destructive_tools", false);
+    }
+
+    ~RemoteControl() { stop(); }
+    RemoteControl(const RemoteControl&) = delete;
+    RemoteControl& operator=(const RemoteControl&) = delete;
+
+    bool start() {
+        if (running_.load()) return false;
+        running_.store(true);
+        poller_ = std::thread(&RemoteControl::poll_loop, this);
+        return true;
+    }
+
+    void stop() {
+        if (!running_.exchange(false)) return;
+        if (poller_.joinable()) poller_.join();
+    }
+
+    bool running() const { return running_.load(); }
+
+private:
+    void poll_loop() {
+        while (running_.load() && !g_interrupted) {
+            const auto updates = client_.poll(10);
+            if (!running_.load() || g_interrupted) break;
+            for (const auto& u : updates) {
+                if (!running_.load() || g_interrupted) break;
+                if (!allowed_.count(u.user_id)) {
+                    log_line("remote-control reject user=" + std::to_string(u.user_id));
+                    continue;
+                }
+                std::lock_guard<std::mutex> lk(repl_mutex_);
+                process_update(u);
+            }
+        }
+    }
+
+    // Gate an outgoing client call on the shared mute flag so
+    // /mute from either surface silences the remote too.
+    void tg_send(int64_t chat, const std::string& text) {
+        if (g_telegram_muted.load()) return;
+        client_.send_message(chat, text);
+    }
+
+    void process_update(const telegram::Update& u) {
+        if (u.is_callback) client_.answer_callback(u.callback_query_id);
+
+        const std::string who = u.username.empty()
+            ? std::to_string(u.user_id) : u.username;
+        std::cout << tui::meta("[remote-control rx " + who + "] " + u.text) << "\n";
+        log_line("remote-control rx user=" + std::to_string(u.user_id)
+                 + " text=" + u.text);
+
+        // Per-chat slash commands. /mute and /unmute share the
+        // global g_telegram_muted flag with the full bridge so
+        // the two remote surfaces can't fight each other.
+        if (u.text == "/mute") {
+            if (!g_telegram_muted.exchange(true)) {
+                client_.send_message(u.chat_id,
+                    "Remote muted. No replies until /unmute.");
+            }
+            return;
+        }
+        if (u.text == "/unmute") {
+            if (g_telegram_muted.exchange(false)) {
+                client_.send_message(u.chat_id,
+                    "Remote unmuted. Replies will be sent again.");
+            }
+            return;
+        }
+        if (u.text == "/new" || u.text == "/clear") {
+            user_messages_.erase(u.user_id);
+            tg_send(u.chat_id, "(history cleared)");
+            return;
+        }
+        if (u.text == "/help" || u.text == "/start") {
+            tg_send(u.chat_id,
+                "claude remote-control (lite)\n"
+                "\n"
+                "Send a message and I'll run it through Claude on the "
+                "local machine.\n"
+                "\n"
+                "Commands:\n"
+                "  /new     reset this chat's rolling history\n"
+                "  /mute    stop sending replies until /unmute\n"
+                "  /unmute  resume sending replies\n"
+                "  /help    this message");
+            return;
+        }
+
+        json& messages = user_messages_[u.user_id];
+        if (!messages.is_array()) messages = json::array();
+        const json snapshot = messages;
+        messages.push_back({{"role", "user"}, {"content", u.text}});
+
+        g_non_interactive_tools              = true;
+        g_non_interactive_allow_destructive  = allow_destructive_;
+        std::cout << tui::claude_prompt();
+        const std::string effective_system = compose_system(custom_system_);
+        const auto result = send_with_tools(auth_, cfg_model_, cfg_max_tokens_,
+                                            messages, effective_system);
+        std::cout << "\n";
+        g_non_interactive_tools = false;
+
+        if (result.exit_code != 0 || result.assistant_text.empty()) {
+            messages = snapshot;
+            tg_send(u.chat_id, "(error: Claude did not return a response)");
+            log_line("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
+            return;
+        }
+
+        tg_send(u.chat_id, result.assistant_text);
+        log_line("remote-control tx user=" + std::to_string(u.user_id)
+                 + " out=" + std::to_string(result.output_tokens));
+    }
+
+    telegram::Client             client_;
+    std::unordered_set<int64_t>  allowed_;
+    bool                         allow_destructive_ = false;
+    Auth                         auth_;
+    std::string                  custom_system_;
+    std::string                  cfg_model_;
+    int                          cfg_max_tokens_;
+    std::mutex&                  repl_mutex_;
+    std::map<int64_t, json>      user_messages_;
+    std::atomic<bool>            running_ { false };
+    std::thread                  poller_;
+};
+
+int interactive_loop(const Auth& auth, const Config& cfg,
+                     const std::string& initial_model, int max_tokens,
                      const std::string& custom_system, const json& prices, bool resume,
                      const std::string& initial_message) {
     InterruptGuard interrupt_guard;
@@ -1384,7 +1566,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
-        "/todos", "/memory", "/exit", "/quit",
+        "/todos", "/memory", "/remote-control", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
@@ -1411,11 +1593,35 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     std::cout << tui::bold("Claude CLI interactive mode") << tui::dim(" (model: " + model + ")") << ".\n"
               << tui::dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n\n";
 
+    // Shared mutex between the REPL main thread and an optional
+    // RemoteControl poller thread. When /remote-control is toggled
+    // on, the poller grabs this before each send_with_tools call
+    // so it can't run concurrently with whatever the REPL is
+    // doing. The REPL itself doesn't lock it (there's no other
+    // thread to race with when /remote-control is off), but the
+    // lock is cheap to acquire the rare times it matters.
+    std::mutex remote_mutex;
+    std::unique_ptr<RemoteControl> remote;
+
+    // Compose the status row including a green "Remote Control
+    // active" right-label whenever the remote poller is running.
+    // Mute state gets an appended "· muted" marker in yellow.
+    auto compose_status = [&]() {
+        std::string right;
+        if (remote && remote->running()) {
+            right = tui::green("Remote Control active");
+            if (g_telegram_muted.load()) {
+                right += tui::yellow(" \xC2\xB7 muted");
+            }
+        }
+        return format_status_row(model, turn_count, session_input,
+                                 session_output, max_tokens, right);
+    };
+
     // Install the fixed-bottom status frame after the welcome text
     // so the scrolling welcome lines live in the chat history
     // region. RAII teardown happens in the StatusFrame guard below.
-    tui::install_status_bar(
-        format_status_row(model, 0, 0, 0, max_tokens, /*right=*/""));
+    tui::install_status_bar(compose_status());
     struct StatusFrameGuard {
         ~StatusFrameGuard() { tui::teardown_status_bar(); }
     } status_frame_guard;
@@ -1453,6 +1659,46 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
         bool already_recorded = false;
         if (!line.empty() && line.front() == '/') {
+            // /remote-control toggles the background Telegram
+            // poller on and off. dispatch_slash doesn't know about
+            // it because the REPL's own telegram mode is a separate
+            // subcommand with its own entry point; here we own the
+            // lifecycle directly.
+            if (line == "/remote-control" || line == "/remote-control on") {
+                if (remote && remote->running()) {
+                    std::cout << tui::meta("[remote control already active]") << "\n";
+                } else {
+                    std::string why;
+                    if (!RemoteControl::config_is_valid(cfg, &why)) {
+                        std::cout << tui::meta("[remote control: " + why + "]") << "\n";
+                    } else {
+                        if (!remote) {
+                            remote = std::make_unique<RemoteControl>(
+                                cfg, auth, custom_system, remote_mutex);
+                        }
+                        if (remote->start()) {
+                            std::cout << tui::meta("[remote control: telegram poller started]") << "\n";
+                            log_line("remote control started from /remote-control");
+                            tui::set_status_bar(compose_status());
+                        }
+                    }
+                }
+                repl::record(line);
+                continue;
+            }
+            if (line == "/remote-control off") {
+                if (remote && remote->running()) {
+                    remote->stop();
+                    std::cout << tui::meta("[remote control: telegram poller stopped]") << "\n";
+                    log_line("remote control stopped from /remote-control off");
+                    tui::set_status_bar(compose_status());
+                } else {
+                    std::cout << tui::meta("[remote control is not active]") << "\n";
+                }
+                repl::record(line);
+                continue;
+            }
+
             LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
                         turn_count, session_input, session_output, messages};
             std::string expanded;
@@ -1481,7 +1727,16 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
         std::cout << "\n" << tui::claude_prompt();
         const auto turn_start = std::chrono::steady_clock::now();
         const std::string system_for_turn = compose_system(custom_system);
-        const auto result = send_with_tools(auth, model, max_tokens, messages, system_for_turn);
+        // Hold remote_mutex for the full duration of the local
+        // turn so the RemoteControl poller (if running) can't
+        // interleave its own send_with_tools mid-stream. When
+        // /remote-control is off this is an uncontended lock and
+        // costs effectively nothing.
+        SendResult result;
+        {
+            std::lock_guard<std::mutex> lk(remote_mutex);
+            result = send_with_tools(auth, model, max_tokens, messages, system_for_turn);
+        }
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - turn_start).count();
         std::cout << "\n";
@@ -1509,10 +1764,10 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
 
         // Push the updated session counters into the fixed-bottom
         // status row so the user sees the running totals without
-        // having to pull up /usage.
-        tui::set_status_bar(format_status_row(
-            model, turn_count, session_input, session_output,
-            max_tokens, /*right=*/""));
+        // having to pull up /usage. Uses compose_status so the
+        // "Remote Control active" label reflects the current
+        // toggle state.
+        tui::set_status_bar(compose_status());
 
         save_history(messages, model);
 
@@ -2263,7 +2518,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, model, max_tokens, custom_system, cfg.prices, resume, message);
+        return interactive_loop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, message);
     }
 
     InterruptGuard interrupt_guard;
