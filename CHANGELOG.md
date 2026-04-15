@@ -34,15 +34,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   On scope exit the termios is restored so libedit's next
   prompt reads in cooked mode. No-op when stdin isn't a TTY.
 
-### Changed
-- **`/exit` and `/quit` slash commands removed.** They were
-  awkward in combination with Haiku's Terminal. Bare `exit`,
-  `quit`, `:q`, and Ctrl+D still leave the REPL, so the
-  behavior is reachable — just without the slash prefix that
-  conflicted with libedit's handling. Dropped from
-  `dispatch_slash`, both REPL autocomplete lists, `/help`,
-  and the man page.
-
 ## [1.1.1] - 2026-04-14
 
 ### Fixed

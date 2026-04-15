@@ -1101,7 +1101,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /usage             session tokens, cost estimate, subscription windows\n"
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
-            "  (type `exit` or press Ctrl+D to leave the REPL)\n")
+            "  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
                   << "\n";
         const auto custom = commands::names();
         if (!custom.empty()) {
@@ -1135,6 +1135,9 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             std::cout << tui::meta("[memory will be reloaded on the next turn]") << "\n";
         }
         return SlashAction::Continue;
+    }
+    if (cmd == "/exit" || cmd == "/quit") {
+        return SlashAction::Quit;
     }
     if (cmd == "/clear") {
         ctx.messages        = json::array();
@@ -1293,7 +1296,7 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
-        "/todos", "/memory",
+        "/todos", "/memory", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
@@ -1341,7 +1344,6 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
             line.pop_back();
         }
         if (line.empty()) continue;
-        if (line == "exit" || line == "quit" || line == ":q") break;
 
         bool already_recorded = false;
         if (!line.empty() && line.front() == '/') {
@@ -1832,7 +1834,7 @@ int run_telegram_bridge(const Config& cfg) {
     {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
-            "/todos", "/memory", "/mute", "/unmute",
+            "/todos", "/memory", "/mute", "/unmute", "/exit", "/quit",
         };
         for (const auto& c : commands::names()) all_slash.push_back("/" + c);
         repl::set_slash_commands(all_slash);
@@ -1849,7 +1851,6 @@ int run_telegram_bridge(const Config& cfg) {
             line.pop_back();
         }
         if (line.empty()) continue;
-        if (line == "exit" || line == "quit" || line == ":q") break;
 
         bool already_recorded = false;
         if (!line.empty() && line.front() == '/') {
