@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace tui {
 
@@ -63,6 +64,8 @@ class Spinner;
 // Optionally holds a non-owning Spinner pointer: on the first byte of
 // real output, the spinner is stopped so the user sees the thinking
 // indicator up until something is actually visible.
+enum class TableAlign { Left, Right, Center };
+
 class MarkdownRenderer {
 public:
     MarkdownRenderer();
@@ -73,12 +76,23 @@ private:
     void emit(const std::string& s);
     void render_line(const std::string& line);
     void render_inline(const std::string& text);
+    std::string render_inline_to_string(const std::string& text);
+
+    // Markdown table buffering. Tables span multiple lines and
+    // need per-column width computation, so we accumulate rows
+    // here and emit the aligned output on the first non-table
+    // line (or on flush()).
+    void flush_table();
 
     std::string line_buffer_;
     std::string code_block_lang_;
     bool        in_code_block_     = false;
     bool        first_output_done_ = false;
     Spinner*    spinner_           = nullptr;
+
+    std::vector<std::vector<std::string>> table_rows_;
+    std::vector<TableAlign>               table_aligns_;
+    bool                                  table_active_ = false;
 };
 
 // Animated "thinking..." indicator. Spawns a background thread that

@@ -339,6 +339,129 @@ std::string highlight_code(const std::string& lang, const std::string& line) {
 
 } // namespace
 
+namespace {
+
+// Count display columns in a string that may contain ANSI SGR
+// escapes and UTF-8 multi-byte sequences. Escape sequences (0x1b
+// up to 'm') are treated as zero width; every other UTF-8 lead
+// byte counts as one column. Good enough for the table column
+// width math since cells are short and the markdown content is
+// mostly ASCII or narrow symbols.
+int display_width(const std::string& s) {
+    int cols = 0;
+    bool in_esc = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (in_esc) {
+            if (c == 'm') in_esc = false;
+            continue;
+        }
+        if (c == 0x1b) { in_esc = true; continue; }
+        if (c < 0x80) { ++cols; continue; }
+        ++cols;
+        if      ((c & 0xE0) == 0xC0) i += 1;
+        else if ((c & 0xF0) == 0xE0) i += 2;
+        else if ((c & 0xF8) == 0xF0) i += 3;
+    }
+    return cols;
+}
+
+// Strip the leading and trailing `|` from a table row, then split
+// on the remaining pipes. Cell text is trimmed of whitespace at
+// both ends. Escaped pipes (`\|`) are not handled — extremely rare
+// in Claude's output.
+std::vector<std::string> split_table_row(const std::string& line) {
+    std::vector<std::string> out;
+    size_t                   start = 0;
+    size_t                   end   = line.size();
+    while (start < end && (line[start] == ' ' || line[start] == '\t')) ++start;
+    if (start < end && line[start] == '|') ++start;
+    while (end > start && (line[end - 1] == ' ' || line[end - 1] == '\t')) --end;
+    if (end > start && line[end - 1] == '|') --end;
+
+    std::string cell;
+    for (size_t i = start; i < end; ++i) {
+        if (line[i] == '|') {
+            size_t a = 0, b = cell.size();
+            while (a < b && (cell[a] == ' ' || cell[a] == '\t')) ++a;
+            while (b > a && (cell[b - 1] == ' ' || cell[b - 1] == '\t')) --b;
+            out.emplace_back(cell.substr(a, b - a));
+            cell.clear();
+        } else {
+            cell += line[i];
+        }
+    }
+    size_t a = 0, b = cell.size();
+    while (a < b && (cell[a] == ' ' || cell[a] == '\t')) ++a;
+    while (b > a && (cell[b - 1] == ' ' || cell[b - 1] == '\t')) --b;
+    out.emplace_back(cell.substr(a, b - a));
+    return out;
+}
+
+// A line qualifies as a table row if the first non-whitespace
+// character is `|` and there's at least one more `|` on the line.
+// This is a loose check — false positives on literal `|...|`
+// inline code are theoretically possible but never seen in
+// practice since the renderer wraps code in `` ticks `` first.
+bool is_table_row(const std::string& line) {
+    size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size() || line[i] != '|') return false;
+    int pipe_count = 0;
+    for (; i < line.size(); ++i) if (line[i] == '|') ++pipe_count;
+    return pipe_count >= 2;
+}
+
+// A separator row consists only of `|`, `-`, `:`, and whitespace,
+// with at least one `-` per cell. Parses alignment markers:
+// `:---` = Left, `---:` = Right, `:---:` = Center.
+bool is_table_separator(const std::string& line,
+                        std::vector<TableAlign>* out_aligns) {
+    const auto cells = split_table_row(line);
+    if (cells.empty()) return false;
+    std::vector<TableAlign> aligns;
+    for (const auto& cell : cells) {
+        if (cell.empty()) return false;
+        bool has_dash   = false;
+        bool leading_c  = cell.front() == ':';
+        bool trailing_c = cell.back()  == ':';
+        for (char c : cell) {
+            if (c == '-')      has_dash = true;
+            else if (c == ':') continue;
+            else if (c == ' ' || c == '\t') continue;
+            else return false;
+        }
+        if (!has_dash) return false;
+        if (leading_c && trailing_c)      aligns.push_back(TableAlign::Center);
+        else if (trailing_c)              aligns.push_back(TableAlign::Right);
+        else                              aligns.push_back(TableAlign::Left);
+    }
+    if (out_aligns) *out_aligns = std::move(aligns);
+    return true;
+}
+
+// Pad `cell` (which may contain ANSI escapes) to `target_width`
+// display columns on the chosen side. Padding uses spaces only.
+std::string pad_cell(const std::string& cell, int target_width,
+                     TableAlign align) {
+    const int cur = display_width(cell);
+    if (cur >= target_width) return cell;
+    const int pad = target_width - cur;
+    switch (align) {
+        case TableAlign::Left:
+            return cell + std::string(pad, ' ');
+        case TableAlign::Right:
+            return std::string(pad, ' ') + cell;
+        case TableAlign::Center: {
+            const int left = pad / 2;
+            return std::string(left, ' ') + cell + std::string(pad - left, ' ');
+        }
+    }
+    return cell;
+}
+
+} // namespace
+
 MarkdownRenderer::MarkdownRenderer() = default;
 
 void MarkdownRenderer::emit(const std::string& s) {
@@ -352,8 +475,8 @@ void MarkdownRenderer::emit(const std::string& s) {
     std::cout << s << std::flush;
 }
 
-void MarkdownRenderer::render_inline(const std::string& text) {
-    if (!g_color_enabled) { emit(text); return; }
+std::string MarkdownRenderer::render_inline_to_string(const std::string& text) {
+    if (!g_color_enabled) return text;
 
     enum class Mode { Normal, Bold, Italic, Code };
     Mode mode = Mode::Normal;
@@ -415,7 +538,95 @@ void MarkdownRenderer::render_inline(const std::string& text) {
     }
     // Defensive reset in case a line ends mid-token.
     if (mode != Mode::Normal) out += ansi("\x1b[0m");
-    emit(out);
+    return out;
+}
+
+void MarkdownRenderer::render_inline(const std::string& text) {
+    emit(render_inline_to_string(text));
+}
+
+void MarkdownRenderer::flush_table() {
+    if (!table_active_ || table_rows_.empty()) {
+        table_rows_.clear();
+        table_aligns_.clear();
+        table_active_ = false;
+        return;
+    }
+
+    // Normalize column count: some rows may have fewer/more cells
+    // than others. Pick the max and pad short rows with empty
+    // strings so the width math doesn't crash.
+    size_t ncols = 0;
+    for (const auto& r : table_rows_) ncols = std::max(ncols, r.size());
+    for (auto& r : table_rows_) r.resize(ncols);
+    while (table_aligns_.size() < ncols) table_aligns_.push_back(TableAlign::Left);
+    table_aligns_.resize(ncols);
+
+    // Render each cell's inline markdown (bold/italic/code) first
+    // so the width math sees the already-formatted string (ANSI
+    // escapes are zero-width in display_width). First row is the
+    // header — bold it.
+    std::vector<std::vector<std::string>> rendered(table_rows_.size());
+    for (size_t r = 0; r < table_rows_.size(); ++r) {
+        rendered[r].resize(ncols);
+        for (size_t c = 0; c < ncols; ++c) {
+            std::string cell = render_inline_to_string(table_rows_[r][c]);
+            if (r == 0 && g_color_enabled) {
+                cell = "\x1b[1m" + cell + "\x1b[22m";
+            }
+            rendered[r][c] = std::move(cell);
+        }
+    }
+
+    // Column widths: max display width across all cells in the
+    // column, with a minimum of 1 to avoid zero-width separators.
+    std::vector<int> widths(ncols, 1);
+    for (const auto& row : rendered) {
+        for (size_t c = 0; c < ncols; ++c) {
+            widths[c] = std::max(widths[c], display_width(row[c]));
+        }
+    }
+
+    // Emit top border, header, separator, body rows, bottom border
+    // using light box-drawing. Format:
+    //   ┌───┬───┐
+    //   │ H │ H │
+    //   ├───┼───┤
+    //   │ c │ c │
+    //   └───┴───┘
+    auto draw_border = [&](const char* left, const char* mid, const char* right) {
+        std::string out = dim(left);
+        for (size_t c = 0; c < ncols; ++c) {
+            std::string dashes;
+            for (int i = 0; i < widths[c] + 2; ++i) dashes += "\xE2\x94\x80"; // ─
+            out += dim(dashes);
+            out += dim(c + 1 == ncols ? right : mid);
+        }
+        out += "\n";
+        emit(out);
+    };
+
+    auto draw_row = [&](const std::vector<std::string>& row) {
+        std::string out = dim("\xE2\x94\x82"); // │
+        for (size_t c = 0; c < ncols; ++c) {
+            out += " ";
+            out += pad_cell(row[c], widths[c], table_aligns_[c]);
+            out += " ";
+            out += dim("\xE2\x94\x82");
+        }
+        out += "\n";
+        emit(out);
+    };
+
+    draw_border("\xE2\x94\x8C", "\xE2\x94\xAC", "\xE2\x94\x90"); // ┌ ┬ ┐
+    draw_row(rendered[0]);
+    draw_border("\xE2\x94\x9C", "\xE2\x94\xBC", "\xE2\x94\xA4"); // ├ ┼ ┤
+    for (size_t r = 1; r < rendered.size(); ++r) draw_row(rendered[r]);
+    draw_border("\xE2\x94\x94", "\xE2\x94\xB4", "\xE2\x94\x98"); // └ ┴ ┘
+
+    table_rows_.clear();
+    table_aligns_.clear();
+    table_active_ = false;
 }
 
 void MarkdownRenderer::render_line(const std::string& line) {
@@ -432,8 +643,11 @@ void MarkdownRenderer::render_line(const std::string& line) {
         return;
     }
 
-    // Opening code fence.
+    // Opening code fence. Tables end at any non-table line — flush
+    // the buffer first so a fenced code block can't land inside an
+    // unclosed table.
     if (line.size() >= 3 && line.substr(0, 3) == "```") {
+        if (table_active_) flush_table();
         in_code_block_   = true;
         code_block_lang_ = line.substr(3);
         if (code_block_lang_.empty()) {
@@ -442,6 +656,32 @@ void MarkdownRenderer::render_line(const std::string& line) {
             emit(dim("``` " + code_block_lang_) + "\n");
         }
         return;
+    }
+
+    // Table row handling. Buffer rows until we see a non-table
+    // line, then flush with computed column widths. The second
+    // row (index 1) is treated as the alignment separator if it
+    // looks like one — otherwise it's a normal body row.
+    if (is_table_row(line)) {
+        if (!table_active_) {
+            table_active_ = true;
+            table_rows_.push_back(split_table_row(line));
+            return;
+        }
+        if (table_rows_.size() == 1) {
+            std::vector<TableAlign> aligns;
+            if (is_table_separator(line, &aligns)) {
+                table_aligns_ = std::move(aligns);
+                return;
+            }
+        }
+        table_rows_.push_back(split_table_row(line));
+        return;
+    }
+    if (table_active_) {
+        flush_table();
+        // Fall through so the current (non-table) line still
+        // renders normally.
     }
 
     // Headings.
@@ -512,6 +752,7 @@ void MarkdownRenderer::flush() {
         render_line(line_buffer_);
         line_buffer_.clear();
     }
+    if (table_active_) flush_table();
 }
 
 namespace {
