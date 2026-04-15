@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-04-15
+
 ### Added
 - **`/remote-control` slash command** toggles a background
   Telegram poller on and off inside the regular interactive
