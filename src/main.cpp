@@ -379,8 +379,13 @@ struct StreamState {
     std::string          sse_buffer;
     std::string          raw_buffer;
     std::string          text;
-    int                  input_tokens        = 0;
-    int                  output_tokens       = 0;
+    // Atomics so the spinner thread can read them concurrently
+    // with the main thread's SSE parser. The spinner reads
+    // input_tokens via a non-owning pointer passed to
+    // set_live_input_tokens() so the "(44s · ↑ 652 tokens)" tail
+    // picks up the prompt size the moment `message_start` arrives.
+    std::atomic<int>     input_tokens        { 0 };
+    std::atomic<int>     output_tokens       { 0 };
     bool                 saw_text            = false;
     bool                 stream_error        = false;
     std::string          stream_error_message;
@@ -476,14 +481,17 @@ void process_sse_event(const std::string& event, StreamState* state) {
             }
             state->current_type.clear();
         } else if (type == "message_start") {
-            if (state->spinner) {
-                state->spinner->stop();
-                state->spinner = nullptr;
-            }
+            // Intentionally leave the spinner running here — we
+            // want the "(elapsed · ↑ N tokens)" tail to render
+            // during the window between prompt ingestion and the
+            // first text_delta. MarkdownRenderer::write() still
+            // stops the spinner on first real output.
             if (j.contains("message") && j["message"].contains("usage")) {
                 const auto& u = j["message"]["usage"];
-                state->input_tokens  = u.value("input_tokens",  0);
-                state->output_tokens = u.value("output_tokens", 0);
+                state->input_tokens.store(u.value("input_tokens",  0),
+                                          std::memory_order_relaxed);
+                state->output_tokens.store(u.value("output_tokens", 0),
+                                           std::memory_order_relaxed);
             }
         } else if (type == "message_delta") {
             if (j.contains("delta") && j["delta"].contains("stop_reason")
@@ -492,7 +500,10 @@ void process_sse_event(const std::string& event, StreamState* state) {
             }
             if (j.contains("usage")) {
                 const auto& u = j["usage"];
-                state->output_tokens = u.value("output_tokens", state->output_tokens);
+                state->output_tokens.store(
+                    u.value("output_tokens",
+                            state->output_tokens.load(std::memory_order_relaxed)),
+                    std::memory_order_relaxed);
             }
         } else if (type == "error") {
             state->stream_error = true;
@@ -631,24 +642,14 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     headers = curl_slist_append(headers, "accept: text/event-stream");
 
     StreamState state;
-    // Compose a transient status line that shows while Claude is
-    // thinking but before the first token streams in. Fields: short
-    // model name, message count in the rolling history, and
-    // max_tokens cap. The Spinner itself appends the live elapsed
-    // time and an `esc:cancel` hint, and truncates to the current
-    // terminal_width() so it stays on one line even when the user's
-    // terminal is narrow or has been resized mid-session.
-    auto short_model = [](const std::string& m) {
-        const std::string prefix = "claude-";
-        if (m.rfind(prefix, 0) == 0) return m.substr(prefix.size());
-        return m;
-    };
-    const int msg_count = messages.is_array() ? static_cast<int>(messages.size()) : 0;
-    char stat_buf[160];
-    std::snprintf(stat_buf, sizeof(stat_buf),
-                  "thinking  %s  msgs=%d  max=%d",
-                  short_model(model).c_str(), msg_count, max_tokens);
-    tui::Spinner spinner(stat_buf);
+    // The Spinner now picks a gerund verb ("Forming", "Pondering",
+    // ...) internally and renders a Claude Code-style
+    // "(elapsed · ↑ N tokens · esc:cancel)" tail. We hand it a
+    // pointer to the live input_tokens atomic so the prompt size
+    // appears as soon as `message_start` arrives over SSE, a few
+    // hundred ms after curl_easy_perform begins.
+    tui::Spinner spinner("thinking");
+    spinner.set_live_input_tokens(&state.input_tokens);
     state.spinner = &spinner;
     state.renderer.set_spinner(&spinner);
 
@@ -683,7 +684,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     if (g_interrupted) {
         state.renderer.flush();
         std::cout << "\n" << tui::meta("[interrupted]") << "\n";
-        return {1, state.text, state.input_tokens, state.output_tokens,
+        return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
                 state.content_blocks, state.stop_reason};
     }
 
@@ -741,7 +742,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
 
     if (state.stream_error) {
         std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
-        return {1, state.text, state.input_tokens, state.output_tokens,
+        return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
                 state.content_blocks, state.stop_reason};
     }
 
@@ -754,7 +755,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         // (and the user) can react, rather than emitting a generic
         // "no content" error that hides the real cause.
         if (state.stop_reason == "max_tokens") {
-            return {0, state.text, state.input_tokens, state.output_tokens,
+            return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
                     state.content_blocks, state.stop_reason};
         }
         std::cerr << "error: no content received in stream\n";
@@ -764,7 +765,7 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
 
     state.renderer.flush();
     std::cout << "\n";
-    return {0, state.text, state.input_tokens, state.output_tokens,
+    return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
             state.content_blocks, state.stop_reason};
 }
 

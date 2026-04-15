@@ -91,14 +91,24 @@ public:
     Spinner(const Spinner&) = delete;
     Spinner& operator=(const Spinner&) = delete;
     void stop();
+
+    // Optional non-owning pointer to a live input-token counter that
+    // the spinner reads on each frame. When the counter is > 0, the
+    // spinner appends `↑ <N> tokens` to its rendered line, matching
+    // Claude Code's `(44s · ↑ 652 tokens)` style. Pointer must remain
+    // valid for the spinner's lifetime. Safe to leave null.
+    void set_live_input_tokens(const std::atomic<int>* p) {
+        live_input_tokens_ = p;
+    }
 private:
     void run();
-    std::string             label_;
-    std::atomic<bool>       stopping_{false};
-    std::mutex              mutex_;
-    std::condition_variable cv_;
-    std::thread             thread_;
-    bool                    active_ = false;
+    std::string                   label_;
+    std::atomic<bool>             stopping_{false};
+    std::mutex                    mutex_;
+    std::condition_variable       cv_;
+    std::thread                   thread_;
+    bool                          active_ = false;
+    const std::atomic<int>*       live_input_tokens_ = nullptr;
 };
 
 } // namespace tui

@@ -514,6 +514,71 @@ void MarkdownRenderer::flush() {
     }
 }
 
+namespace {
+
+// Claude Code-style gerund labels. One is picked at Spinner
+// construction time so each request gets a different vibe, matching
+// the "Forming…", "Misting…", "Pondering…" style of the upstream CLI.
+const char* kSpinnerVerbs[] = {
+    "Thinking",  "Forming",   "Pondering", "Musing",
+    "Brewing",   "Weaving",   "Crafting",  "Conjuring",
+    "Distilling","Scheming",  "Plotting",  "Sifting",
+    "Unraveling","Cooking",   "Stewing",   "Mulling",
+    "Simmering", "Reckoning", "Percolating","Chewing",
+};
+constexpr int kVerbCount = sizeof(kSpinnerVerbs) / sizeof(kSpinnerVerbs[0]);
+
+// Rotating star-shaped glyphs for the leading spinner character.
+// These match Claude Code's `✶ ... ✷ ...` feel and all render as a
+// single column on monospace terminals.
+const char* kSpinnerGlyphs[] = {
+    "\xE2\x9C\xB6",  // ✶ U+2736 SIX POINTED BLACK STAR
+    "\xE2\x9C\xB7",  // ✷ U+2737 EIGHT POINTED RECTILINEAR BLACK STAR
+    "\xE2\x9C\xB8",  // ✸ U+2738 HEAVY EIGHT POINTED RECTILINEAR BLACK STAR
+    "\xE2\x9C\xB9",  // ✹ U+2739 TWELVE POINTED BLACK STAR
+    "\xE2\x9C\xBA",  // ✺ U+273A SIXTEEN POINTED ASTERISK
+    "\xE2\x9C\xBB",  // ✻ U+273B TEARDROP-SPOKED ASTERISK
+    "\xE2\x9C\xBC",  // ✼ U+273C OPEN CENTRE TEARDROP-SPOKED ASTERISK
+    "\xE2\x9C\xBD",  // ✽ U+273D HEAVY TEARDROP-SPOKED ASTERISK
+};
+constexpr int kGlyphCount = sizeof(kSpinnerGlyphs) / sizeof(kSpinnerGlyphs[0]);
+
+// Format `N seconds` as either `Xs` for short waits or `Xm Ys`
+// for long ones, matching Claude Code's compact time rendering.
+std::string format_elapsed(double seconds) {
+    const int total = static_cast<int>(seconds);
+    if (total < 60) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%ds", total);
+        return buf;
+    }
+    const int m = total / 60;
+    const int s = total % 60;
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%dm %ds", m, s);
+    return buf;
+}
+
+// Simple xorshift-based random index so we don't need <random> just
+// to pick a verb. Good enough — only called once per Spinner.
+int pick_verb_index() {
+    // Seed from a per-process steady_clock tick count so consecutive
+    // requests don't always pick the same verb when built in the
+    // same second.
+    static std::atomic<uint32_t> state {
+        static_cast<uint32_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count())
+    };
+    uint32_t x = state.load(std::memory_order_relaxed);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    state.store(x, std::memory_order_relaxed);
+    return static_cast<int>(x % kVerbCount);
+}
+
+} // namespace
+
 Spinner::Spinner(std::string label) : label_(std::move(label)) {
     if (!g_color_enabled) return;
     if (!isatty(fileno(stdout))) return;
@@ -533,54 +598,117 @@ void Spinner::stop() {
 }
 
 void Spinner::run() {
-    static const char* kFrames[] = {
-        "\u2819", "\u2839", "\u2838", "\u283c", "\u2834",
-        "\u2826", "\u2827", "\u2807", "\u280f", "\u280b",
-    };
-    constexpr int kFrameCount = sizeof(kFrames) / sizeof(kFrames[0]);
-    int idx = 0;
+    // Pick a verb once per Spinner lifetime. The incoming label_ is
+    // ignored in favor of the randomized gerund — callers used to
+    // pass "thinking" but the richer rendering now wants a gerund
+    // ending in -ing with no extra chrome. If label_ happens to
+    // already be a gerund (e.g., set explicitly), we could honor it,
+    // but the simpler path is to always randomize here.
+    const char* const verb = kSpinnerVerbs[pick_verb_index()];
+
+    int glyph_idx = 0;
+    int frame_count = 0;
 
     const auto start = std::chrono::steady_clock::now();
 
     while (!stopping_.load()) {
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - start).count();
-        char tail[24];
-        std::snprintf(tail, sizeof(tail), " %.1fs", elapsed);
-        std::string frame = std::string(kFrames[idx]) + " " + label_ + tail
-                          + "  esc:cancel";
 
-        // Truncate to the current terminal width so the status
-        // line doesn't wrap when the user's terminal is narrow
-        // or has been resized mid-session. `terminal_width()` is
-        // re-read on SIGWINCH, so resizing works live. We count
-        // bytes, not grapheme clusters — close enough since every
-        // character in the status is ASCII except the leading
-        // single-codepoint spinner glyph (3 bytes UTF-8), which
-        // we special-case as one column.
+        // Live input token count, if a pointer was wired up via
+        // set_live_input_tokens(). Cleared to 0 initially; the
+        // caller writes to the atomic as soon as `message_start`
+        // arrives over SSE, so there's a brief window (a few
+        // hundred ms to a few seconds) where this jumps from 0 to
+        // the real count and the spinner picks it up on the next
+        // frame.
+        int live_in = 0;
+        if (live_input_tokens_) {
+            live_in = live_input_tokens_->load(std::memory_order_relaxed);
+        }
+
+        // Build the tail block inside parens, matching Claude
+        // Code's `(44s · ↑ 652 tokens · esc:cancel)` style. The
+        // up-arrow indicates tokens we've sent to the model (the
+        // prompt size) — we don't have live output tokens during
+        // the thinking window since the spinner dies the moment
+        // the first text_delta arrives via MarkdownRenderer.
+        std::string tail = "(" + format_elapsed(elapsed);
+        if (live_in > 0) {
+            tail += " \xC2\xB7 \xE2\x86\x91 " + std::to_string(live_in)
+                 +  " tokens";
+        }
+        tail += " \xC2\xB7 esc:cancel)";
+
+        // Pulse the verb between normal dim and bright-dim on a
+        // ~1 Hz cycle so it reads as "fading" instead of steady.
+        // Each frame is ~80 ms; every 6 frames (≈ 480 ms) we flip
+        // the pulse state. The glyph itself keeps rotating on
+        // every frame for the classic spinner motion.
+        const bool verb_bright = ((frame_count / 6) & 1) == 0;
+
+        const std::string glyph = kSpinnerGlyphs[glyph_idx];
+        const std::string verb_str = std::string(verb) + "\xE2\x80\xA6"; // …
+
+        // Final render: glyph + verb + tail. We emit each piece
+        // with its own dim() wrap so color is applied consistently
+        // and NO_COLOR / --plain paths fall through to plain text.
+        std::string frame;
+        frame.reserve(96);
+        frame += glyph;
+        frame += " ";
+        // Pulsing verb — bright is "no extra dim" (so it matches
+        // the surrounding wrap), faint is a double-wrap which
+        // stacks the dim attribute. Terminals that ignore the
+        // second SGR still render it as plain dim.
+        frame += verb_bright ? verb_str : std::string("\x1b[2m") + verb_str + "\x1b[22m";
+        frame += "  ";
+        frame += tail;
+
+        // Truncate to terminal_width() so long lines don't wrap.
+        // We keep the leading spinner glyph + verb block intact
+        // and drop the tail from the right if needed. Byte-count
+        // truncation is close enough since everything after the
+        // glyph is ASCII.
         const int width = terminal_width();
         if (width > 4) {
-            // Reserve 1 col for the trailing cursor so we don't
-            // scroll-wrap on exact-width writes.
             const int budget = width - 1;
-            // Count display columns assuming ASCII body; the
-            // 3-byte spinner glyph takes one col.
-            const int body_bytes = static_cast<int>(frame.size()) - 2;
-            if (body_bytes > budget) {
-                // Drop " esc:cancel" first, then bytes from the
-                // tail of label_ as needed. Simpler path: just
-                // truncate frame bytes from the end minus 1 for
-                // an ellipsis.
-                const int keep = budget + 2; // +2 to account for the extra spinner bytes
-                if (keep > 0 && static_cast<int>(frame.size()) > keep) {
-                    frame.resize(keep - 1);
-                    frame += "\xE2\x80\xA6"; // …
+            // Approximate display width: treat every escape
+            // sequence as zero columns, and each byte of UTF-8
+            // glyph content as its byte count minus 2 (since our
+            // star glyphs are 3 UTF-8 bytes but 1 column).
+            int display_cols = 0;
+            bool in_esc = false;
+            for (size_t i = 0; i < frame.size(); ++i) {
+                const unsigned char c = static_cast<unsigned char>(frame[i]);
+                if (in_esc) {
+                    if (c == 'm') in_esc = false;
+                    continue;
                 }
+                if (c == 0x1b) { in_esc = true; continue; }
+                if (c < 0x80) { ++display_cols; continue; }
+                // UTF-8 lead byte: count as one column, skip
+                // continuation bytes.
+                ++display_cols;
+                if ((c & 0xE0) == 0xC0) i += 1;
+                else if ((c & 0xF0) == 0xE0) i += 2;
+                else if ((c & 0xF8) == 0xF0) i += 3;
+            }
+            if (display_cols > budget) {
+                // Simple tail trim: drop bytes from the end until
+                // we're under budget. Cheap and rarely needed.
+                while (!frame.empty() && display_cols > budget) {
+                    frame.pop_back();
+                    --display_cols;
+                }
+                frame += "\xE2\x80\xA6"; // …
             }
         }
 
         std::cout << "\r\x1b[2K" << dim(frame) << std::flush;
-        idx = (idx + 1) % kFrameCount;
+
+        glyph_idx = (glyph_idx + 1) % kGlyphCount;
+        ++frame_count;
 
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait_for(lock, std::chrono::milliseconds(80),
