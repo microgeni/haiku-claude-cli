@@ -25,10 +25,52 @@ void set_color_enabled(bool on);
 // streaming output.
 int terminal_width();
 
-// Installs a SIGWINCH handler that marks the cached terminal_width()
-// dirty so the next call re-reads TIOCGWINSZ. Call once at startup
-// after init(); no-op when stdout isn't a TTY.
+// Current terminal height in rows (TIOCGWINSZ). Same cache and
+// refresh behavior as terminal_width().
+int terminal_rows();
+
+// Installs a SIGWINCH handler that marks the cached terminal
+// dimensions dirty so the next terminal_width()/terminal_rows()
+// call re-reads TIOCGWINSZ. Call once at startup after init();
+// no-op when stdout isn't a TTY.
 void install_sigwinch_handler();
+
+// Fixed-bottom status frame. Carves off the bottom two rows of
+// the terminal via DECSTBM scroll region:
+//
+//     row (rows-1): dim horizontal rule ──────…──
+//     row (rows):   status bar content
+//
+// Chat history and the libedit prompt live in the remaining
+// rows (1..rows-2) and scroll normally. The status bar stays
+// fixed across streaming output, resize events, and prompt
+// redraws.
+//
+// init_status_bar is idempotent; calling it a second time
+// re-reads dimensions and redraws. No-op on non-TTY.
+void install_status_bar(const std::string& initial_status = {});
+
+// Update the status bar content and redraw immediately. Empty
+// string clears the row but leaves the frame installed.
+void set_status_bar(const std::string& status);
+
+// Re-read terminal dimensions, re-set the DECSTBM scroll
+// region, and redraw the fixed rows. Called from the main REPL
+// loop when consume_resize_pending() returns true, and also
+// directly by the SIGWINCH handler path.
+void redraw_status_bar();
+
+// Non-zero if the SIGWINCH handler has fired since the last
+// call. Resets to zero on read. Used by the REPL loop to
+// trigger a redraw between prompts without touching signal
+// handlers directly.
+int consume_resize_pending();
+
+// Tear down the status frame: restore the full scroll region,
+// clear the fixed rows, and move the cursor below them so the
+// shell's next output doesn't overwrite a stale footer.
+// Safe to call even when the frame was never installed.
+void teardown_status_bar();
 
 std::string bold(const std::string& s);
 std::string dim(const std::string& s);

@@ -46,31 +46,59 @@ void init() {
 
 namespace {
 
-// Cached terminal width. Set to -1 initially so the first call to
-// terminal_width() triggers an ioctl. The SIGWINCH handler resets
-// this to -1 again on every resize event so the next call re-reads.
-// sig_atomic_t because a signal handler writes to it.
-volatile std::sig_atomic_t g_term_width_dirty = 1;
-int                        g_cached_term_width = 0;
+// Cached terminal dimensions. Set to dirty initially so the first
+// call to terminal_width()/terminal_rows() triggers an ioctl. The
+// SIGWINCH handler flips both dirty flags so the next read re-
+// populates the cache. sig_atomic_t because a signal handler
+// writes to them.
+volatile std::sig_atomic_t g_term_dirty        = 1;
+volatile std::sig_atomic_t g_resize_pending    = 0;
+int                        g_cached_term_cols  = 0;
+int                        g_cached_term_rows  = 0;
+
+// Fixed-bottom frame state.
+bool                       g_status_bar_active = false;
+std::string                g_status_bar_text;
+// Number of rows reserved at the bottom of the terminal for the
+// fixed frame: one rule row plus one status row.
+constexpr int              kStatusBarRows      = 2;
 
 extern "C" void sigwinch_handler(int) {
-    g_term_width_dirty = 1;
+    g_term_dirty     = 1;
+    g_resize_pending = 1;
+}
+
+void refresh_dims() {
+    struct winsize ws{};
+    if (ioctl(fileno(stdout), TIOCGWINSZ, &ws) == 0
+        && ws.ws_col > 0 && ws.ws_row > 0) {
+        g_cached_term_cols = ws.ws_col;
+        g_cached_term_rows = ws.ws_row;
+    } else {
+        if (g_cached_term_cols == 0) g_cached_term_cols = 80;
+        if (g_cached_term_rows == 0) g_cached_term_rows = 24;
+    }
+    g_term_dirty = 0;
 }
 
 } // namespace
 
 int terminal_width() {
     if (!isatty(fileno(stdout))) return 0;
-    if (g_term_width_dirty) {
-        struct winsize ws{};
-        if (ioctl(fileno(stdout), TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
-            g_cached_term_width = ws.ws_col;
-        } else if (g_cached_term_width == 0) {
-            g_cached_term_width = 80; // safe fallback
-        }
-        g_term_width_dirty = 0;
-    }
-    return g_cached_term_width;
+    if (g_term_dirty) refresh_dims();
+    return g_cached_term_cols;
+}
+
+int terminal_rows() {
+    if (!isatty(fileno(stdout))) return 0;
+    if (g_term_dirty) refresh_dims();
+    return g_cached_term_rows;
+}
+
+int consume_resize_pending() {
+    const int v = g_resize_pending;
+    g_resize_pending = 0;
+    return v;
 }
 
 void install_sigwinch_handler() {
@@ -83,6 +111,99 @@ void install_sigwinch_handler() {
     // dirty, not interrupt in-flight work.
     sa.sa_flags   = SA_RESTART;
     sigaction(SIGWINCH, &sa, nullptr);
+}
+
+namespace {
+
+// Build the ANSI sequences for drawing the fixed frame. Pulled out
+// so both install_status_bar and redraw_status_bar share the logic.
+// Caller is responsible for flushing stdout after calling.
+void draw_fixed_frame(int rows, int cols, const std::string& status) {
+    if (rows < kStatusBarRows + 1) return;
+
+    // Save cursor, then move to the rule row and the status row.
+    // DECSC / DECRC (\e7 / \e8) are more reliable across xterm and
+    // Haiku Terminal than CSI s/u.
+    std::cout << "\x1b""7";
+
+    // Rule row: dimmed horizontal line across the full width.
+    std::cout << "\x1b[" << (rows - 1) << ";1H"
+              << "\x1b[2K"; // erase row
+    std::string rule;
+    rule.reserve(cols * 3);
+    for (int i = 0; i < cols; ++i) rule += "\xE2\x94\x80"; // ─
+    std::cout << dim(rule);
+
+    // Status row: the caller-provided content. Truncated to cols
+    // by the caller; we just print and clear any trailing space.
+    std::cout << "\x1b[" << rows << ";1H"
+              << "\x1b[2K"
+              << status;
+
+    // Restore cursor.
+    std::cout << "\x1b""8";
+}
+
+// Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows) so
+// the bottom two rows stay fixed. Also places the cursor at the
+// bottom of the scroll region so subsequent output / prompt draw
+// at the visually correct position.
+void apply_scroll_region(int rows) {
+    if (rows < kStatusBarRows + 1) return;
+    const int top    = 1;
+    const int bottom = rows - kStatusBarRows;
+    std::cout << "\x1b[" << top << ";" << bottom << "r"
+              << "\x1b[" << bottom << ";1H";
+}
+
+} // namespace
+
+void install_status_bar(const std::string& initial_status) {
+    if (!isatty(fileno(stdout))) return;
+    if (!g_color_enabled) return;
+
+    if (g_term_dirty) refresh_dims();
+    if (g_cached_term_rows < kStatusBarRows + 2) return; // tiny terminal
+
+    g_status_bar_active = true;
+    g_status_bar_text   = initial_status;
+
+    apply_scroll_region(g_cached_term_rows);
+    draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
+    std::cout.flush();
+}
+
+void set_status_bar(const std::string& status) {
+    g_status_bar_text = status;
+    if (!g_status_bar_active) return;
+    if (g_term_dirty) refresh_dims();
+    draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
+    std::cout.flush();
+}
+
+void redraw_status_bar() {
+    if (!g_status_bar_active) return;
+    refresh_dims();
+    apply_scroll_region(g_cached_term_rows);
+    draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
+    std::cout.flush();
+}
+
+void teardown_status_bar() {
+    if (!g_status_bar_active) return;
+    g_status_bar_active = false;
+
+    // Restore the full scroll region and clear our fixed rows, then
+    // move the cursor below them so anything the caller (or the
+    // shell) prints next doesn't overwrite the stale footer.
+    const int rows = g_cached_term_rows > 0 ? g_cached_term_rows : 24;
+    std::cout << "\x1b[r"                         // reset scroll region
+              << "\x1b[" << (rows - 1) << ";1H"
+              << "\x1b[2K"                        // clear rule row
+              << "\x1b[" << rows << ";1H"
+              << "\x1b[2K"                        // clear status row
+              << "\x1b[" << rows << ";1H"
+              << std::flush;
 }
 
 bool color_enabled() { return g_color_enabled; }

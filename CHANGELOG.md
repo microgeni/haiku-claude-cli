@@ -7,6 +7,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Fixed-bottom status frame** in interactive REPL and Telegram
+  bridge mode. A `tui::install_status_bar()` helper sets a
+  DECSTBM scroll region (`\e[1;N-2r`) that carves off the
+  bottom two rows of the terminal: a dimmed horizontal rule and
+  a status row showing the short model name, turn count,
+  cumulative input / output tokens (compact `k` / `M` suffix),
+  and max-tokens cap. Chat history and the libedit prompt live
+  in the remaining rows and scroll normally above the frame.
+  - **Telegram bridge footer** appends a right-aligned
+    `Remote Control active` label in green (`tui::green()`) so
+    the operator always sees that the bridge is live. When
+    `/mute` is toggled, a `· muted` suffix in yellow is
+    appended and the footer redraws on every toggle (from
+    either the local prompt or a Telegram chat).
+  - **SIGWINCH handling** tracks resize events via a new
+    `tui::consume_resize_pending()` flag; the REPL loop
+    consumes the flag between prompts and calls
+    `tui::redraw_status_bar()` to re-read `TIOCGWINSZ`, reset
+    the scroll region, and repaint the frame.
+  - **Crash-safe teardown** via `std::atexit` + a `SIGTERM`
+    handler that calls `teardown_status_bar()` before
+    re-raising. Normal REPL exit uses an RAII
+    `StatusFrameGuard` scoped to the loop. `SIGINT` is
+    deliberately left to `InterruptGuard` so Ctrl+C still
+    cancels in-flight requests without tearing down the
+    frame.
+  - New `tui::terminal_rows()` helper parallel to
+    `terminal_width()`, same caching and SIGWINCH refresh.
+  - No-op on non-TTY / `--plain` / color-disabled paths and
+    when the terminal has fewer than 4 rows (so one-shot
+    invocations and piped output keep behaving identically).
+- **Aligned markdown tables.** The renderer now detects pipe
+  tables, buffers rows until the table ends, computes per-
+  column display widths, and emits aligned box-drawing output
+  with bolded headers, dimmed borders, and honored
+  `:--- / ---: / :---:` alignment markers. `render_inline` was
+  refactored into a string-returning helper so cell contents
+  retain their inline formatting (bold, italic, inline code)
+  while the width math sees the already-formatted string.
 - **Transient status line during the thinking window.** The
   existing spinner's label now carries live context — short
   model name, rolling message count, `max_tokens` cap — and

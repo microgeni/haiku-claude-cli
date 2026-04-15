@@ -1285,6 +1285,87 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
     return SlashAction::Continue;
 }
 
+// Compact a raw token count into a k/M suffix so it fits on the
+// bottom status row without dominating the line. Examples:
+//   142   -> "142"
+//   1832  -> "1.8k"
+//   24110 -> "24k"
+std::string compact_tokens(int n) {
+    if (n < 1000) return std::to_string(n);
+    if (n < 10000) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%.1fk", n / 1000.0);
+        return buf;
+    }
+    if (n < 1000000) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%dk", n / 1000);
+        return buf;
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.1fM", n / 1000000.0);
+    return buf;
+}
+
+// Compose the fixed-bottom status row for a regular REPL session.
+// Format:
+//   <short_model> · turn N · ↑ 1.2k · ↓ 420 · max 8192
+// Padded with a leading space for visual breathing room. Caller
+// is responsible for passing the numbers; this helper just
+// formats. Truncates to terminal_width() minus 1 so the row never
+// wraps to the next line (which would destroy the fixed frame).
+std::string format_status_row(const std::string& model,
+                              int turn_count,
+                              int session_input,
+                              int session_output,
+                              int max_tokens,
+                              const std::string& right_label) {
+    auto short_model = [](const std::string& m) {
+        const std::string prefix = "claude-";
+        if (m.rfind(prefix, 0) == 0) return m.substr(prefix.size());
+        return m;
+    };
+
+    std::string left;
+    left.reserve(96);
+    left += " ";
+    left += tui::dim(short_model(model));
+    left += tui::dim(" \xC2\xB7 turn ") + tui::dim(std::to_string(turn_count));
+    left += tui::dim(" \xC2\xB7 \xE2\x86\x91 ") + tui::dim(compact_tokens(session_input));
+    left += tui::dim(" \xC2\xB7 \xE2\x86\x93 ") + tui::dim(compact_tokens(session_output));
+    left += tui::dim(" \xC2\xB7 max ") + tui::dim(std::to_string(max_tokens));
+
+    if (right_label.empty()) return left;
+
+    // Right-justify `right_label` on the same line. The helper
+    // counts display columns (skipping ANSI) via a quick inline
+    // walk so bold/color wraps don't break the math.
+    auto display_width = [](const std::string& s) {
+        int cols = 0;
+        bool in_esc = false;
+        for (size_t i = 0; i < s.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(s[i]);
+            if (in_esc) { if (c == 'm') in_esc = false; continue; }
+            if (c == 0x1b) { in_esc = true; continue; }
+            if (c < 0x80) { ++cols; continue; }
+            ++cols;
+            if      ((c & 0xE0) == 0xC0) i += 1;
+            else if ((c & 0xF0) == 0xE0) i += 2;
+            else if ((c & 0xF8) == 0xF0) i += 3;
+        }
+        return cols;
+    };
+
+    const int width = tui::terminal_width();
+    if (width <= 0) return left + "  " + right_label;
+
+    const int left_cols  = display_width(left);
+    const int right_cols = display_width(right_label);
+    const int gap        = (width - 1) - left_cols - right_cols;
+    if (gap < 2) return left + "  " + right_label;
+    return left + std::string(gap, ' ') + right_label + " ";
+}
+
 int interactive_loop(const Auth& auth, const std::string& initial_model, int max_tokens,
                      const std::string& custom_system, const json& prices, bool resume,
                      const std::string& initial_message) {
@@ -1322,11 +1403,25 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
     }
 
     std::cout << tui::bold("Claude CLI interactive mode") << tui::dim(" (model: " + model + ")") << ".\n"
-              << tui::dim("Type /help for commands, 'exit' or Ctrl+D to leave.") << "\n\n";
+              << tui::dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n\n";
+
+    // Install the fixed-bottom status frame after the welcome text
+    // so the scrolling welcome lines live in the chat history
+    // region. RAII teardown happens in the StatusFrame guard below.
+    tui::install_status_bar(
+        format_status_row(model, 0, 0, 0, max_tokens, /*right=*/""));
+    struct StatusFrameGuard {
+        ~StatusFrameGuard() { tui::teardown_status_bar(); }
+    } status_frame_guard;
 
     std::string pending = initial_message;
 
     while (true) {
+        // Resize events rebuild the scroll region and redraw the
+        // fixed rows so the frame stays correct after the user
+        // drags the terminal window.
+        if (tui::consume_resize_pending()) tui::redraw_status_bar();
+
         std::string line;
         if (!pending.empty()) {
             line    = std::move(pending);
@@ -1401,6 +1496,13 @@ int interactive_loop(const Auth& auth, const std::string& initial_model, int max
                  + " model=" + model
                  + " in=" + std::to_string(result.input_tokens)
                  + " out=" + std::to_string(result.output_tokens));
+
+        // Push the updated session counters into the fixed-bottom
+        // status row so the user sees the running totals without
+        // having to pull up /usage.
+        tui::set_status_bar(format_status_row(
+            model, turn_count, session_input, session_output,
+            max_tokens, /*right=*/""));
 
         save_history(messages, model);
 
@@ -1523,6 +1625,24 @@ int run_telegram_bridge(const Config& cfg) {
     // next run_telegram_bridge invocation if we ever call it twice.
     g_telegram_muted.store(false);
 
+    // Compose and install the fixed-bottom status row for the
+    // bridge. Right label is "Remote Control active" in green so
+    // the operator always sees that the bridge is live, with
+    // "· muted" appended in yellow when /mute is toggled on.
+    auto compose_bridge_status = [&]() {
+        const std::string base_label =
+            tui::green("Remote Control active");
+        const std::string label = g_telegram_muted.load()
+            ? base_label + tui::yellow(" \xC2\xB7 muted")
+            : base_label;
+        return format_status_row(active_model, turn_count, session_input,
+                                 session_output, cfg.max_tokens, label);
+    };
+    tui::install_status_bar(compose_bridge_status());
+    struct BridgeStatusGuard {
+        ~BridgeStatusGuard() { tui::teardown_status_bar(); }
+    } bridge_status_guard;
+
     // Mute-aware wrappers around the Telegram client. Every outbound
     // call in process_turn / process_telegram goes through these so
     // that a single /mute toggle silences the whole bridge in one
@@ -1617,6 +1737,7 @@ int run_telegram_bridge(const Config& cfg) {
         ++turn_count;
         session_input  += result.input_tokens;
         session_output += result.output_tokens;
+        tui::set_status_bar(compose_bridge_status());
 
         // 5. Tear down the updater thread.
         updater_running.store(false);
@@ -1689,6 +1810,7 @@ int run_telegram_bridge(const Config& cfg) {
                     "Bridge muted. No replies will be sent until /unmute. "
                     "Incoming messages are still processed locally.");
                 g_telegram_muted.store(true);
+                tui::set_status_bar(compose_bridge_status());
                 std::cout << tui::meta("[telegram bridge muted]") << "\n";
                 log_line("telegram mute (from user=" + std::to_string(u.user_id) + ")");
             }
@@ -1701,6 +1823,7 @@ int run_telegram_bridge(const Config& cfg) {
             } else {
                 client.send_message(u.chat_id,
                     "Bridge unmuted. Replies will be sent again.");
+                tui::set_status_bar(compose_bridge_status());
                 std::cout << tui::meta("[telegram bridge unmuted]") << "\n";
                 log_line("telegram unmute (from user=" + std::to_string(u.user_id) + ")");
             }
@@ -1776,6 +1899,7 @@ int run_telegram_bridge(const Config& cfg) {
         ++turn_count;
         session_input  += result.input_tokens;
         session_output += result.output_tokens;
+        tui::set_status_bar(compose_bridge_status());
 
         updater_running.store(false);
         if (updater.joinable()) updater.join();
@@ -1842,6 +1966,8 @@ int run_telegram_bridge(const Config& cfg) {
     }
 
     while (!g_interrupted) {
+        if (tui::consume_resize_pending()) tui::redraw_status_bar();
+
         std::string line;
         if (!repl::read_message(tui::user_prompt(),
                                 tui::continuation_prompt(), line)) {
@@ -1874,6 +2000,7 @@ int run_telegram_bridge(const Config& cfg) {
                             "be sent until /unmute.");
                     }
                     g_telegram_muted.store(true);
+                    tui::set_status_bar(compose_bridge_status());
                     std::cout << tui::meta("[telegram bridge muted]") << "\n";
                     log_line("telegram mute (from local prompt)");
                 }
@@ -1891,6 +2018,7 @@ int run_telegram_bridge(const Config& cfg) {
                             "Bridge unmuted from local prompt. Replies will "
                             "be sent again.");
                     }
+                    tui::set_status_bar(compose_bridge_status());
                     std::cout << tui::meta("[telegram bridge unmuted]") << "\n";
                     log_line("telegram unmute (from local prompt)");
                 }
@@ -1936,6 +2064,37 @@ int run_telegram_bridge(const Config& cfg) {
 int main(int argc, char* argv[]) {
     tui::init();
     tui::install_sigwinch_handler();
+
+    // Crash-safe teardown. std::atexit fires on normal return,
+    // exit(), and unhandled exceptions (via terminate). Signal
+    // handlers for SIGINT / SIGTERM below call it explicitly
+    // before re-raising so Ctrl+C out of a REPL also restores
+    // the scroll region. Without this, a crashed bridge leaves
+    // the user's terminal with a truncated scroll region stuck
+    // above the now-missing status row.
+    std::atexit([]() { tui::teardown_status_bar(); });
+    {
+        struct sigaction sa {};
+        sa.sa_handler = [](int sig) {
+            tui::teardown_status_bar();
+            // Re-raise with the default handler so the exit
+            // status reflects the signal, not a clean return.
+            struct sigaction dfl {};
+            dfl.sa_handler = SIG_DFL;
+            sigemptyset(&dfl.sa_mask);
+            sigaction(sig, &dfl, nullptr);
+            raise(sig);
+        };
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGTERM, &sa, nullptr);
+        // Note: we deliberately do NOT install this for SIGINT
+        // because InterruptGuard already has a SIGINT handler
+        // that sets g_interrupted, and replacing it here would
+        // break Ctrl+C cancellation of in-flight requests.
+        // teardown_status_bar will still fire via std::atexit
+        // when the REPL loop exits cleanly after the interrupt.
+    }
 
     if (argc >= 2) {
         const std::string cmd = argv[1];
