@@ -850,6 +850,9 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
         return Permission::Deny;
     }
 
+    // Print the preview + question text into the scroll region so
+    // the history shows what was asked. Each piece ends with a
+    // newline so the cursor advances cleanly.
     const std::string extra = tools::preview(tool_name, input);
     if (!extra.empty()) {
         std::cout << tui::dim(extra) << "\n";
@@ -857,17 +860,39 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
         std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n";
     }
     std::cout << tui::bold("allow " + tool_name + "? ")
-              << tui::dim("(y)es once, (a)lways this session, (n)o: ")
+              << tui::dim("(y)es once, (a)lways this session, (n)o") << "\n"
               << std::flush;
 
+    // Hop the cursor down to the fixed input row so the answer
+    // keystrokes echo there instead of inside the scroll region.
+    // No-op when the status frame isn't active; in that case the
+    // prompt still reads normally from wherever the cursor is.
+    tui::position_cursor_for_input();
+    std::cout << tui::user_prompt() << std::flush;
+
     std::string line;
-    if (!std::getline(std::cin, line)) {
+    const bool got = static_cast<bool>(std::getline(std::cin, line));
+
+    // After getline the cursor has advanced one row below the
+    // input (because the enter key echoed a newline), which is
+    // the rule row. Pull it back into the scroll region so the
+    // next streamed output lands in the right place.
+    tui::position_cursor_for_chat();
+
+    if (!got) {
         if (denial_reason) {
             *denial_reason = "stdin closed before permission answer for " + tool_name;
         }
         return Permission::Deny;
     }
     const char c = line.empty() ? 'n' : static_cast<char>(std::tolower(static_cast<unsigned char>(line[0])));
+    // Echo the user's choice back into the scroll history so the
+    // record shows what they answered — otherwise the answer is
+    // only visible on the ephemeral input row.
+    const char* label = (c == 'y') ? "yes"
+                      : (c == 'a') ? "always"
+                      :              "no";
+    std::cout << tui::dim(std::string("  -> ") + label) << "\n";
     if (c == 'a') {
         always_allowed().insert(tool_name);
         return Permission::Allow;
