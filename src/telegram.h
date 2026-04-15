@@ -1,6 +1,7 @@
 #ifndef HAIKU_CLAUDE_CLI_TELEGRAM_H
 #define HAIKU_CLAUDE_CLI_TELEGRAM_H
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -43,7 +44,14 @@ public:
     //
     // Returns an empty vector on timeout, network error, or when the
     // response has no text messages.
-    std::vector<Update> poll(int timeout_sec = 25);
+    //
+    // If `keep_running` is non-null, a curl progress callback
+    // checks it roughly every second and aborts the in-flight
+    // HTTP request as soon as `*keep_running` becomes false. This
+    // lets callers (e.g. RemoteControl::stop) cut a blocking
+    // long-poll short without waiting for the full timeout.
+    std::vector<Update> poll(int timeout_sec = 25,
+                             std::atomic<bool>* keep_running = nullptr);
 
     // POST sendMessage to the given chat. Long messages are chunked
     // into ~4000-char pieces to stay under Telegram's 4096-char
@@ -89,7 +97,8 @@ private:
     bool post_json(const std::string& method,
                    const std::string& body,
                    std::string*       out_response,
-                   long               timeout_sec);
+                   long               timeout_sec,
+                   std::atomic<bool>* keep_running = nullptr);
 
     std::string token_;
     int64_t     next_offset_ = 0;

@@ -19,6 +19,17 @@ size_t append_cb(void* ptr, size_t size, size_t nmemb, void* userp) {
     return size * nmemb;
 }
 
+// curl progress / transfer callback used to abort an in-flight
+// long-poll when the caller flips its keep_running flag to false.
+// curl invokes it roughly once per second; returning non-zero
+// causes curl_easy_perform to fail with CURLE_ABORTED_BY_CALLBACK.
+int cancel_cb(void* clientp,
+              curl_off_t /*dltotal*/, curl_off_t /*dlnow*/,
+              curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
+    auto* flag = static_cast<std::atomic<bool>*>(clientp);
+    return (flag && !flag->load()) ? 1 : 0;
+}
+
 } // namespace
 
 Client::Client(std::string bot_token) : token_(std::move(bot_token)) {}
@@ -28,7 +39,8 @@ std::string Client::api_url(const std::string& method) const {
 }
 
 bool Client::post_json(const std::string& method, const std::string& body,
-                       std::string* out_response, long timeout_sec) {
+                       std::string* out_response, long timeout_sec,
+                       std::atomic<bool>* keep_running) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -49,6 +61,12 @@ bool Client::post_json(const std::string& method, const std::string& body,
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "haiku-claude-cli");
 
+    if (keep_running) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, cancel_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, keep_running);
+    }
+
     const CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -60,7 +78,7 @@ bool Client::post_json(const std::string& method, const std::string& body,
     return true;
 }
 
-std::vector<Update> Client::poll(int timeout_sec) {
+std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_running) {
     const json body = {
         {"offset",          next_offset_},
         {"timeout",         timeout_sec},
@@ -69,7 +87,8 @@ std::vector<Update> Client::poll(int timeout_sec) {
 
     std::string response;
     if (!post_json("getUpdates", body.dump(), &response,
-                   static_cast<long>(timeout_sec + 10))) {
+                   static_cast<long>(timeout_sec + 10),
+                   keep_running)) {
         return {};
     }
 

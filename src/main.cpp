@@ -1448,7 +1448,11 @@ public:
 private:
     void poll_loop() {
         while (running_.load() && !g_interrupted) {
-            const auto updates = client_.poll(10);
+            // Pass &running_ so the curl progress callback can
+            // abort the in-flight long-poll when stop() flips the
+            // flag — otherwise /remote-control off would wait up
+            // to ~20s for Telegram's long-poll to return.
+            const auto updates = client_.poll(10, &running_);
             if (!running_.load() || g_interrupted) break;
             for (const auto& u : updates) {
                 if (!running_.load() || g_interrupted) break;
