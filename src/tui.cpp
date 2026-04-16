@@ -1077,30 +1077,47 @@ void Spinner::run() {
         }
         tail += " \xC2\xB7 esc:cancel)";
 
-        // Pulse the verb between normal dim and bright-dim on a
-        // ~1 Hz cycle so it reads as "fading" instead of steady.
+        // Pulse the verb between normal and slightly-faint on a
+        // ~1 Hz cycle so it reads as "breathing" instead of steady.
         // Each frame is ~80 ms; every 6 frames (≈ 480 ms) we flip
-        // the pulse state. The glyph itself keeps rotating on
-        // every frame for the classic spinner motion.
+        // the pulse state. Rainbow hue cycles independently per
+        // frame; combined effect is a shimmer that reads alive.
         const bool verb_bright = ((frame_count / 6) & 1) == 0;
 
         const std::string glyph = kSpinnerGlyphs[glyph_idx];
         const std::string verb_str = std::string(verb) + "\xE2\x80\xA6"; // …
 
-        // Final render: glyph + verb + tail. We emit each piece
-        // with its own dim() wrap so color is applied consistently
-        // and NO_COLOR / --plain paths fall through to plain text.
+        // 256-color rainbow palette. Glyph and verb cycle through
+        // it per frame with a small phase offset so they don't
+        // shift in lock-step — looks more organic. Muted palette
+        // (not pure primaries) to stay readable on both dark and
+        // light themes.
+        static constexpr int kRainbow[] = {
+            203, 209, 215, 221, 186, 151, 115,
+             79,  75,  68,  97, 133, 169, 205,
+        };
+        constexpr int kRainbowCount = sizeof(kRainbow) / sizeof(kRainbow[0]);
+        const int glyph_col = kRainbow[frame_count % kRainbowCount];
+        const int verb_col  = kRainbow[(frame_count + 4) % kRainbowCount];
+
+        char glyph_wrap[16];
+        char verb_wrap[16];
+        std::snprintf(glyph_wrap, sizeof(glyph_wrap), "\x1b[38;5;%dm", glyph_col);
+        std::snprintf(verb_wrap,  sizeof(verb_wrap),  "\x1b[38;5;%dm", verb_col);
+
+        // Final render: rainbow glyph + rainbow verb + muted tail.
+        // Tail stays gray (consistent with the rest of the frame
+        // chrome) so the animated region is visually isolated.
         std::string frame;
-        frame.reserve(96);
+        frame.reserve(128);
+        frame += glyph_wrap;
         frame += glyph;
-        frame += " ";
-        // Pulsing verb — bright is "no extra dim" (so it matches
-        // the surrounding wrap), faint is a double-wrap which
-        // stacks the dim attribute. Terminals that ignore the
-        // second SGR still render it as plain dim.
-        frame += verb_bright ? verb_str : std::string("\x1b[2m") + verb_str + "\x1b[22m";
-        frame += "  ";
-        frame += tail;
+        frame += "\x1b[0m ";
+        frame += verb_wrap;
+        if (!verb_bright) frame += "\x1b[2m"; // stack faint for the pulse dip
+        frame += verb_str;
+        frame += "\x1b[0m  ";
+        frame += muted(tail);
 
         // Truncate to terminal_width() so long lines don't wrap.
         // We keep the leading spinner glyph + verb block intact
