@@ -49,6 +49,10 @@ all: $(BIN)
 
 $(BIN): $(OBJS) | $(BUILDDIR)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+	@if [ -f "$(ICON_HVIF)" ] && command -v addattr >/dev/null 2>&1; then \
+	    echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
+	    addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$@"; \
+	fi
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
@@ -66,7 +70,7 @@ install: $(BIN)
 	install -m 644 docs/claude.1 $(DESTDIR)$(MANDIR)/claude.1
 	@if [ -f "$(ICON_HVIF)" ] && command -v addattr >/dev/null 2>&1; then \
 	    echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
-	    addattr -t 'VICN' -f "$(ICON_HVIF)" BEOS:ICON "$(DESTDIR)$(BINDIR)/claude"; \
+	    addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(DESTDIR)$(BINDIR)/claude"; \
 	else \
 	    echo "  (skipping icon stamp — no $(ICON_HVIF) or no addattr)"; \
 	fi
@@ -85,7 +89,7 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	cp docs/claude.1 "$(PKG_STAGE)/documentation/man/man1/claude.1"
 	@if [ -f "$(ICON_HVIF)" ] && command -v addattr >/dev/null 2>&1; then \
 	    echo "  stamping BEOS:ICON from $(ICON_HVIF) onto staged binary"; \
-	    addattr -t 'VICN' -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
+	    addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
 	fi
 	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
 	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
