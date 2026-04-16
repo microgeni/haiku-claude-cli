@@ -1401,7 +1401,11 @@ static std::string first_sentence_for_notify(const std::string& text,
 static void send_desktop_notification(const std::string& title,
                                       const std::string& body) {
 #ifdef __HAIKU__
+    std::fprintf(stderr, "[notify-debug] send entered title_len=%zu body_len=%zu\n",
+                 title.size(), body.size());
     pid_t pid = fork();
+    std::fprintf(stderr, "[notify-debug] fork pid=%d errno=%d (%s)\n",
+                 pid, errno, std::strerror(errno));
     if (pid < 0) return;
     if (pid == 0) {
         // Haiku's `notify` doesn't support `--` as an
@@ -1417,11 +1421,20 @@ static void send_desktop_notification(const std::string& title,
             body.c_str(),
             nullptr
         };
+        std::fprintf(stderr, "[notify-debug] child about to execvp\n");
         execvp("notify", const_cast<char* const*>(argv));
+        std::fprintf(stderr, "[notify-debug] child execvp FAILED errno=%d (%s)\n",
+                     errno, std::strerror(errno));
         _exit(127);
     }
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t w = waitpid(pid, &status, 0);
+    std::fprintf(stderr,
+        "[notify-debug] waitpid pid=%d status=0x%x exited=%d exit_code=%d signaled=%d\n",
+        w, status,
+        WIFEXITED(status) ? 1 : 0,
+        WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+        WIFSIGNALED(status) ? 1 : 0);
 #else
     (void)title;
     (void)body;
@@ -2455,6 +2468,10 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         // fast replies on a user sitting at the keyboard don't buzz.
         // Body is the first sentence of the reply so the user can
         // glance at the notification and know whether to come back.
+        std::fprintf(stderr,
+            "[notify-debug] enabled=%d elapsed=%.2f threshold=%.2f will_fire=%d\n",
+            notify_enabled ? 1 : 0, elapsed, notify_min_duration,
+            (notify_enabled && elapsed >= notify_min_duration) ? 1 : 0);
         if (notify_enabled && elapsed >= notify_min_duration) {
             char title[96];
             std::snprintf(title, sizeof(title),
