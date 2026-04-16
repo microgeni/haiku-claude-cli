@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -1447,6 +1448,21 @@ static void send_desktop_notification(const std::string& title,
                  pid, errno, std::strerror(errno));
     if (pid < 0) return;
     if (pid == 0) {
+        // Detach from the parent's session + controlling
+        // terminal. Without this, notify inherits the REPL's
+        // cbreak termios and scroll-region state and the
+        // BMessage dispatch to notification_server silently
+        // drops the alert even though the `notify` child
+        // exits with status 0.
+        setsid();
+        int devnull = ::open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            // leave stderr attached for the FAILED debug line
+            if (devnull > 2) close(devnull);
+        }
+
         // Haiku's `notify` doesn't support `--` as an
         // end-of-options sentinel — it errors with
         // "Unrecognized option --" and the notification never
