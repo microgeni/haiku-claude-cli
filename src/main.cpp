@@ -1300,7 +1300,32 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
             }
 
-            stats_record_tool(tname, static_cast<int>(tres.content.size()));
+            // For BFS-native tools, measure actual bytes saved
+            // by stat-ing the target file(s) and subtracting the
+            // tool's own output size. ReadAttr compares against
+            // one file; Query sums every path returned.
+            long saved_bytes = 0;
+            if (tname == "ReadAttr") {
+                const std::string path = tinput.value("path", std::string{});
+                struct stat st;
+                if (!path.empty() && ::stat(path.c_str(), &st) == 0) {
+                    const long s = static_cast<long>(st.st_size)
+                                 - static_cast<long>(tres.content.size());
+                    if (s > 0) saved_bytes = s;
+                }
+            } else if (tname == "Query") {
+                long total = 0;
+                std::istringstream iss(tres.content);
+                std::string p;
+                while (std::getline(iss, p)) {
+                    if (p.empty()) continue;
+                    struct stat st;
+                    if (::stat(p.c_str(), &st) == 0) total += st.st_size;
+                }
+                const long s = total - static_cast<long>(tres.content.size());
+                if (s > 0) saved_bytes = s;
+            }
+            stats_record_tool(tname, static_cast<int>(tres.content.size()), saved_bytes);
 
             tool_results.push_back({
                 {"type",        "tool_result"},
