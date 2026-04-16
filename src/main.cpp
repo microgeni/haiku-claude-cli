@@ -447,12 +447,8 @@ std::string format_stats_display() {
             thousands(saved_tokens).c_str());
     } else {
         std::snprintf(buf, sizeof(buf),
-            "  \xE2\x94\x83  No BFS calls yet — 0 tokens saved.\n"
-            "  \xE2\x94\x83\n"
-            "  \xE2\x94\x83  Ask Claude to use ReadAttr/WriteAttr on\n"
-            "  \xE2\x94\x83  source files to start building the attribute\n"
-            "  \xE2\x94\x83  cache. On a typical source tree, lifetime\n"
-            "  \xE2\x94\x83  savings reach 90%%+ of full-read token cost.\n");
+            "  \xE2\x94\x83  Cache empty — builds itself as Claude\n"
+            "  \xE2\x94\x83  reads files this session.\n");
     }
     out += buf;
     out += "\n";
@@ -1304,6 +1300,11 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
     return Permission::Deny;
 }
 
+// Forward decl — definition lives further down with the other
+// BFS helpers so it can use shell_single_quote.
+static void auto_write_summary_if_missing(const std::string& path,
+                                          const std::string& content);
+
 SendResult send_with_tools(const Auth& auth, const std::string& model, int max_tokens,
                            json& messages, const std::string& custom_system) {
     SendResult aggregate;
@@ -1459,6 +1460,19 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                     {"is_error",    tres.is_error},
                 };
                 hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
+            }
+
+            // Auto-seed BFS cache: if Claude just Read a file
+            // without a claude:summary attribute, write a
+            // heuristic summary derived from the content we
+            // already have in memory. Zero extra API calls —
+            // next session's ReadAttr gets a free starting
+            // point, which Claude can later overwrite with a
+            // richer summary via WriteAttr.
+            if (tname == "Read" && !tres.is_error) {
+                auto_write_summary_if_missing(
+                    tinput.value("path", std::string{}),
+                    tres.content);
             }
 
             // For BFS-native tools, measure actual bytes saved
@@ -1670,6 +1684,98 @@ static std::string shell_single_quote(const std::string& s) {
     out += '\'';
     return out;
 }
+
+#ifdef __HAIKU__
+// "What is this file about" distilled from content Claude
+// just Read. No API call — first non-blank, non-comment
+// line plus total-line-count, truncated to 80 chars. Good
+// enough to let the next session tell "oh, this file is
+// about X" via ReadAttr before deciding to Read the whole
+// thing. Claude can later overwrite with a richer summary
+// via WriteAttr; this is the floor, not the ceiling.
+static std::string derive_heuristic_summary(const std::string& content) {
+    size_t pos = 0;
+    int    total_lines = 0;
+    std::string first_meaningful;
+    while (pos < content.size()) {
+        const size_t nl  = content.find('\n', pos);
+        const size_t len = (nl == std::string::npos ? content.size() : nl) - pos;
+        ++total_lines;
+        if (first_meaningful.empty() && total_lines <= 50) {
+            const std::string line = content.substr(pos, len);
+            const size_t ws = line.find_first_not_of(" \t");
+            if (ws != std::string::npos) {
+                const std::string trimmed = line.substr(ws);
+                if (trimmed.size() >= 2 &&
+                    trimmed.substr(0, 2) != "//" &&
+                    trimmed.substr(0, 2) != "/*" &&
+                    trimmed[0] != '#' && trimmed[0] != '*') {
+                    first_meaningful = trimmed.substr(0, 80);
+                }
+            }
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    std::string out = std::to_string(total_lines) + "L";
+    if (!first_meaningful.empty()) out += " \xE2\x80\x94 " + first_meaningful;
+    return out;
+}
+
+// Probe a file for an existing non-empty claude:summary
+// attribute. Best-effort — silent failures return false,
+// which is safe (we'll attempt to write, addattr will just
+// overwrite with ours or fail quietly).
+static bool has_claude_summary(const std::string& path) {
+    const std::string cmd =
+        "catattr -d claude:summary " + shell_single_quote(path) +
+        " 2>/dev/null";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return false;
+    char buf[256];
+    size_t total = 0;
+    while (std::fgets(buf, sizeof(buf), p)) total += std::strlen(buf);
+    pclose(p);
+    return total > 1;  // >1 accounts for a trailing newline
+}
+
+// Auto-seed the BFS cache: if Claude just Read a file and
+// it has no claude:summary yet, write a heuristic one
+// derived from the content already in memory. Fork+exec
+// addattr; the child fully detaches and redirects stdio so
+// it can't interfere with the REPL's TUI state.
+static void auto_write_summary_if_missing(const std::string& path,
+                                          const std::string& content) {
+    if (path.empty()) return;
+    if (has_claude_summary(path)) return;
+    const std::string summary = derive_heuristic_summary(content);
+    if (summary.empty()) return;
+
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid == 0) {
+        setsid();
+        int devnull = ::open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > 2) close(devnull);
+        }
+        const char* argv[] = {
+            "addattr", "-t", "string",
+            "claude:summary", summary.c_str(), path.c_str(),
+            nullptr
+        };
+        execvp("addattr", const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+}
+#else
+static void auto_write_summary_if_missing(const std::string&, const std::string&) {}
+#endif
 
 struct PriceEntry {
     double input;
