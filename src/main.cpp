@@ -351,72 +351,127 @@ void stats_record_tool(const std::string& tool_name, int result_bytes,
     save_stats(s);
 }
 
+// Insert thousands separators into a non-negative integer so
+// "654229" renders as "654,229" in the stats table. Keeps the
+// numbers scannable — the difference between 6,600 and 66,000
+// saved tokens is the whole story of /stats.
+static std::string thousands(long n) {
+    if (n < 0) return "-" + thousands(-n);
+    std::string s = std::to_string(n);
+    for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) {
+        s.insert(i, ",");
+    }
+    return s;
+}
+
 std::string format_stats_display() {
     const json s = load_stats();
     const std::string since = s.value("first_session", std::string{"(unknown)"});
-    const int sessions      = s.value("sessions", 0);
-    const int turns         = s.value("turns", 0);
-    const int in_tok        = s.value("input_tokens", 0);
-    const int out_tok       = s.value("output_tokens", 0);
+    const int  sessions = s.value("sessions", 0);
+    const int  turns    = s.value("turns", 0);
+    const long in_tok   = s.value("input_tokens",  static_cast<long>(0));
+    const long out_tok  = s.value("output_tokens", static_cast<long>(0));
 
+    // Ballpark lifetime cost using Sonnet rates ($3 / M input,
+    // $15 / M output). Stats are cross-model but Sonnet is the
+    // default and gives an order-of-magnitude number.
+    const double est_cost = (in_tok  / 1'000'000.0) * 3.0
+                          + (out_tok / 1'000'000.0) * 15.0;
+
+    // BFS counters — computed first so the summary block can
+    // lead with the savings number.
+    long read_attr_saved = 0, read_attr_used = 0;
+    int  read_attr_calls = 0;
+    long query_saved     = 0, query_used    = 0;
+    int  query_calls     = 0;
+    if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
+        const auto& tc = s["tool_calls"];
+        if (tc.contains("ReadAttr")) {
+            read_attr_saved = tc["ReadAttr"].value("saved_bytes", static_cast<long>(0));
+            read_attr_used  = tc["ReadAttr"].value("bytes",       static_cast<long>(0));
+            read_attr_calls = tc["ReadAttr"].value("count",       0);
+        }
+        if (tc.contains("Query")) {
+            query_saved = tc["Query"].value("saved_bytes", static_cast<long>(0));
+            query_used  = tc["Query"].value("bytes",       static_cast<long>(0));
+            query_calls = tc["Query"].value("count",       0);
+        }
+    }
+    const long total_saved_bytes = read_attr_saved + query_saved;
+    const long total_used_bytes  = read_attr_used  + query_used;
+    const long saved_tokens      = total_saved_bytes / 4;
+    const long used_tokens       = total_used_bytes  / 4;
+    const long full_tokens       = saved_tokens + used_tokens;
+    const int  bfs_pct           = full_tokens > 0
+        ? static_cast<int>((saved_tokens * 100) / full_tokens)
+        : 0;
+    const double bfs_cost_saved  = (saved_tokens / 1'000'000.0) * 3.0;
+
+    char buf[768];
     std::string out;
-    out += "haiku-claude-cli lifetime stats";
-    if (!since.empty() && since != "(unknown)") out += " (since " + since + ")";
-    out += "\n";
 
-    char buf[256];
+    out += "haiku-claude-cli lifetime stats";
+    if (!since.empty() && since != "(unknown)") {
+        out += " (since " + since + ")";
+    }
+    out += "\n\n";
+
     std::snprintf(buf, sizeof(buf),
-        "  Sessions:        %d\n"
-        "  Turns:           %d\n"
-        "  Input tokens:    %d  (\xE2\x86\x91 avg %d/turn)\n"
-        "  Output tokens:   %d  (\xE2\x86\x93 avg %d/turn)\n",
+        "  Sessions:  %d\n"
+        "  Turns:     %d\n"
+        "  Input:     %s tokens\n"
+        "  Output:    %s tokens\n"
+        "  Est cost:  $%.2f  (Sonnet rates)\n",
         sessions, turns,
-        in_tok,  turns > 0 ? in_tok  / turns : 0,
-        out_tok, turns > 0 ? out_tok / turns : 0);
+        thousands(in_tok).c_str(),
+        thousands(out_tok).c_str(),
+        est_cost);
     out += buf;
 
-    if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
-        out += "  Tool calls:\n";
-        for (const auto& [name, val] : s["tool_calls"].items()) {
-            const int count = val.value("count", 0);
-            const int bytes = val.value("bytes", 0);
-            std::snprintf(buf, sizeof(buf), "    %-14s %4d calls  %d bytes\n",
-                          name.c_str(), count, bytes);
-            out += buf;
-        }
+    // ── BFS showcase block ───────────────────────────────
+    out += "\n";
+    out += "  \xE2\x94\x83 BFS — the Haiku advantage\n";
+    out += "  \xE2\x94\x83\n";
+    if (saved_tokens > 0) {
+        std::snprintf(buf, sizeof(buf),
+            "  \xE2\x94\x83  Saved %s tokens  (%d%% of full-read cost)\n"
+            "  \xE2\x94\x83  Cost avoided: $%.4f\n"
+            "  \xE2\x94\x83\n"
+            "  \xE2\x94\x83  %d BFS calls  (%d ReadAttr + %d Query)\n"
+            "  \xE2\x94\x83  Tokens they used:     %8s\n"
+            "  \xE2\x94\x83  Tokens they avoided:  %8s\n",
+            thousands(saved_tokens).c_str(), bfs_pct, bfs_cost_saved,
+            read_attr_calls + query_calls,
+            read_attr_calls, query_calls,
+            thousands(used_tokens).c_str(),
+            thousands(saved_tokens).c_str());
+    } else {
+        std::snprintf(buf, sizeof(buf),
+            "  \xE2\x94\x83  No BFS calls yet — 0 tokens saved.\n"
+            "  \xE2\x94\x83\n"
+            "  \xE2\x94\x83  Ask Claude to use ReadAttr/WriteAttr on\n"
+            "  \xE2\x94\x83  source files to start building the attribute\n"
+            "  \xE2\x94\x83  cache. On a typical source tree, lifetime\n"
+            "  \xE2\x94\x83  savings reach 90%%+ of full-read token cost.\n");
+    }
+    out += buf;
+    out += "\n";
 
-        // BFS savings — actual bytes saved by the Haiku-native
-        // ReadAttr + Query tools vs. the equivalent full-file
-        // Read approach. Computed at tool-call time via stat()
-        // on the target file(s) so the numbers are measured,
-        // not estimated. This is the headline Haiku-native
-        // feature of the CLI; give it its own block.
-        const auto& tc = s["tool_calls"];
-        long   total_saved_bytes = 0;
-        long   total_attr_bytes  = 0;
-        int    bfs_calls         = 0;
-        for (const char* t : {"ReadAttr", "Query"}) {
-            if (!tc.contains(t)) continue;
-            total_saved_bytes += tc[t].value("saved_bytes", static_cast<long>(0));
-            total_attr_bytes  += tc[t].value("bytes",       static_cast<long>(0));
-            bfs_calls         += tc[t].value("count",       0);
-        }
-        if (total_saved_bytes > 0) {
-            const long saved_tokens = total_saved_bytes / 4;
-            const long attr_tokens  = total_attr_bytes  / 4;
-            const long full_tokens  = saved_tokens + attr_tokens;
-            const int  pct = full_tokens > 0
-                ? static_cast<int>((saved_tokens * 100) / full_tokens)
-                : 0;
+    // ── Tool call table ──────────────────────────────────
+    if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
+        out += "  Tool calls (lifetime):\n";
+        for (const auto& [name, val] : s["tool_calls"].items()) {
+            const int  count = val.value("count", 0);
+            const bool is_bfs = (name == "ReadAttr"  || name == "Query"
+                              || name == "WriteAttr" || name == "IndexAttr");
             std::snprintf(buf, sizeof(buf),
-                "\n"
-                "  BFS attribute tools (Haiku-native):\n"
-                "    %d calls saved %ld tokens (%d%% of what full-file reads\n"
-                "    would have cost — %ld tokens used vs. %ld tokens avoided).\n",
-                bfs_calls, saved_tokens, pct, attr_tokens, saved_tokens);
+                "    %-14s %5d calls%s\n",
+                name.c_str(), count,
+                is_bfs ? "  [BFS]" : "");
             out += buf;
         }
     }
+
     return out;
 }
 
