@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Claude CLI icon — Variant G: "Scroll with ink brush"
+
+  Haiku-poetry metaphor rendered as a Haiku-icon-vocabulary
+  object. A piece of warm parchment lies tilted on an
+  isometric plane; a bamboo-handled calligraphy brush rests
+  diagonally across the lower half. Three dark ink strokes
+  sit on the upper half in a 5-7-5 pattern — the haiku,
+  freshly brushed.
+
+  Keyword coverage:
+    Haiku    → literal haiku poem + ink brush.
+    Claude   → the brush is the tool that "wrote" the
+               reply sitting on the paper.
+    AI       → softer fit here; the writing is produced
+               "somehow" without a hand in frame.
+    Terminal → softer fit; this is the traditional end
+               of the metaphor, not the CLI end.
+    Future   → the least "future" of the three — this
+               variant trades futurism for cultural depth.
+
+  Haiku Icon Design Rules:
+    - Tilted isometric plane, 1 px silhouette outline.
+    - Saturated mixtures: parchment is cream + tan + rose,
+      never pure white. Brush handle is a yellow + brown
+      bamboo mix.
+    - Top-left light: parchment lighter at top; brush
+      handle highlighted along its top edge.
+    - Rightward drop shadow under the whole composition.
+
+  Icon-O-Matic tips:
+    - Render the parchment top face as a linear gradient
+      (lighter top-left → warmer bottom-right).
+    - Flag the brush ferrule detail + bristle taper with
+      Min LOD so small sizes keep the clean scroll+brush
+      silhouette without the micro-detail.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+
+  <ellipse cx="36" cy="58" rx="24" ry="3" fill="#2A1808" opacity="0.42"/>
+
+  <!-- Parchment — tilted isometric quad. Right-edge and
+       bottom-edge thickness gives it paper weight. -->
+  <!-- Right-edge thickness. -->
+  <polygon points="54,14 56,16 56,50 54,48"
+           fill="#9E8756" stroke="#000" stroke-width="0.9"
+           stroke-linejoin="round"/>
+  <!-- Bottom-edge thickness. -->
+  <polygon points="6,58 54,50 56,50 8,60"
+           fill="#B8A57A" stroke="#000" stroke-width="0.9"
+           stroke-linejoin="round"/>
+  <!-- Main parchment face. -->
+  <polygon points="6,18 54,12 54,48 6,54"
+           fill="#E8D5A8" stroke="#000" stroke-width="1.4"
+           stroke-linejoin="round"/>
+
+  <!-- Top-left warm highlight on the parchment. -->
+  <polygon points="6,18 34,14 34,24 6,28"
+           fill="#F2E2BD" opacity="0.6"/>
+
+  <!-- Subtle bottom-right warmth (aging/rose tone). -->
+  <polygon points="30,36 54,32 54,48 30,52"
+           fill="#D8BF88" opacity="0.38"/>
+
+  <!-- Three ink strokes on the parchment, 5-7-5 widths,
+       dark sumi-brown so they read as brushed ink on
+       cream. Slightly tilted to follow the parchment's
+       isometric angle (top edge slopes up-right). -->
+  <g fill="#231A12" stroke="#000" stroke-width="0.3"
+     stroke-linejoin="round"
+     transform="rotate(-7 30 26)">
+    <rect x="18" y="20"  width="18" height="2.4" rx="1.2"/>
+    <rect x="14" y="25.5" width="26" height="2.4" rx="1.2"/>
+    <rect x="18" y="31"  width="18" height="2.4" rx="1.2"/>
+  </g>
+
+  <!-- Ink brush — bamboo handle diagonal across the lower
+       half of the parchment, tip pointing lower-left.
+       Drawn as a rotated group so the component parts
+       line up along the handle axis. -->
+  <g transform="translate(30 46) rotate(-28)">
+    <!-- Drop shadow hint under the brush -->
+    <rect x="-22" y="1.4" width="44" height="1.2" rx="0.6"
+          fill="#6E5A34" opacity="0.35"/>
+    <!-- Bamboo handle (warm yellow-brown). -->
+    <rect x="-6" y="-1.4" width="28" height="2.8" rx="1.3"
+          fill="#B58B4A" stroke="#000" stroke-width="0.5"
+          stroke-linejoin="round"/>
+    <!-- Handle top-edge highlight. -->
+    <rect x="-5" y="-1.2" width="26" height="0.8" rx="0.4"
+          fill="#DAB476" opacity="0.8"/>
+    <!-- Metal ferrule binding handle to bristles. -->
+    <rect x="-10" y="-2" width="4.5" height="4" rx="0.6"
+          fill="#8E6F3A" stroke="#000" stroke-width="0.5"/>
+    <!-- Ferrule highlight. -->
+    <rect x="-9.5" y="-1.8" width="3.5" height="0.8" rx="0.3"
+          fill="#C9A873"/>
+    <!-- Black sumi-ink bristle taper (polygon for the point). -->
+    <polygon points="-10,-1.6 -10,1.6 -22,0.6 -22,-0.6"
+             fill="#1A1008" stroke="#000" stroke-width="0.4"
+             stroke-linejoin="round"/>
+  </g>
+</svg>

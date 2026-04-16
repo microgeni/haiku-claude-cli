@@ -1,6 +1,9 @@
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <thread>
 #include <unistd.h>
@@ -475,6 +479,8 @@ struct Config {
     bool        show_usage              = false;
     bool        logging_enabled         = false;
     bool        allow_destructive_tools = false;
+    bool        notify_enabled          = true;
+    double      notify_min_duration_sec = 60.0;
     json        prices;
     json        hooks;
     json        mcp_servers;
@@ -502,6 +508,10 @@ Config load_config() {
             cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
         if (j.contains("logging") && j["logging"].is_object()) {
             cfg.logging_enabled = j["logging"].value("enabled", false);
+        }
+        if (j.contains("notify") && j["notify"].is_object()) {
+            cfg.notify_enabled          = j["notify"].value("enabled", true);
+            cfg.notify_min_duration_sec = j["notify"].value("min_duration_seconds", 60.0);
         }
     } catch (const json::exception& e) {
         std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
@@ -696,6 +706,11 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "  -y, --yes            Auto-approve destructive tools (Bash/Write/Edit)\n"
               << "                       for this run. Needed for one-shot invocations\n"
               << "                       without a TTY to answer the y/a/n prompt.\n"
+              << "  -a, --attach PATH    Attach a file path to this session. Repeatable.\n"
+              << "                       Announced to Claude on the next user turn so\n"
+              << "                       tools like Read can pull them in. In interactive\n"
+              << "                       mode you can also drag files from Tracker onto\n"
+              << "                       the Terminal window — the REPL auto-detects paths.\n"
               << "      --plain          Disable ANSI color output.\n"
               << "      --color          Force ANSI color output, even when piped.\n"
               << "  -V, --version        Print version and exit.\n"
@@ -1297,16 +1312,132 @@ void print_usage_line(const SendResult& result) {
 enum class SlashAction { Continue, Quit, Passthrough };
 
 struct LoopCtx {
-    const Auth&        auth;
-    int                max_tokens;
-    const std::string& custom_system;
-    const json&        prices;
-    std::string&       model;
-    int&               turn_count;
-    int&               session_input;
-    int&               session_output;
-    json&              messages;
+    const Auth&               auth;
+    int                       max_tokens;
+    const std::string&        custom_system;
+    const json&               prices;
+    std::string&              model;
+    int&                      turn_count;
+    int&                      session_input;
+    int&                      session_output;
+    json&                     messages;
+    std::vector<std::string>& session_urls;
+    bool&                     notify_enabled;
+    double&                   notify_min_duration;
 };
+
+// Pull http:// and https:// URLs out of a block of assistant text.
+// Handles markdown `[label](url)`, angle-bracketed `<url>`, and
+// trailing sentence punctuation (period, comma, etc.). Not a full
+// RFC 3986 parser — the goal is "grab something openable that a
+// user would recognize as a link," not bulletproof validation.
+static std::vector<std::string> extract_urls(const std::string& text) {
+    std::vector<std::string> out;
+    const char* schemes[] = { "http://", "https://" };
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t best = std::string::npos;
+        for (const char* s : schemes) {
+            const auto p = text.find(s, pos);
+            if (p < best) best = p;
+        }
+        if (best == std::string::npos) break;
+        size_t end = best;
+        while (end < text.size()) {
+            const char c = text[end];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                c == '<' || c == '>' || c == '"' || c == '\'' ||
+                c == '(' || c == ')' || c == '[' || c == ']' ||
+                c == '{' || c == '}' || c == '|' || c == '`') break;
+            ++end;
+        }
+        std::string url = text.substr(best, end - best);
+        while (!url.empty()) {
+            const char c = url.back();
+            if (c == '.' || c == ',' || c == ';' || c == ':' ||
+                c == '!' || c == '?') url.pop_back();
+            else break;
+        }
+        if (url.size() > 10) out.push_back(std::move(url));
+        pos = end;
+    }
+    return out;
+}
+
+// Compact a response into something a notification body can show:
+// the first sentence (or line), whitespace-collapsed, capped at
+// max_chars with an ellipsis. Defensive about empty text so a
+// turn that somehow produced no content still notifies without a
+// weird empty body.
+static std::string first_sentence_for_notify(const std::string& text,
+                                             size_t max_chars) {
+    std::string body;
+    body.reserve(text.size());
+    bool prev_space = true;
+    for (char c : text) {
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (c == ' ' && prev_space) continue;
+        body += c;
+        prev_space = (c == ' ');
+    }
+    while (!body.empty() && body.back() == ' ') body.pop_back();
+
+    const auto punct = body.find_first_of(".!?\n");
+    if (punct != std::string::npos && punct + 1 <= max_chars) {
+        body.resize(punct + 1);
+    }
+    if (body.size() > max_chars) {
+        body.resize(max_chars);
+        body += "\xE2\x80\xA6"; // UTF-8 ellipsis
+    }
+    if (body.empty()) body = "(empty response)";
+    return body;
+}
+
+// Fire a desktop notification via Haiku's `notify` CLI. Runs as a
+// short-lived child (notify-server is BMessage-based, so the CLI
+// itself returns in milliseconds once the message is dispatched).
+// No-op on non-Haiku builds so macOS dev under nix stays silent.
+static void send_desktop_notification(const std::string& title,
+                                      const std::string& body) {
+#ifdef __HAIKU__
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid == 0) {
+        const char* argv[] = {
+            "notify",
+            "--type",    "information",
+            "--group",   "Claude CLI",
+            "--title",   title.c_str(),
+            "--timeout", "8",
+            "--",        body.c_str(),
+            nullptr
+        };
+        execvp("notify", const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+#else
+    (void)title;
+    (void)body;
+#endif
+}
+
+// Safely wrap a string in single quotes for a shell command. Any
+// embedded `'` is split out as `'\''`. Used by /open so a URL with
+// a `?q=foo'bar` query string can't break the command line.
+static std::string shell_single_quote(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out += '\'';
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else           out += c;
+    }
+    out += '\'';
+    return out;
+}
 
 struct PriceEntry {
     double input;
@@ -1347,6 +1478,8 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
             "  /stats             lifetime token usage and tool stats\n"
+            "  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
+            "  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
             "  /remote-control    toggle Telegram remote poller on/off\n"
             "  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
                   << "\n";
@@ -1384,6 +1517,83 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             std::cout << tui::meta("[editor exited " + std::to_string(rc) + "]") << "\n";
         } else {
             std::cout << tui::meta("[memory will be reloaded on the next turn]") << "\n";
+        }
+        return SlashAction::Continue;
+    }
+    if (cmd == "/notify") {
+        auto state_line = [&]() {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                "[notify: %s, threshold %.0fs]",
+                ctx.notify_enabled ? "on" : "off",
+                ctx.notify_min_duration);
+            return std::string(buf);
+        };
+        if (args.empty()) {
+            std::cout << tui::meta(state_line()) << "\n";
+            std::cout << tui::dim("  /notify on | off | <seconds>") << "\n";
+            return SlashAction::Continue;
+        }
+        if (args == "on")  { ctx.notify_enabled = true;  std::cout << tui::meta(state_line()) << "\n"; return SlashAction::Continue; }
+        if (args == "off") { ctx.notify_enabled = false; std::cout << tui::meta(state_line()) << "\n"; return SlashAction::Continue; }
+
+        // Numeric → new threshold. Accepts int or float seconds.
+        // Negative or zero values disable without changing enabled.
+        char* end = nullptr;
+        const double v = std::strtod(args.c_str(), &end);
+        if (end == args.c_str() || *end != '\0') {
+            std::cout << tui::meta("[/notify: expected 'on', 'off', or a number of seconds]") << "\n";
+            return SlashAction::Continue;
+        }
+        if (v < 0.0) {
+            std::cout << tui::meta("[/notify: threshold must be >= 0]") << "\n";
+            return SlashAction::Continue;
+        }
+        ctx.notify_min_duration = v;
+        std::cout << tui::meta(state_line()) << "\n";
+        return SlashAction::Continue;
+    }
+    if (cmd == "/open") {
+        std::string target;
+        if (args.empty()) {
+            if (ctx.session_urls.empty()) {
+                std::cout << tui::meta("[no URLs seen in this session yet]") << "\n";
+                return SlashAction::Continue;
+            }
+            for (size_t i = 0; i < ctx.session_urls.size(); ++i) {
+                char idx[16];
+                std::snprintf(idx, sizeof(idx), "  %zu. ", i + 1);
+                std::cout << tui::meta(std::string(idx) + ctx.session_urls[i]) << "\n";
+            }
+            std::cout << tui::dim("  /open N to launch, or /open <url>") << "\n";
+            return SlashAction::Continue;
+        }
+
+        bool is_num = !args.empty();
+        for (char c : args) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) { is_num = false; break; }
+        }
+        if (is_num) {
+            const size_t idx = static_cast<size_t>(std::atoi(args.c_str()));
+            if (idx == 0 || idx > ctx.session_urls.size()) {
+                std::cout << tui::meta("[no URL #" + args + " — /open with no args to list]") << "\n";
+                return SlashAction::Continue;
+            }
+            target = ctx.session_urls[idx - 1];
+        } else {
+            target = args;
+        }
+
+        // Fire-and-forget via `open` (Haiku's native URL launcher,
+        // also present on macOS for the dev workflow). Background
+        // the child so the REPL keeps its status frame; redirect
+        // stdout/stderr so the launcher can't stomp on our TUI.
+        const std::string cmdline =
+            "open " + shell_single_quote(target) + " >/dev/null 2>&1 &";
+        std::cout << tui::meta("[opening " + target + "]") << "\n";
+        const int rc = std::system(cmdline.c_str());
+        if (rc != 0) {
+            std::cout << tui::meta("[open exited " + std::to_string(rc) + "]") << "\n";
         }
         return SlashAction::Continue;
     }
@@ -1831,10 +2041,95 @@ private:
     std::thread                  poller_;
 };
 
+// Break a libedit line into shell-style tokens so a drop of one
+// or more paths from Tracker is correctly split. Single and double
+// quotes preserve internal spaces; a literal `\` escapes the next
+// char. Stops short of full shell expansion — no $VAR, no ~/, no
+// globbing. Tracker drops arrive as absolute POSIX paths so the
+// simple cases cover the real workflow.
+static std::vector<std::string> shell_tokenize(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    char quote = 0;
+    bool in_tok = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (quote) {
+            if (c == quote) { quote = 0; }
+            else            { cur += c; }
+            in_tok = true;
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; in_tok = true; continue; }
+        if (c == '\\' && i + 1 < s.size()) {
+            cur += s[++i];
+            in_tok = true;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            if (in_tok) { out.push_back(std::move(cur)); cur.clear(); in_tok = false; }
+            continue;
+        }
+        cur += c;
+        in_tok = true;
+    }
+    if (in_tok) out.push_back(std::move(cur));
+    return out;
+}
+
+// True if the line is a drop from Tracker: one or more tokens,
+// every one an absolute path that stat-resolves. Bare filenames
+// without a leading slash are NOT treated as drops so a user can
+// still type "main.cpp" as a literal question without the REPL
+// swallowing it.
+static bool line_is_path_drop(const std::string& line,
+                              std::vector<std::string>& out_abs_paths) {
+    auto tokens = shell_tokenize(line);
+    if (tokens.empty()) return false;
+    std::vector<std::string> resolved;
+    resolved.reserve(tokens.size());
+    for (const auto& t : tokens) {
+        if (t.empty() || t.front() != '/') return false;
+        struct stat st;
+        if (stat(t.c_str(), &st) != 0) return false;
+        char abs[PATH_MAX];
+        const char* use = realpath(t.c_str(), abs) ? abs : t.c_str();
+        resolved.emplace_back(use);
+    }
+    out_abs_paths = std::move(resolved);
+    return true;
+}
+
+// Compose the "Files attached:" preamble block the same way the
+// one-shot path does, so drops and --attach produce the same shape
+// of content for Claude to reason about.
+static std::string compose_attachment_preamble(const std::vector<std::string>& paths) {
+    if (paths.empty()) return {};
+    std::string s = "Files attached to this session:\n";
+    for (const auto& p : paths) { s += "- "; s += p; s += '\n'; }
+    s += '\n';
+    return s;
+}
+
+// Dim `[attached: a, b, +N more]` line shown after a successful
+// --attach or drop. Keeps the list short on narrow terminals.
+static std::string format_attached_line(const std::vector<std::string>& paths) {
+    std::string shown;
+    for (size_t i = 0; i < paths.size() && i < 3; ++i) {
+        if (i > 0) shown += ", ";
+        shown += paths[i];
+    }
+    if (paths.size() > 3) {
+        shown += ", +" + std::to_string(paths.size() - 3) + " more";
+    }
+    return "[attached: " + shown + "]";
+}
+
 int interactive_loop(const Auth& initial_auth, const Config& cfg,
                      const std::string& initial_model, int max_tokens,
                      const std::string& custom_system, const json& prices, bool resume,
-                     const std::string& initial_message) {
+                     const std::string& initial_message,
+                     std::vector<std::string> initial_attachments) {
     InterruptGuard interrupt_guard;
     json messages = json::array();
     std::string model = initial_model;
@@ -1844,7 +2139,8 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
-        "/todos", "/memory", "/stats", "/remote-control", "/exit", "/quit",
+        "/todos", "/memory", "/stats", "/open", "/notify",
+        "/remote-control", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
@@ -1861,6 +2157,12 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     int turn_count         = 0;
     int session_input      = 0;
     int session_output     = 0;
+
+    // Notification state — start from config, toggleable at runtime
+    // via `/notify on|off|<seconds>`. Local copies so the user can
+    // experiment without rewriting config.json.
+    bool   notify_enabled       = cfg.notify_enabled;
+    double notify_min_duration  = cfg.notify_min_duration_sec;
 
     if (resume) {
         if (auto loaded = load_history(); loaded && loaded->is_array()) {
@@ -1912,6 +2214,17 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
 
     std::string pending = initial_message;
 
+    // Paths announced to Claude on the next outgoing user turn.
+    // Starts with any --attach values and grows each time the user
+    // drops a file from Tracker onto the Terminal window. Drained
+    // exactly once per turn, then refills from subsequent drops.
+    std::vector<std::string> pending_paths = std::move(initial_attachments);
+
+    // URLs seen in assistant replies so far this session. Populated
+    // after each turn by extract_urls; consumed by `/open` for
+    // numbered launches.
+    std::vector<std::string> session_urls;
+
     while (true) {
         // Resize events rebuild the scroll region and redraw the
         // fixed rows so the frame stays correct after the user
@@ -1950,6 +2263,24 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
             line.pop_back();
         }
         if (line.empty()) continue;
+
+        // Drag-and-drop from Tracker: Haiku's Terminal inserts the
+        // dropped file's POSIX path into the active input line (quoted
+        // if it contains spaces). If libedit hands back a line that's
+        // purely one-or-more absolute paths that all exist on disk,
+        // treat it as an attachment event rather than a prompt: stash
+        // the paths, acknowledge with a dim meta line, and wait for
+        // the user's actual question. The leading-slash requirement
+        // avoids swallowing bare filenames like "main.cpp" that a user
+        // might type as a literal question.
+        {
+            std::vector<std::string> dropped;
+            if (line_is_path_drop(line, dropped)) {
+                for (auto& p : dropped) pending_paths.push_back(std::move(p));
+                std::cout << tui::meta(format_attached_line(pending_paths)) << "\n";
+                continue;
+            }
+        }
 
         bool already_recorded = false;
         if (!line.empty() && line.front() == '/') {
@@ -2033,7 +2364,8 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
             }
 
             LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
-                        turn_count, session_input, session_output, messages};
+                        turn_count, session_input, session_output, messages,
+                        session_urls, notify_enabled, notify_min_duration};
             std::string expanded;
             const SlashAction action = dispatch_slash(line, ctx, expanded);
             repl::record(line);
@@ -2054,8 +2386,17 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
             continue;
         }
 
+        // Prepend the accumulated attachment preamble (from --attach
+        // at launch or any drops during the session) silently to the
+        // outgoing API content. The replay and hooks payload keep
+        // only the user's actual typed text.
+        std::string api_content = line;
+        if (!pending_paths.empty()) {
+            api_content = compose_attachment_preamble(pending_paths) + api_content;
+            pending_paths.clear();
+        }
         const json snapshot = messages;
-        messages.push_back({{"role", "user"}, {"content", line}});
+        messages.push_back({{"role", "user"}, {"content", api_content}});
 
         std::cout << "\n" << tui::claude_prompt();
         const auto turn_start = std::chrono::steady_clock::now();
@@ -2094,6 +2435,30 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         session_input  += result.input_tokens;
         session_output += result.output_tokens;
         stats_record_turn(result.input_tokens, result.output_tokens);
+
+        // Harvest any URLs Claude mentioned so `/open N` can launch
+        // them later. Dedup in insertion order so the index stays
+        // stable across turns.
+        for (auto& url : extract_urls(result.assistant_text)) {
+            if (std::find(session_urls.begin(), session_urls.end(), url)
+                == session_urls.end()) {
+                session_urls.push_back(std::move(url));
+            }
+        }
+
+        // Desktop notification for slow turns. The threshold default
+        // (60 s) targets the "I walked away from the laptop" case —
+        // fast replies on a user sitting at the keyboard don't buzz.
+        // Body is the first sentence of the reply so the user can
+        // glance at the notification and know whether to come back.
+        if (notify_enabled && elapsed >= notify_min_duration) {
+            char title[96];
+            std::snprintf(title, sizeof(title),
+                "Claude response ready (%.0fs)", elapsed);
+            send_desktop_notification(
+                title,
+                first_sentence_for_notify(result.assistant_text, 120));
+        }
 
         char status[192];
         std::snprintf(status, sizeof(status),
@@ -2233,6 +2598,20 @@ int run_telegram_bridge(const Config& cfg) {
     int         turn_count    = 0;
     int         session_input = 0;
     int         session_output= 0;
+
+    // Local-side /open needs a URL list too. The bridge doesn't
+    // populate it from Telegram-bound replies (a phone user hitting
+    // /open would launch a browser on the dev machine, which is
+    // pointless), but the operator at the laptop can still use
+    // /open on URLs they type or paste into the local prompt.
+    std::vector<std::string> telegram_session_urls;
+
+    // Notification toggles are session-local in the bridge too, so
+    // `/notify on|off` from the laptop prompt lives for the bridge's
+    // lifetime. Desktop alerts only fire from the REPL path; the
+    // bridge relies on Telegram itself to notify the phone.
+    bool   telegram_notify_enabled      = cfg.notify_enabled;
+    double telegram_notify_min_duration = cfg.notify_min_duration_sec;
 
     std::mutex              process_mutex;
     std::map<int64_t, json> user_messages;
@@ -2576,7 +2955,8 @@ int run_telegram_bridge(const Config& cfg) {
     {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
-            "/todos", "/memory", "/stats", "/mute", "/unmute", "/exit", "/quit",
+            "/todos", "/memory", "/stats", "/open", "/notify",
+            "/mute", "/unmute", "/exit", "/quit",
         };
         for (const auto& c : commands::names()) all_slash.push_back("/" + c);
         repl::set_slash_commands(all_slash);
@@ -2650,7 +3030,8 @@ int run_telegram_bridge(const Config& cfg) {
             if (!messages_ref.is_array()) messages_ref = json::array();
             LoopCtx ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,
                         active_model, turn_count, session_input, session_output,
-                        messages_ref};
+                        messages_ref, telegram_session_urls,
+                        telegram_notify_enabled, telegram_notify_min_duration};
             std::string expanded;
             const SlashAction action = dispatch_slash(line, ctx, expanded);
             repl::record(line);
@@ -2742,6 +3123,7 @@ int main(int argc, char* argv[]) {
     bool                     resume        = false;
     std::string              custom_system = cfg.system;
     std::vector<std::string> parts;
+    std::vector<std::string> attachments;
 
     // Seed the destructive-tool flag from config. -y/--yes below can
     // still flip it on for ad-hoc runs; there's no reason to flip it
@@ -2773,6 +3155,14 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-y" || arg == "--yes") {
             g_allow_destructive_tools = true;
+            continue;
+        }
+        if (arg == "-a" || arg == "--attach") {
+            if (i + 1 >= argc) {
+                std::cerr << "error: " << arg << " requires a path\n";
+                return 1;
+            }
+            attachments.emplace_back(argv[++i]);
             continue;
         }
         if (arg == "--plain") {
@@ -2866,6 +3256,26 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Resolve --attach arguments to absolute paths so Claude's Read
+    // tool doesn't depend on whatever cwd the REPL inherited. Missing
+    // paths fail loudly — a shell user wants to catch a typo at the
+    // door instead of silently announcing a non-existent file.
+    std::vector<std::string> resolved_attachments;
+    if (!attachments.empty()) {
+        resolved_attachments.reserve(attachments.size());
+        for (const auto& p : attachments) {
+            struct stat st;
+            if (stat(p.c_str(), &st) != 0) {
+                std::cerr << "error: --attach path not found: " << p << "\n";
+                return 1;
+            }
+            char abs[PATH_MAX];
+            const char* use = realpath(p.c_str(), abs) ? abs : p.c_str();
+            resolved_attachments.emplace_back(use);
+        }
+        std::cout << tui::meta(format_attached_line(resolved_attachments)) << "\n";
+    }
+
     const Auth auth = resolve_auth();
     if (auth.kind == AuthKind::None) {
         std::cerr << "error: no authentication configured.\n"
@@ -2875,11 +3285,15 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, message);
+        return interactive_loop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, message, std::move(resolved_attachments));
     }
 
     InterruptGuard interrupt_guard;
-    json messages = json::array({{{"role", "user"}, {"content", message}}});
+    // One-shot: bake the attachment preamble into the single user
+    // turn. Interactive mode defers this to the first REPL turn and
+    // also accepts drops mid-session.
+    const std::string one_shot_content = compose_attachment_preamble(resolved_attachments) + message;
+    json messages = json::array({{{"role", "user"}, {"content", one_shot_content}}});
     const std::string effective_system = compose_system(custom_system);
     const auto result = send_with_tools(auth, model, max_tokens, messages, effective_system);
     if (show_usage) {

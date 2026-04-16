@@ -594,21 +594,256 @@ current task. **95–99 % token reduction per session**.
   omitted from `tools::definitions()` so Claude doesn't see
   them.
 
+### v1.3 — Tracker drag-and-drop ✓
+
+Haiku's Terminal inserts dropped file paths straight into the
+active input line. Rather than ship a separate Tracker add-on
+(the 2016-era way to integrate), the REPL itself auto-detects
+when a line is a path drop and stashes it as an attachment for
+the next outgoing turn. Zero BeAPI, zero extra binary.
+
+- [x] **`-a / --attach PATH`** — repeatable CLI flag. Resolves
+      to an absolute path via `realpath`, fails loudly if the
+      path doesn't exist. Works in one-shot, stdin-piped, and
+      interactive modes. Shell users can also type the flag
+      manually; the Tracker drop path below is the zero-friction
+      alternative in the REPL.
+- [x] **In-REPL drop detection** — after libedit returns a line,
+      the REPL tokenizes it with shell quoting (single/double
+      quotes preserved, `\\` escaping). If every token is an
+      absolute path that `stat()` resolves, the line is treated
+      as an attachment event: paths accumulate in a
+      `pending_paths` vector, a dim `[attached: …]` line
+      acknowledges, and the API turn is skipped. The
+      leading-slash requirement means a bare filename like
+      `main.cpp` still goes to Claude as a literal prompt.
+- [x] **Attachment preamble** — on the next real user turn,
+      accumulated paths are prepended to the outgoing API
+      content as a `Files attached to this session:\n- …\n\n`
+      block. The user's typed text is unchanged in the replay,
+      logs, and hook payloads — only the API sees the preamble.
+      Pending list drains exactly once per turn, then refills
+      from subsequent drops.
+- [x] **Works both directions** — `claude -a src/foo.cpp
+      "summarize"` bakes the preamble into a one-shot. `claude
+      -i` → drag `foo.cpp` from Tracker → type your question
+      produces the same content on the wire.
+
+**UX example (interactive mode)**
+
+```
+claude -i
+> <drag foo.cpp from Tracker onto Terminal>
+> '/boot/home/src/foo.cpp'
+[attached: /boot/home/src/foo.cpp]
+> what does this file do?
+claude> [Reads /boot/home/src/foo.cpp, then explains it.]
+```
+
+**Deferred**:
+- A proper Tracker right-click add-on (`.so` with
+  `process_refs`) that launches Terminal with `claude -i -a
+  <refs>` pre-wired. The drop-on-running-terminal flow covers
+  the common case; the add-on would only help when no Terminal
+  is open, which is rare on a Haiku dev machine.
+- Directory drops — currently `stat()` accepts them so they're
+  announced as attachments, but Claude has no Directory-specific
+  tool yet (Glob/Read/Grep work on patterns within). Revisit if
+  it becomes friction.
+- `application/x-vnd.Microgeni-claude-cli` signature + MIME
+  type registration. Not needed for the drop-to-terminal UX;
+  only useful if we later ship a GUI-launchable entry point.
+
+### v1.3.3 — Haiku app icon (HAL in the Terminal) ✓
+
+On Haiku, every binary can carry a `BEOS:ICON` attribute that
+Tracker, HaikuDepot, and pkgman pick up automatically. Shipped
+the canonical artwork + build plumbing in this slice; the
+Icon-O-Matic round-trip that produces the binary HVIF file is
+a local step on a Haiku install, documented below.
+
+**Canonical design — "HAL in the Terminal"** (`assets/claude-icon.svg`):
+
+The official Haiku Terminal icon (tombstone CRT monitor + tilted
+keyboard + coiled cable, MIT-licensed via
+[darealshinji/haiku-icons](https://github.com/darealshinji/haiku-icons))
+with the screen content replaced by a black panel showing the
+glowing red HAL 9000 eye, plus a small green Haiku leaf tucked
+into the top-right corner of the screen as the brand tie. The
+chassis and keyboard come from Haiku's own artwork so the icon
+sits natively alongside Tracker / StyledEdit / Terminal in a
+Dock row; HAL carries the "this is an AI" story at every size.
+
+Why this won among thirteen drafts:
+- **Haiku-native by construction** — the silhouette, lighting,
+  keyboard keys, and cable loop are drawn by Haiku's own
+  designers.
+- **HAL's red eye is the strongest "AI" signifier at 16×16** —
+  even when everything else blurs, a red dot on a monitor
+  reads as "AI inside."
+- **Character** — a tiny HAL watching from the Dock has
+  personality the cleaner-but-generic variants don't.
+
+**Trademark caveat** — HAL 9000 is Kubrick/Clarke's. Close
+enough to a generic "AI icon" in tech culture to be safe for
+personal use on the Taurus dev machine; for any future
+HaikuDepot submission swap to the trademark-clean runner-up
+(`assets/drafts/claude-icon-k-haiku-terminal.svg` — same base,
+"Ai + leaf" screen instead of HAL).
+
+**Archived drafts** (`assets/drafts/`):
+
+Twelve alternate designs preserved for history: label-on-tile
+patterns (A–E), object-based icons (F CRT, G scroll, H seer's
+orb), the Anthropic-asterisk homage (I), the hAIku pun (J),
+the trademark-clean K, and the standalone HAL (M).
+`assets/contact-sheet.html` renders them all side-by-side at
+128/64/32/16 px for comparison.
+
+**Build plumbing**:
+
+- [x] **`assets/claude-icon.svg`** — canonical source,
+      attributed to Haiku contributors + darealshinji in the
+      header comment.
+- [x] **`assets/ref/App_Terminal.svg`** — unmodified Haiku
+      Terminal reference kept next to the canonical for
+      attribution clarity and future iteration.
+- [x] **Makefile icon-stamp steps** — both the `install`
+      target and the HPKG staging block run
+      `addattr -t 'VICN' -f $(ICON_HVIF) BEOS:ICON <binary>`
+      when `assets/claude-icon.hvif` exists and `addattr` is
+      present. Silently skipped on macOS dev (no `addattr`)
+      and on first-time Haiku builds before the HVIF has been
+      produced. `ICON_HVIF` is overridable so a future design
+      swap can point at an alternate file without rewriting
+      the Makefile.
+- [x] **Contact sheet HTML** (`assets/contact-sheet.html`) —
+      browsable comparison of canonical + drafts + reference,
+      rendered at four display sizes so the 16×16 survival
+      test is explicit.
+
+**SVG → HVIF conversion (automated via `icon2icon`)**:
+
+Haiku ships a package called `hvif_tools` (from
+github.com/threedeyes/hvif-tools) that provides the
+`icon2icon` CLI — SVG/HVIF/IOM/PNG converter with full
+gradient support. No Icon-O-Matic GUI step required.
+
+```sh
+# one-time on Taurus:
+pkgman install -y hvif_tools
+
+# regenerate after any SVG edit:
+icon2icon claude-icon.svg claude-icon.hvif -f hvif
+```
+
+The committed `assets/claude-icon.hvif` is the output of
+that conversion. 3.2 KB, 38 styles, 44 paths, 43 shapes —
+a bit heavier than a hand-optimized Haiku icon but well
+within HPKG ergonomics.
+
+Optional sanity-check render:
+
+```sh
+icon2icon claude-icon.hvif claude-icon-preview.png \
+    --width 256 --height 256
+```
+
+`assets/claude-icon-preview.png` is the committed render at
+256×256 so reviewers can see the binary output without
+installing Haiku tooling.
+
+If you ever want to hand-tune (rebuild concentric circles
+as a single HVIF radial gradient, set Min LOD on
+small-detail layers, etc.), Icon-O-Matic on a Haiku install
+still works as a fallback — import the SVG, tweak, export.
+
+**Deferred**:
+- A trademark-clean design for HaikuDepot submission (the
+  drafts/K variant is pre-positioned for this).
+- Binary-embedded resource route via Haiku's `rc` compiler
+  (single-binary distribution, no post-install attribute
+  step). Doable but more moving parts; the `addattr` route
+  is plenty for now.
+
+### v1.3.2 — Desktop notifications on slow turns ✓
+
+When Claude takes long enough that the user probably walked
+away from the laptop, fire a Haiku desktop notification so they
+know to come back. Threshold-gated and runtime-toggleable so
+the alert isn't spammy for fast replies.
+
+- [x] **`notify` config sub-object** — `{ "enabled": true,
+      "min_duration_seconds": 60 }` under the top-level
+      `config.json`. Defaults favor "on": anyone who doesn't
+      want notifications can flip `enabled` to false.
+- [x] **Post-turn trigger** — at the end of each streamed
+      assistant turn in `interactive_loop`, if `elapsed >=
+      threshold` and the toggle is on, shell out to Haiku's
+      `notify` CLI with title `Claude response ready (Ns)` and
+      body = first sentence of the reply, whitespace-collapsed
+      and capped at 120 chars.
+- [x] **Fork+execvp, no shell** — avoids any quoting risk;
+      `notify-server` is BMessage-based so the CLI itself
+      returns in milliseconds (we `waitpid` it cleanly).
+- [x] **Haiku-only via `#ifdef __HAIKU__`** — macOS builds
+      under nix compile the helper as a no-op so dev iteration
+      stays silent.
+- [x] **`/notify` slash command** — no-arg prints current
+      state, `on`/`off` toggles, numeric sets threshold in
+      seconds. Session-scoped; doesn't rewrite config.json.
+      Makes testing trivial: type `/notify 2` to verify the
+      alert fires, `/notify 60` to restore production gating.
+
+**Deferred — "cool animation" stretch**:
+- `notify --type progress --messageID claude-turn-N` supports a
+  progress-bar notification that can be re-sent with the same
+  `messageID` to update in place. A follow-up could show a live
+  "Claude is thinking… (↑ 812 · 24s)" progress notification
+  during streaming, replaced by the "response ready" alert on
+  complete. Needs a spinner-adjacent thread that fires `notify`
+  every ~1 s — cheap, but wasted effort if Claude typically
+  answers under the threshold.
+- Custom icon via `--icon /path/to/icon.hvif` once the HVIF app
+  icon lands from the v1.0 Haiku-native extras list.
+- Different notification types (information / important /
+  error) based on whether the turn produced tool errors or
+  other anomalies.
+
+### v1.3.1 — `/open` URL launcher ✓
+
+Claude answers often cite docs, issues, or references by URL.
+Rather than copy-paste into a browser, let the REPL track URLs
+as they stream in and launch them with one slash command.
+
+- [x] **URL harvest on every turn** — after each assistant
+      reply streams in, the REPL scans `result.assistant_text`
+      for `http://` / `https://` tokens, strips trailing
+      sentence punctuation (`.,;:!?`), and dedups in insertion
+      order. Tolerates markdown `[label](url)` and
+      angle-bracketed `<url>` forms. Not a full RFC 3986 parser
+      — the goal is "grab something openable," not validation.
+- [x] **`/open`** (no args) lists the session's URLs, numbered.
+- [x] **`/open N`** launches the Nth URL via Haiku's `open`
+      command (same binary macOS ships, so the dev workflow
+      under nix just works). Fire-and-forget: the child is
+      backgrounded with `>/dev/null 2>&1 &` so the REPL status
+      frame isn't stomped.
+- [x] **`/open <url>`** launches an arbitrary URL; lets the user
+      paste a link without having to drop to another window.
+- [x] **Shell-safe** — URL passed through a single-quote
+      escaper (`'` → `'\''`) before being handed to `system()`,
+      so query strings with quotes can't break the command.
+- [x] Registered in `/help`, `all_slash` for tab completion,
+      and both the interactive REPL and the Telegram bridge's
+      local prompt.
+
 ## Haiku-native extras
 
 Features that don't exist in Claude Code but would make this CLI feel
 native on Haiku. Sprinkle in along the roadmap as they become natural.
 
-- Desktop notification via Haiku's `notify` when a long-running task
-  completes.
-- Tracker integration: accept a dropped file or folder as a session
-  scope by registering a `application/x-vnd.claude-cli` signature.
-- Open URLs from Claude's responses via Haiku's `open` command.
 - Respect Haiku's system accent color in REPL prompt styling.
-- HVIF application icon for the `claude` binary via `BEOS:ICON`
-  attribute. Design in Icon-O-Matic, export as `.hvif`, apply
-  via `addattr -t icon -f icon.hvif BEOS:ICON` in the Makefile
-  install target. Shows up in Tracker, HaikuDepot, and pkgman.
 
 ## Non-goals
 

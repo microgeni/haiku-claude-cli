@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Claude CLI icon — Variant J: "Haiku AI terminal"
+
+  The hAIku pun made visual. The letters A-I live inside
+  the word "Haiku," and the app *is* an AI running on
+  Haiku OS — so the icon puts those exact two letters,
+  rendered in Haiku's wordmark style, on the screen of a
+  retro CRT terminal, accompanied by the Haiku leaf
+  sprig. Reading left-to-right on the screen: A · i · 🌿.
+
+  Keyword coverage — highest of all the variants:
+    AI       → literal letters on the screen.
+    Claude   → the CLI that puts AI on Haiku.
+    Haiku    → letterforms echo the Haiku wordmark;
+               green leaf is Haiku's own brand accent.
+    Terminal → literal CRT terminal.
+    Future   → amber-on-dark CRT phosphor palette.
+
+  Trademark read: the Haiku OS "leaf" is an open-source-
+  project mark, not a corporate one — well-precedented for
+  third-party Haiku software to riff on. Much safer
+  ground than Anthropic's Claude asterisk.
+
+  Haiku Icon Design Rules applied:
+    - Isometric CRT chassis with 1 px silhouette outline.
+    - Cream/ivory chassis palette with amber screen;
+      leaf green is a mid-saturation mix (not pure green).
+    - Rightward drop shadow under the chassis.
+    - Top-left highlight on the chassis top face.
+
+  Icon-O-Matic tips:
+    - Redraw the A and i glyphs as filled HVIF vector
+      shapes; the <text> element is for SVG preview only
+      and doesn't translate to HVIF. Suggest tracing the
+      Haiku wordmark's actual A/i shapes for style fidelity.
+    - Flag the top vents, LED, and leaf stem with Min LOD
+      so 16 px shows just the CRT body + screen + letters.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+
+  <ellipse cx="34" cy="58" rx="24" ry="3" fill="#2A1808" opacity="0.4"/>
+
+  <!-- CRT chassis (same geometry as Variant F). -->
+  <polygon points="50,16 54,20 54,50 50,48"
+           fill="#9E8F7C" stroke="#000" stroke-width="1.2"
+           stroke-linejoin="round"/>
+  <polygon points="8,22 50,16 50,48 8,54"
+           fill="#C7B49C" stroke="#000" stroke-width="1.5"
+           stroke-linejoin="round"/>
+  <polygon points="4,18 46,10 54,14 54,20 50,16 8,22"
+           fill="#DFCDB4" stroke="#000" stroke-width="1.2"
+           stroke-linejoin="round"/>
+
+  <!-- Vent slits on the top face. -->
+  <g fill="#9E8F7C" stroke="none">
+    <polygon points="12,18 20,16 20,16.8 12,18.8"/>
+    <polygon points="22,16 30,14.2 30,15 22,16.8"/>
+    <polygon points="32,14.2 40,12.4 40,13.2 32,15"/>
+  </g>
+
+  <!-- Top-face highlight. -->
+  <polygon points="4,18 24,14 24,15.6 4,19.6"
+           fill="#EFE3D1" opacity="0.55"/>
+
+  <!-- Screen bezel. -->
+  <polygon points="12,25 46,19.2 46,44.5 12,50.3"
+           fill="#5C5244" stroke="#000" stroke-width="0.8"
+           stroke-linejoin="round"/>
+
+  <!-- CRT phosphor face. -->
+  <polygon points="14,26.5 44,21.5 44,42.5 14,47.5"
+           fill="#3A2812" stroke="none"/>
+
+  <!-- Amber glow wash. -->
+  <polygon points="16,28 42,23.5 42,41 16,45.5"
+           fill="#6B3A10" opacity="0.7"/>
+
+  <!-- "Ai" letters on the screen, styled to echo the
+       Haiku wordmark (bold, slightly rounded). Text
+       element for preview only — redraw as HVIF paths
+       in Icon-O-Matic. Positioned to leave space for the
+       leaf sprig on the right. -->
+  <text x="20" y="39.5"
+        font-family="Helvetica, Arial, sans-serif"
+        font-weight="900" font-size="13"
+        fill="#F8D890"
+        letter-spacing="-1">Ai</text>
+
+  <!-- Haiku leaf sprig — the brand accent. Two teardrop
+       leaves on a curved stem, tucked into the screen
+       just right of the "i" so it reads as the dot.
+       Bright Haiku green against amber sells the
+       "Haiku" identification. -->
+  <g stroke="#3F6B28" stroke-width="0.5" stroke-linejoin="round">
+    <!-- Stem -->
+    <path d="M 34 39.5 Q 35 35 36.5 32.5"
+          fill="none" stroke-linecap="round"
+          stroke-width="0.6"/>
+    <!-- Upper leaf -->
+    <path d="M 36.5 32.5 Q 38 30.5 39.5 31.5 Q 38 33 36.5 32.5 Z"
+          fill="#7FBF5F"/>
+    <!-- Lower leaf -->
+    <path d="M 35 35 Q 33 34 32.5 35.5 Q 33.8 36.5 35 35 Z"
+          fill="#6AA84F"/>
+  </g>
+
+  <!-- Power LED on chassis. -->
+  <circle cx="44" cy="46" r="1.3" fill="#4EC03A"
+          stroke="#000" stroke-width="0.3"/>
+  <circle cx="44" cy="46" r="2.4" fill="#4EC03A" opacity="0.22"/>
+</svg>

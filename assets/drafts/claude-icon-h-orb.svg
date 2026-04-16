@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Claude CLI icon — Variant H: "Seer's crystal ball"
+
+  A fortune-teller's scrying orb: a dark glass sphere
+  cradled in an ornate gold stand, with a swirling
+  violet/cyan glow inside hinting at "visions." Three
+  tiny cream sparks float inside in a 5-7-5 constellation
+  — the haiku emerging from the mist.
+
+  Keyword coverage:
+    AI       → the orb is the oracle; Claude peering into
+               the future on your behalf.
+    Claude   → the swirling inner mist carries the
+               tool's personality.
+    Haiku    → three sparks arranged 5-7-5 inside the glass.
+    Terminal → the softest tie of the five; more
+               atmosphere than device. If literal terminal
+               matters, Variant F is a better fit.
+    Future   → the most on-the-nose of the lot. The icon
+               is a machine for looking into the future.
+
+  Haiku Icon Design Rules:
+    - Ornate gold stand is a small 3D isometric object —
+      solid silhouette at 16×16.
+    - Saturated mixtures: gold is yellow + brown + a touch
+      of rose; glass body is navy + violet + black, not
+      pure blue. Inner glow pulls a warm cyan.
+    - Top-left highlight on the glass sphere is the
+      biggest tell that this is glass, not a painted ball.
+    - Drop shadow straight rightward under the stand.
+
+  Icon-O-Matic tips when converting to HVIF:
+    - Rebuild the three stacked inner-glow circles as a
+      radial gradient (violet core → dark navy edge) for
+      a cleaner "mist" effect.
+    - Flag the small sparks + ferrule rim-lights with Min
+      LOD so 16 px only renders the orb silhouette +
+      stand — the visions gracefully vanish at tiny sizes.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+
+  <ellipse cx="34" cy="59" rx="22" ry="2.5"
+           fill="#140820" opacity="0.55"/>
+
+  <!-- ORNATE GOLD STAND -->
+
+  <!-- Base disk (the widest part, lowest level). -->
+  <polygon points="18,52 44,49 50,52 24,55"
+           fill="#C4A04E" stroke="#000" stroke-width="1"
+           stroke-linejoin="round"/>
+  <!-- Base thickness/rim. -->
+  <polygon points="24,55 50,52 48,54 24,57"
+           fill="#8C6B28" stroke="#000" stroke-width="0.8"
+           stroke-linejoin="round"/>
+  <!-- Base top highlight. -->
+  <polygon points="18,52 44,49 42,50 20,53"
+           fill="#E8C878" opacity="0.75"/>
+
+  <!-- Narrow neck connecting base to cradle. -->
+  <polygon points="28,47 36,46 36,50 28,51"
+           fill="#A68430" stroke="#000" stroke-width="0.9"
+           stroke-linejoin="round"/>
+  <!-- Neck highlight. -->
+  <polygon points="28,47 36,46 35,47 29,48"
+           fill="#D6B160" opacity="0.7"/>
+
+  <!-- Cradle cup (holds the orb). A shallow bowl. -->
+  <polygon points="22,41 42,39 46,42 26,44"
+           fill="#C4A04E" stroke="#000" stroke-width="1"
+           stroke-linejoin="round"/>
+  <polygon points="26,44 46,42 44,44 26,46"
+           fill="#8C6B28" stroke="#000" stroke-width="0.8"
+           stroke-linejoin="round"/>
+  <!-- Cradle top rim highlight. -->
+  <polygon points="22,41 42,39 41,40 23,42"
+           fill="#E8C878" opacity="0.85"/>
+
+  <!-- CRYSTAL ORB -->
+
+  <!-- Orb body — dark glass. -->
+  <circle cx="32" cy="28" r="13"
+          fill="#1D2A42" stroke="#000" stroke-width="1.2"/>
+
+  <!-- Inner mist — three concentric soft fills. Rebuild
+       as a single radial gradient on Icon-O-Matic import. -->
+  <circle cx="30" cy="30" r="10"
+          fill="#3A2260" opacity="0.75"/>
+  <circle cx="30" cy="30" r="7"
+          fill="#6B3EA0" opacity="0.65"/>
+  <circle cx="30" cy="30" r="4.5"
+          fill="#9C7BD4" opacity="0.65"/>
+  <circle cx="30" cy="30" r="2.5"
+          fill="#C8E0F0" opacity="0.75"/>
+
+  <!-- Three "vision" sparks inside the orb in a 5-7-5
+       triangle — the haiku emerging from the mist. -->
+  <g fill="#FFF6D8" stroke="#F0D860" stroke-width="0.3">
+    <circle cx="26.5" cy="27"   r="0.9"/>
+    <circle cx="32"   cy="32"   r="1.1"/>
+    <circle cx="35"   cy="26.5" r="0.85"/>
+  </g>
+
+  <!-- Top-left glass highlight (the "it's a sphere" tell). -->
+  <ellipse cx="26" cy="22" rx="4.2" ry="2.3"
+           fill="#FFF8E8" opacity="0.7"/>
+  <ellipse cx="25.5" cy="21.5" rx="1.8" ry="1.1"
+           fill="#FFFFFF" opacity="0.9"/>
+
+  <!-- Bottom rim darkening — sells the glass depth. -->
+  <ellipse cx="32" cy="37.5" rx="9" ry="1.5"
+           fill="#0E1422" opacity="0.5"/>
+</svg>

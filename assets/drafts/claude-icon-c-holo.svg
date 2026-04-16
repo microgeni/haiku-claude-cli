@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Claude CLI icon — Variant C: "Holographic haiku"
+
+  Keyword fit: most "future"-forward of the three. Three
+  cream bars float above a deep-indigo isometric tile with
+  soft cyan halos underneath — as if projected holographically
+  from the tile's surface. Sci-fi vibe, minimal shape count.
+
+  Caveat: the cyan halos are the whole trick here. They're
+  rendered as stacked semi-transparent ellipses (no SVG
+  filters, since HVIF doesn't support them cleanly). In
+  Icon-O-Matic, flag the cyan layers with Min LOD so they
+  drop at 16×16 — at that size the halos muddy into the bars
+  and the effect reads worse than without them. At 32×32
+  and above, the glow is the point.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+
+  <ellipse cx="36" cy="58" rx="22" ry="3" fill="#05030A" opacity="0.55"/>
+
+  <!-- Right side face (near-black violet). -->
+  <polygon points="50,16 54,20 54,50 50,48"
+           fill="#12091E" stroke="#000" stroke-width="1.2"
+           stroke-linejoin="round"/>
+
+  <!-- Front face (deeper than Variant A — sells the "in the
+       dark, projection glowing" feel). -->
+  <polygon points="8,22 50,16 50,48 8,54"
+           fill="#1C1236" stroke="#000" stroke-width="1.5"
+           stroke-linejoin="round"/>
+
+  <!-- Top face (lighter violet). -->
+  <polygon points="4,18 46,10 54,14 54,20 50,16 8,22"
+           fill="#2B1F4A" stroke="#000" stroke-width="1.2"
+           stroke-linejoin="round"/>
+
+  <!-- Front top sheen. -->
+  <polygon points="8,22 50,16 50,30 8,32"
+           fill="#231841" opacity="0.7"/>
+
+  <!-- Top left highlight. -->
+  <polygon points="4,18 28,14 28,16 4,20"
+           fill="#392A5E" opacity="0.65"/>
+
+  <!-- Cyan halos under each bar. Two layers per bar: a wide
+       soft ellipse + a narrower brighter one, stacked to
+       fake a Gaussian glow without SVG filters. -->
+  <g>
+    <!-- Top bar halo -->
+    <ellipse cx="29" cy="28" rx="13" ry="3"
+             fill="#7BCAE0" opacity="0.18"/>
+    <ellipse cx="29" cy="28" rx="10" ry="2"
+             fill="#B3E5F0" opacity="0.28"/>
+
+    <!-- Middle bar halo (wider) -->
+    <ellipse cx="29" cy="35" rx="17" ry="3"
+             fill="#7BCAE0" opacity="0.2"/>
+    <ellipse cx="29" cy="35" rx="13" ry="2"
+             fill="#B3E5F0" opacity="0.3"/>
+
+    <!-- Bottom bar halo -->
+    <ellipse cx="29" cy="42" rx="13" ry="3"
+             fill="#7BCAE0" opacity="0.18"/>
+    <ellipse cx="29" cy="42" rx="10" ry="2"
+             fill="#B3E5F0" opacity="0.28"/>
+  </g>
+
+  <!-- Three cream bars, centered, 5-7-5 widths. No black
+       outline on the bars so they read as floating light
+       rather than solid objects. -->
+  <g fill="#F3DEC2">
+    <rect x="22" y="26.5" width="14" height="3"   rx="1.5"/>
+    <rect x="18" y="33.5" width="22" height="3"   rx="1.5"/>
+    <rect x="22" y="40.5" width="14" height="3"   rx="1.5"/>
+  </g>
+
+  <!-- Top-edge brightness on each bar — sells the "lit
+       from within" projection look. -->
+  <g fill="#FFF8E8" opacity="0.75">
+    <rect x="23" y="26.7" width="12" height="0.9" rx="0.45"/>
+    <rect x="19" y="33.7" width="20" height="0.9" rx="0.45"/>
+    <rect x="23" y="40.7" width="12" height="0.9" rx="0.45"/>
+  </g>
+</svg>
