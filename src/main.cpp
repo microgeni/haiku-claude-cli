@@ -2038,15 +2038,32 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         json request_messages = ctx.messages;
         request_messages.push_back({
             {"role",    "user"},
-            {"content", "Summarize the preceding conversation in 2-3 short paragraphs, "
-                        "preserving important context, decisions, code, and open "
-                        "questions. Reply with only the summary."},
+            {"content",
+                "Two tasks, in order:\n"
+                "\n"
+                "1. For each source file you've gained real understanding "
+                "of during this conversation, call WriteAttr to persist a "
+                "concise one-line claude:summary capturing what the file "
+                "is for. Only write for files you could confidently "
+                "describe — skip files only mentioned in passing. "
+                "WriteAttr is auto-approved and restricted to the "
+                "claude:* namespace, so these writes are cheap and safe. "
+                "This lets future sessions start with accurate summaries "
+                "instead of the mechanical auto-seed placeholders.\n"
+                "\n"
+                "2. Then summarize the preceding conversation in 2-3 "
+                "short paragraphs, preserving important context, "
+                "decisions, code, and open questions. Reply with only "
+                "the summary after the WriteAttr calls."},
         });
         std::cout << "\n" << tui::claude_prompt();
         const std::string compact_system = compose_system(ctx.custom_system);
-        const auto result = send_conversation(ctx.auth, ctx.model, ctx.max_tokens,
-                                              request_messages, compact_system,
-                                              /*include_tools=*/false);
+        // send_with_tools (not send_conversation) so the WriteAttr
+        // calls inside step 1 actually fire. The tool-use loop
+        // terminates when Claude emits the final summary text block.
+        const auto result = send_with_tools(
+            ctx.auth, ctx.model, ctx.max_tokens,
+            request_messages, compact_system);
         std::cout << "\n";
         if (result.exit_code != 0) {
             std::cout << tui::meta("[compact failed]") << "\n";
