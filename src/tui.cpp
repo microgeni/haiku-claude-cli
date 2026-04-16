@@ -295,7 +295,7 @@ std::string blue(const std::string& s)    { return wrap("\x1b[34m", s); }
 std::string magenta(const std::string& s) { return wrap("\x1b[35m", s); }
 std::string cyan(const std::string& s)    { return wrap("\x1b[36m", s); }
 std::string gray(const std::string& s)    { return wrap("\x1b[90m", s); }
-std::string muted(const std::string& s)   { return wrap("\x1b[2;90m", s); }
+std::string muted(const std::string& s)   { return wrap("\x1b[38;5;244m", s); }
 
 std::string user_prompt() {
     return wrap("\x1b[1;36m", "> ");
