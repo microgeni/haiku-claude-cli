@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-16
+
 ### Added
 - **BFS attribute tools** (Haiku only, `#ifdef __HAIKU__`):
   - `Query` — execute BFS filesystem queries via the `query`
