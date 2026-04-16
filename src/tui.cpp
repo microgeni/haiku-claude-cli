@@ -310,7 +310,10 @@ std::string continuation_prompt() {
 }
 
 std::string meta(const std::string& s) {
-    return wrap("\x1b[2m", s);
+    // Same 256-color gray-244 as muted() so every piece of
+    // secondary chrome (tool lines, turn counters, [resumed N],
+    // permission-prompt labels) reads as one consistent shade.
+    return wrap("\x1b[38;5;244m", s);
 }
 
 std::string error_label() {
