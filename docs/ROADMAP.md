@@ -376,6 +376,10 @@ native on Haiku. Sprinkle in along the roadmap as they become natural.
   scope by registering a `application/x-vnd.claude-cli` signature.
 - Open URLs from Claude's responses via Haiku's `open` command.
 - Respect Haiku's system accent color in REPL prompt styling.
+- HVIF application icon for the `claude` binary via `BEOS:ICON`
+  attribute. Design in Icon-O-Matic, export as `.hvif`, apply
+  via `addattr -t icon -f icon.hvif BEOS:ICON` in the Makefile
+  install target. Shows up in Tracker, HaikuDepot, and pkgman.
 
 ## Non-goals
 
