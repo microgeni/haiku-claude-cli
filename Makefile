@@ -1,9 +1,28 @@
 CXX      ?= c++
 CXXSTD   ?= -std=c++17
 WARN     ?= -Wall -Wextra -Wpedantic
-OPT      ?= -O2
-CXXFLAGS ?= $(CXXSTD) $(WARN) $(OPT)
-LDFLAGS  ?=
+
+# Build mode. `make` is a fast unoptimized-ish dev build; `make release` is
+# a separate target below that reinvokes make with MODE=release. Each mode
+# gets its own BUILDDIR so switching between them doesn't force a rebuild.
+MODE     ?= dev
+
+ifeq ($(MODE),release)
+    OPT       ?= -O3 -DNDEBUG
+    LTO_FLAGS ?= -flto
+    # -Wl,-s strips symbols at link time. Skipped when --no-strip is useful
+    # for profiling; set STRIP= to disable.
+    STRIP     ?= -Wl,-s
+    BUILDDIR  := build-release
+else
+    OPT       ?= -O2
+    LTO_FLAGS :=
+    STRIP     :=
+    BUILDDIR  := build
+endif
+
+CXXFLAGS ?= $(CXXSTD) $(WARN) $(OPT) $(LTO_FLAGS)
+LDFLAGS  ?= $(LTO_FLAGS) $(STRIP)
 
 PKG_CONFIG ?= pkg-config
 CURL_CFLAGS    := $(shell $(PKG_CONFIG) --cflags libcurl     2>/dev/null)
@@ -18,7 +37,6 @@ CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) $(LIBEDIT_CFLAGS) -p
 LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread
 
 SRCDIR   := src
-BUILDDIR := build
 BIN      := $(BUILDDIR)/claude
 
 SRCS := $(wildcard $(SRCDIR)/*.cpp)
@@ -45,9 +63,14 @@ PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all clean install package
+.PHONY: all clean install package release
 
 all: $(BIN)
+
+# Optimized build in a separate directory so it doesn't invalidate
+# incremental dev builds. Reinvokes make with MODE=release.
+release:
+	@$(MAKE) --no-print-directory MODE=release all
 
 $(BIN): $(OBJS) | $(BUILDDIR)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
@@ -67,7 +90,7 @@ $(BUILDDIR):
 	mkdir -p $@
 
 clean:
-	rm -rf $(BUILDDIR)
+	rm -rf build build-release
 
 install: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)

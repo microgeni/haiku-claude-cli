@@ -34,5 +34,6 @@
 
 # Project-specific
 build/
+build-release/
 .claude/
 

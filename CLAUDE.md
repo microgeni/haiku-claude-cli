@@ -43,7 +43,8 @@ nix develop -c make clean
 # ── On Taurus (Haiku) ──
 ssh user@taurus.microgeni.synology.me
 cd /Data/Code/Projects/haiku-claude-cli
-make                     # Build (gcc)
+make                     # Dev build → build/claude        (-O2, fast compile)
+make release             # Optimized → build-release/claude (-O3 -flto -s, ~27% smaller)
 make test                # Run tests
 
 
