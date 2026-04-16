@@ -652,6 +652,12 @@ struct Config {
     bool        allow_destructive_tools = false;
     bool        notify_enabled          = true;
     double      notify_min_duration_sec = 60.0;
+    // Auto-compact fires `/compact` when a turn's input token
+    // count crosses `compact_auto_threshold` * context_window.
+    // 0.0 disables. context_window=0 auto-detects from the
+    // model name (1M for "[1m]" variants, 200k otherwise).
+    double      compact_auto_threshold  = 0.8;
+    int         compact_context_window  = 0;
     json        prices;
     json        hooks;
     json        mcp_servers;
@@ -683,6 +689,10 @@ Config load_config() {
         if (j.contains("notify") && j["notify"].is_object()) {
             cfg.notify_enabled          = j["notify"].value("enabled", true);
             cfg.notify_min_duration_sec = j["notify"].value("min_duration_seconds", 60.0);
+        }
+        if (j.contains("compact") && j["compact"].is_object()) {
+            cfg.compact_auto_threshold = j["compact"].value("auto_threshold", 0.8);
+            cfg.compact_context_window = j["compact"].value("context_window", 0);
         }
     } catch (const json::exception& e) {
         std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
@@ -1778,6 +1788,16 @@ struct PriceEntry {
     double output;
 };
 
+// Pick a reasonable context-window size for the given model.
+// Config-override wins; otherwise the "[1m]" suffix signals the
+// 1M-token Anthropic beta, and everything else gets the standard
+// 200k window.
+int detect_context_window(const std::string& model, int override_val) {
+    if (override_val > 0) return override_val;
+    if (model.find("[1m]") != std::string::npos) return 1'000'000;
+    return 200'000;
+}
+
 PriceEntry get_price(const std::string& model, const json& config_prices) {
     if (config_prices.is_object() && config_prices.contains(model)) {
         const auto& p = config_prices[model];
@@ -2515,6 +2535,12 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     bool   notify_enabled       = cfg.notify_enabled;
     double notify_min_duration  = cfg.notify_min_duration_sec;
 
+    // Auto-compact thresholds. context_window resolves to the
+    // model-specific cap on first use (handled inside the loop so
+    // a `/model` swap mid-session picks up the new window).
+    const double compact_auto_threshold = cfg.compact_auto_threshold;
+    const int    compact_window_override = cfg.compact_context_window;
+
     if (resume) {
         if (auto loaded = load_history(); loaded && loaded->is_array()) {
             messages = *loaded;
@@ -2809,6 +2835,26 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
             send_desktop_notification(
                 title,
                 first_sentence_for_notify(result.assistant_text, 120));
+        }
+
+        // Auto-compact: if this turn's input-token count crosses
+        // the threshold share of the model's context window, queue
+        // a `/compact` for the next iteration. Setting `pending`
+        // routes through the slash-command path so the existing
+        // compact handler runs (no code duplication). Announced
+        // with a meta line so the user sees why it fired.
+        if (compact_auto_threshold > 0.0) {
+            const int window = detect_context_window(model, compact_window_override);
+            const int trigger = static_cast<int>(window * compact_auto_threshold);
+            if (result.input_tokens >= trigger) {
+                char note[160];
+                std::snprintf(note, sizeof(note),
+                    "[auto-compact: context at %d%% (%d / %d tokens)]",
+                    (result.input_tokens * 100) / window,
+                    result.input_tokens, window);
+                std::cout << tui::meta(note) << "\n";
+                pending = "/compact";
+            }
         }
 
         char status[192];
