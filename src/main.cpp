@@ -1528,6 +1528,12 @@ public:
 
     bool start() {
         if (running_.load()) return false;
+        // Determine the primary user for local mirroring —
+        // smallest allowed_user_id, same logic as run_telegram_bridge.
+        primary_user_id_ = 0;
+        for (const auto& id : allowed_) {
+            if (primary_user_id_ == 0 || id < primary_user_id_) primary_user_id_ = id;
+        }
         running_.store(true);
         poller_ = std::thread(&RemoteControl::poll_loop, this);
         return true;
@@ -1539,6 +1545,19 @@ public:
     }
 
     bool running() const { return running_.load(); }
+
+    // Mirror a local REPL turn to the primary Telegram chat so
+    // the phone-side user sees what was typed locally. Called from
+    // the main thread after each interactive_loop turn completes.
+    void mirror_to_primary(const std::string& user_text,
+                           const std::string& assistant_text) {
+        if (!running_.load()) return;
+        if (primary_user_id_ == 0) return;
+        tg_send(primary_user_id_, "> " + user_text);
+        if (!assistant_text.empty()) {
+            tg_send(primary_user_id_, assistant_text);
+        }
+    }
 
 private:
     void poll_loop() {
@@ -1573,18 +1592,24 @@ private:
 
         const std::string who = u.username.empty()
             ? std::to_string(u.user_id) : u.username;
-        std::cout << tui::meta("[remote-control rx " + who + "] " + u.text) << "\n";
+
+        // The poller thread runs while libedit has the cursor
+        // parked on the fixed input row. Route all our stdout
+        // writes into the scroll region via save/restore so we
+        // don't clobber the prompt and libedit can redraw on the
+        // next keystroke without damage.
+        std::cout << "\x1b""7";          // save cursor
+        tui::position_cursor_for_chat();
+        std::cout << tui::meta("[remote " + who + "] " + u.text) << "\n";
         log_line("remote-control rx user=" + std::to_string(u.user_id)
                  + " text=" + u.text);
 
-        // Per-chat slash commands. /mute and /unmute share the
-        // global g_telegram_muted flag with the full bridge so
-        // the two remote surfaces can't fight each other.
         if (u.text == "/mute") {
             if (!g_telegram_muted.exchange(true)) {
                 client_.send_message(u.chat_id,
                     "Remote muted. No replies until /unmute.");
             }
+            std::cout << "\x1b""8" << std::flush;
             return;
         }
         if (u.text == "/unmute") {
@@ -1592,16 +1617,18 @@ private:
                 client_.send_message(u.chat_id,
                     "Remote unmuted. Replies will be sent again.");
             }
+            std::cout << "\x1b""8" << std::flush;
             return;
         }
         if (u.text == "/new" || u.text == "/clear") {
             user_messages_.erase(u.user_id);
             tg_send(u.chat_id, "(history cleared)");
+            std::cout << "\x1b""8" << std::flush;
             return;
         }
         if (u.text == "/help" || u.text == "/start") {
             tg_send(u.chat_id,
-                "claude remote-control (lite)\n"
+                "claude remote-control\n"
                 "\n"
                 "Send a message and I'll run it through Claude on the "
                 "local machine.\n"
@@ -1611,6 +1638,7 @@ private:
                 "  /mute    stop sending replies until /unmute\n"
                 "  /unmute  resume sending replies\n"
                 "  /help    this message");
+            std::cout << "\x1b""8" << std::flush;
             return;
         }
 
@@ -1632,16 +1660,19 @@ private:
             messages = snapshot;
             tg_send(u.chat_id, "(error: Claude did not return a response)");
             log_line("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
+            std::cout << "\x1b""8" << std::flush;
             return;
         }
 
         tg_send(u.chat_id, result.assistant_text);
         log_line("remote-control tx user=" + std::to_string(u.user_id)
                  + " out=" + std::to_string(result.output_tokens));
+        std::cout << "\x1b""8" << std::flush;
     }
 
     telegram::Client             client_;
     std::unordered_set<int64_t>  allowed_;
+    int64_t                      primary_user_id_ = 0;
     bool                         allow_destructive_ = false;
     Auth                         auth_;
     std::string                  custom_system_;
@@ -1933,6 +1964,13 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         // "Remote Control active" label reflects the current
         // toggle state.
         tui::set_status_bar(compose_status());
+
+        // Mirror the local turn to the primary Telegram chat so
+        // the phone-side user sees the conversation in real time
+        // when /remote-control is active.
+        if (remote && remote->running()) {
+            remote->mirror_to_primary(line, result.assistant_text);
+        }
 
         save_history(messages, model);
 
