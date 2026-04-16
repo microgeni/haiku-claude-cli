@@ -158,6 +158,146 @@ bool mkdir_p(const std::string& path) {
     return true;
 }
 
+// ── Persistent lifetime stats ─────────────────────────────────
+//
+// Accumulate session / turn / token / tool counters in a JSON
+// file so the user can see long-term trends and BFS savings.
+
+std::string stats_path() {
+    return config_dir() + "/stats.json";
+}
+
+json load_stats() {
+    std::ifstream f(stats_path());
+    if (!f.is_open()) {
+        return {
+            {"first_session", ""},
+            {"sessions",      0},
+            {"turns",         0},
+            {"input_tokens",  0},
+            {"output_tokens", 0},
+            {"tool_calls",    json::object()},
+        };
+    }
+    try {
+        return json::parse(f);
+    } catch (const json::exception&) {
+        return {
+            {"first_session", ""},
+            {"sessions",      0},
+            {"turns",         0},
+            {"input_tokens",  0},
+            {"output_tokens", 0},
+            {"tool_calls",    json::object()},
+        };
+    }
+}
+
+void save_stats(const json& stats) {
+    const auto dir = config_dir();
+    mkdir_p(dir);
+    std::ofstream f(stats_path());
+    if (f.is_open()) {
+        f << stats.dump(2) << "\n";
+    }
+}
+
+void stats_record_session() {
+    json s = load_stats();
+    s["sessions"] = s.value("sessions", 0) + 1;
+    if (s.value("first_session", std::string{}).empty()) {
+        const std::time_t t = std::time(nullptr);
+        std::tm tm{};
+        localtime_r(&t, &tm);
+        char date[16];
+        std::strftime(date, sizeof(date), "%Y-%m-%d", &tm);
+        s["first_session"] = date;
+    }
+    save_stats(s);
+}
+
+void stats_record_turn(int input_tokens, int output_tokens) {
+    json s = load_stats();
+    s["turns"]         = s.value("turns", 0) + 1;
+    s["input_tokens"]  = s.value("input_tokens", 0) + input_tokens;
+    s["output_tokens"] = s.value("output_tokens", 0) + output_tokens;
+    save_stats(s);
+}
+
+void stats_record_tool(const std::string& tool_name, int result_bytes) {
+    json s = load_stats();
+    auto& tc = s["tool_calls"];
+    if (!tc.is_object()) tc = json::object();
+    if (!tc.contains(tool_name)) {
+        tc[tool_name] = {{"count", 0}, {"bytes", 0}};
+    }
+    tc[tool_name]["count"] = tc[tool_name].value("count", 0) + 1;
+    tc[tool_name]["bytes"] = tc[tool_name].value("bytes", 0) + result_bytes;
+    save_stats(s);
+}
+
+std::string format_stats_display() {
+    const json s = load_stats();
+    const std::string since = s.value("first_session", std::string{"(unknown)"});
+    const int sessions      = s.value("sessions", 0);
+    const int turns         = s.value("turns", 0);
+    const int in_tok        = s.value("input_tokens", 0);
+    const int out_tok       = s.value("output_tokens", 0);
+
+    std::string out;
+    out += "haiku-claude-cli lifetime stats";
+    if (!since.empty() && since != "(unknown)") out += " (since " + since + ")";
+    out += "\n";
+
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+        "  Sessions:        %d\n"
+        "  Turns:           %d\n"
+        "  Input tokens:    %d  (\xE2\x86\x91 avg %d/turn)\n"
+        "  Output tokens:   %d  (\xE2\x86\x93 avg %d/turn)\n",
+        sessions, turns,
+        in_tok,  turns > 0 ? in_tok  / turns : 0,
+        out_tok, turns > 0 ? out_tok / turns : 0);
+    out += buf;
+
+    if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
+        out += "  Tool calls:\n";
+        for (const auto& [name, val] : s["tool_calls"].items()) {
+            const int count = val.value("count", 0);
+            const int bytes = val.value("bytes", 0);
+            std::snprintf(buf, sizeof(buf), "    %-14s %4d calls  %d bytes\n",
+                          name.c_str(), count, bytes);
+            out += buf;
+        }
+
+        // BFS savings estimate: ReadAttr bytes vs. what a full
+        // Read would have cost. Each ReadAttr call returned N
+        // bytes of attribute data; the corresponding file would
+        // have been ~10-100x larger. Use a conservative 50x
+        // multiplier as a rough estimate.
+        const auto& tc = s["tool_calls"];
+        if (tc.contains("ReadAttr")) {
+            const int attr_bytes  = tc["ReadAttr"].value("bytes", 0);
+            const int attr_tokens = attr_bytes / 4;
+            const int est_full    = attr_bytes * 50;
+            const int est_tokens  = est_full / 4;
+            const int saved       = est_tokens - attr_tokens;
+            if (saved > 0) {
+                std::snprintf(buf, sizeof(buf),
+                    "  BFS savings estimate:\n"
+                    "    Attr reads:    %d tokens\n"
+                    "    Full reads:    ~%d tokens (est. 50x)\n"
+                    "    Saved:         ~%d tokens\n",
+                    attr_tokens, est_tokens, saved);
+                out += buf;
+            }
+        }
+    }
+    return out;
+}
+
+// ── History persistence ───────────────────────────────────────
+
 std::optional<json> load_history() {
     std::ifstream f(history_path());
     if (!f.is_open()) return std::nullopt;
@@ -1131,6 +1271,8 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
             }
 
+            stats_record_tool(tname, static_cast<int>(tres.content.size()));
+
             tool_results.push_back({
                 {"type",        "tool_result"},
                 {"tool_use_id", tid},
@@ -1204,6 +1346,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /usage             session tokens, cost estimate, subscription windows\n"
             "  /todos             show the current in-session todo list\n"
             "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
+            "  /stats             lifetime token usage and tool stats\n"
             "  /remote-control    toggle Telegram remote poller on/off\n"
             "  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
                   << "\n";
@@ -1219,6 +1362,10 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         const auto result = tools::run("TodoRead", json::object());
         std::cout << tui::meta("current todos:") << "\n"
                   << result.content << "\n";
+        return SlashAction::Continue;
+    }
+    if (cmd == "/stats") {
+        std::cout << tui::meta(format_stats_display()) << "\n";
         return SlashAction::Continue;
     }
     if (cmd == "/memory") {
@@ -1697,7 +1844,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     commands::load(config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
-        "/todos", "/memory", "/remote-control", "/exit", "/quit",
+        "/todos", "/memory", "/stats", "/remote-control", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
@@ -1708,6 +1855,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     Auth auth = initial_auth;
 
     hooks::fire(hooks::Event::SessionStart, json::object());
+    stats_record_session();
     log_line("session start (model=" + model + ")");
 
     int turn_count         = 0;
@@ -1945,6 +2093,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         ++turn_count;
         session_input  += result.input_tokens;
         session_output += result.output_tokens;
+        stats_record_turn(result.input_tokens, result.output_tokens);
 
         char status[192];
         std::snprintf(status, sizeof(status),
@@ -2427,7 +2576,7 @@ int run_telegram_bridge(const Config& cfg) {
     {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
-            "/todos", "/memory", "/mute", "/unmute", "/exit", "/quit",
+            "/todos", "/memory", "/stats", "/mute", "/unmute", "/exit", "/quit",
         };
         for (const auto& c : commands::names()) all_slash.push_back("/" + c);
         repl::set_slash_commands(all_slash);
