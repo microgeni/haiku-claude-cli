@@ -138,6 +138,79 @@ std::string load_optional_file(const std::string& path) {
 // The required Claude Code preamble for OAuth is prepended inside
 // send_conversation, so we don't repeat it here. Called per-turn so
 // edits to the CLAUDE.md files take effect immediately.
+// Snapshot of claude:summary attributes across the project
+// cwd. Taken once per session (first compose_system call) so
+// later turns use the cached result instead of re-walking the
+// filesystem. Claude sees the list as part of its system
+// prompt and prefers ReadAttr over Read for files that appear
+// here.
+namespace {
+bool        g_bfs_loaded = false;
+std::string g_bfs_snapshot;
+}
+
+#ifdef __HAIKU__
+void preload_bfs_summaries() {
+    if (g_bfs_loaded) return;
+    g_bfs_loaded = true;
+
+    // Walk the project cwd, collect claude:summary values via
+    // catattr. `find | while read` is simple and handles
+    // non-ASCII paths adequately for this use. Excludes the
+    // usual noise directories so we don't spend time on
+    // node_modules/.git/build.
+    const char* cmd =
+        "find . -type f "
+        "  -not -path './.git/*' "
+        "  -not -path './build/*' "
+        "  -not -path './node_modules/*' "
+        "  -not -path '*/\\.*' 2>/dev/null | while read f; do "
+        "    s=$(catattr -d claude:summary \"$f\" 2>/dev/null) || continue; "
+        "    [ -n \"$s\" ] && printf '%s :: %s\\n' \"$f\" \"$s\"; "
+        "done";
+    FILE* p = popen(cmd, "r");
+    if (!p) return;
+    char buf[4096];
+    while (std::fgets(buf, sizeof(buf), p)) {
+        g_bfs_snapshot += buf;
+    }
+    pclose(p);
+}
+#else
+void preload_bfs_summaries() { g_bfs_loaded = true; }
+#endif
+
+std::string bfs_system_block() {
+#ifdef __HAIKU__
+    if (!g_bfs_loaded) preload_bfs_summaries();
+
+    std::string s =
+        "Haiku BFS attribute tools — prefer these on this project:\n"
+        "- ReadAttr: read `claude:summary` (or any named attribute) from a "
+          "file. Check this BEFORE calling Read on a source file — summaries "
+          "cost ~10-30 tokens vs. thousands for full reads.\n"
+        "- WriteAttr: write a one-line `claude:summary` after reading a file "
+          "for the first time. Later sessions will use ReadAttr and skip the "
+          "full read. Only use the `claude:*` namespace; never overwrite "
+          "BEOS:*/MAIL:*/Audio:* or other system attributes.\n"
+        "- Query: BFS query expression for filesystem searches. Fast when an "
+          "index exists; use for file-metadata lookups.\n";
+
+    if (!g_bfs_snapshot.empty()) {
+        s += "\nFiles in this project with existing claude:summary "
+             "(prefer ReadAttr over Read for these):\n";
+        s += g_bfs_snapshot;
+    } else {
+        s += "\n(No claude:summary attributes seeded yet — writing summaries "
+             "for source files you read this session will let later sessions "
+             "save tokens via ReadAttr.)\n";
+    }
+    return s;
+#else
+    return {};
+#endif
+}
+
 std::string compose_system(const std::string& flag_system) {
     std::string out;
     auto append = [&](const std::string& chunk) {
@@ -147,6 +220,7 @@ std::string compose_system(const std::string& flag_system) {
     };
     append(load_optional_file(user_memory_path()));
     append(load_optional_file(project_memory_path()));
+    append(bfs_system_block());
     append(flag_system);
     return out;
 }

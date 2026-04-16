@@ -594,6 +594,45 @@ current task. **95–99 % token reduction per session**.
   omitted from `tools::definitions()` so Claude doesn't see
   them.
 
+### v1.3.4 — BFS default-on (system-prompt guidance + summary preload) ✓
+
+v1.2 shipped the BFS attribute tools but Claude wasn't using
+them: general-purpose Read/Glob defaults dominate unless
+something nudges. Now the CLI ships BFS guidance baked into
+the system prompt and preloads a summary map at session start
+so Claude always knows the feature exists and what's already
+been cached.
+
+- [x] **BFS system-prompt block** — `compose_system` appends
+      a Haiku-only paragraph explaining `ReadAttr` /
+      `WriteAttr` / `Query`, when to prefer them, and the
+      `claude:*` namespace convention. No CLAUDE.md edit
+      required on the user's side — the CLI injects it every
+      turn.
+- [x] **Summary preload** — first call to `compose_system`
+      walks cwd (excluding .git/build/node_modules and dot
+      directories), catattrs `claude:summary` off each file,
+      and caches the non-empty results in a process-scoped
+      snapshot. Each subsequent turn reuses the snapshot —
+      one filesystem walk per session, not per turn.
+- [x] **Graceful empty-state** — with no seeded summaries,
+      the block still appears and prompts Claude to write
+      them as it reads source files, so later sessions
+      inherit the cache.
+- [x] **Non-Haiku no-op** — `#ifdef __HAIKU__` guards keep
+      the feature out of macOS dev builds (where the BFS
+      tools aren't even registered).
+
+Deferred:
+- Auto-create `claude:summary` index via `mkindex` so Query
+  can target the attribute directly. Currently the preload
+  walks files individually. Fine for projects up to
+  low-thousands of files; the index unlocks O(1) lookups for
+  larger trees.
+- Background refresh of the summary snapshot mid-session
+  when WriteAttr is called. Currently stale until next
+  session start.
+
 ### v1.3 — Tracker drag-and-drop ✓
 
 Haiku's Terminal inserts dropped file paths straight into the
