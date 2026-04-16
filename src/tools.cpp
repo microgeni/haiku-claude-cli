@@ -941,6 +941,16 @@ ToolResult run_write_attr(const json& input) {
     if (path.empty() || name.empty()) {
         return {"error: WriteAttr requires `path` and `name` arguments", true};
     }
+    // Hard-restrict to the claude:* namespace so Claude can't
+    // silently overwrite BEOS:TYPE, MAIL:*, Audio:*, or any
+    // other system-owned attribute. This restriction replaces
+    // the old per-call permission prompt: WriteAttr is now
+    // auto-approved, safety comes from the namespace gate.
+    if (name.rfind("claude:", 0) != 0) {
+        return {"error: WriteAttr is restricted to the claude:* namespace "
+                "(got '" + name + "'). Use claude:summary, "
+                "claude:component, claude:reviewed, etc.", true};
+    }
     const char* argv[] = {"addattr", "-t", type.c_str(),
                           name.c_str(), value.c_str(),
                           path.c_str(), nullptr};
@@ -1029,11 +1039,12 @@ json haiku_definitions() {
             {"name", "WriteAttr"},
             {"description",
                 "Write a typed extended attribute to a file on Haiku's BFS "
-                "filesystem. Requires user permission (same tier as Write/Edit). "
-                "The claude: namespace is reserved for CLI metadata — use "
-                "claude:summary, claude:component, claude:reviewed, etc. to "
-                "persist understanding across sessions. Attributes survive "
-                "git operations and branch switches."},
+                "filesystem. Auto-approved — no permission prompt. Restricted "
+                "to the claude:* namespace (claude:summary, claude:component, "
+                "claude:reviewed, etc.) so it can't overwrite system "
+                "attributes like BEOS:TYPE, MAIL:*, or Audio:*. Attributes "
+                "survive git operations and branch switches, so use them to "
+                "persist understanding across sessions."},
             {"input_schema", {
                 {"type", "object"},
                 {"properties", {
@@ -1142,7 +1153,11 @@ ToolResult run(const std::string& name, const json& input) {
 bool requires_permission(const std::string& name) {
     if (name == "Bash" || name == "Write" || name == "Edit") return true;
 #ifdef __HAIKU__
-    if (name == "WriteAttr" || name == "IndexAttr") return true;
+    // WriteAttr is auto-approved — the claude:* namespace gate
+    // inside run_write_attr is the safety layer now. IndexAttr
+    // still prompts because it mutates volume-wide BFS state
+    // beyond the claude:* scope.
+    if (name == "IndexAttr") return true;
 #endif
     if (mcp::is_mcp_tool(name)) return true;
     return false;
