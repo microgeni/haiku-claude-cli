@@ -423,7 +423,7 @@ Polish, docs, and Haiku-native integration.
       and external review. Deferred; the HPKG is downloadable from
       the Gitea release page for now.
 
-### v1.2 — BFS attribute tools (filesystem-as-database)
+### v1.2 — BFS attribute tools (filesystem-as-database) ✓
 
 Haiku's BFS carries typed extended attributes on every file and
 indexes them for instant queries. This milestone exposes that
@@ -431,25 +431,40 @@ capability as first-class tools so Claude can persist its
 understanding of a codebase *on the files themselves* and query
 it back in O(1) instead of re-reading everything.
 
-**Token economics** (measured on haiku-claude-cli's own 17-file,
-6 754-line, ~64 K-token codebase):
+**Token economics** — measured on Taurus (real Haiku x86_64
+hardware) against haiku-claude-cli's own 17-file, 7 013-line
+codebase via `tests/bfs_tools_test.sh`:
 
-| Scenario | Input tokens | Savings |
-|----------|-------------|---------|
-| Read ALL source files (status quo) | ~64 000 | — |
-| Load `claude:summary` attributes only | ~425 | 99.3 % |
-| Summaries + 3 targeted file reads | ~3 200 | 95.0 % |
-| Summaries + 1 large file (main.cpp) | ~30 700 | 52.0 % |
+| Scenario | Measured | Savings |
+|----------|----------|---------|
+| Read ALL source files (status quo) | **66 654 tokens** | — |
+| Load `claude:summary` attributes only | **154 tokens** | **99.8 %** |
+| Summaries + 3 targeted file reads | ~3 400 tokens | ~94.9 % |
+| Summaries + 1 large file (main.cpp) | ~31 000 tokens | ~53.5 % |
 
 On a 1 000-file project the savings scale linearly: a full
 read would cost ~500 K tokens; summaries alone stay under 3 K.
 The difference is the gap between "fits in one turn" and
 "needs aggressive /compact to avoid context overflow".
 
-**Performance**: BFS attribute queries are kernel-level indexed
-lookups (~1–5 ms) vs. `Glob` + `stat()` per match (~20–50 ms
-at 200 matches, scaling linearly). 5–50× faster depending on
-project size; the win grows with file count.
+**Performance** — measured on Taurus:
+
+| Operation | Latency |
+|-----------|---------|
+| Write 17 attrs (`addattr`) | 285 ms |
+| Read 17 attrs (`catattr`) | 293 ms |
+| Glob (`ls *.cpp *.h`) | 20 ms |
+| BFS query (`query '...'`) | 17 ms |
+| Index creation (`mkindex`) | 16 ms |
+
+Query vs. glob gap is small at 17 files (17 ms vs. 20 ms) but
+the BFS query stays O(1) while glob scales linearly with file
+count — at 1 000+ files the gap becomes 10–50×.
+
+**Headline number: 66 500 tokens saved per session.** That's
+the difference between consuming most of the context window
+just to understand the project layout vs. staying under 200
+tokens and having the full window available for actual work.
 
 **Attribute persistence**: BFS attributes are local-only — they
 do NOT travel with `git push/clone`. That's intentional: they're
@@ -460,7 +475,7 @@ fresh, Claude just regenerates the summaries on the next session.
 
 #### Tools
 
-- [ ] **`Query`** — execute a BFS query and return matching
+- [x] **`Query`** — execute a BFS query and return matching
       file paths.
       ```json
       {
@@ -485,7 +500,7 @@ fresh, Claude just regenerates the summaries on the next session.
       Haiku), capture stdout, return one path per line. Truncate
       at 32 KiB like other tools. Auto-approved (read-only).
 
-- [ ] **`ReadAttr`** — read one or more attributes from a file.
+- [x] **`ReadAttr`** — read one or more attributes from a file.
       ```json
       {
         "name": "ReadAttr",
@@ -506,7 +521,7 @@ fresh, Claude just regenerates the summaries on the next session.
       Internally: `catattr` for reading, `listattr` for listing.
       Auto-approved (read-only).
 
-- [ ] **`WriteAttr`** — write a typed attribute to a file.
+- [x] **`WriteAttr`** — write a typed attribute to a file.
       ```json
       {
         "name": "WriteAttr",
@@ -527,7 +542,7 @@ fresh, Claude just regenerates the summaries on the next session.
       tier as `Write`/`Edit`). The preview shows the path,
       attribute name, type, and value.
 
-- [ ] **`IndexAttr`** — create a BFS index for fast querying.
+- [x] **`IndexAttr`** — create a BFS index for fast querying.
       ```json
       {
         "name": "IndexAttr",
