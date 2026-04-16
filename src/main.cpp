@@ -147,6 +147,32 @@ std::string load_optional_file(const std::string& path) {
 namespace {
 bool        g_bfs_loaded = false;
 std::string g_bfs_snapshot;
+
+// Strict UTF-8 validation — returns true only if every byte
+// is part of a well-formed sequence. catattr output from a
+// raw-typed or binary-valued claude:summary attribute can
+// contain 0xFF / 0xFE bytes that nlohmann::json refuses to
+// serialize, so lines that fail this check get dropped from
+// the preload snapshot to keep the system prompt clean.
+bool is_valid_utf8(const char* data, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = static_cast<unsigned char>(data[i]);
+        int need = 0;
+        if (c < 0x80) { ++i; continue; }
+        else if ((c & 0xE0) == 0xC0) need = 1;
+        else if ((c & 0xF0) == 0xE0) need = 2;
+        else if ((c & 0xF8) == 0xF0) need = 3;
+        else                         return false;
+        if (i + need >= len) return false;
+        for (int k = 1; k <= need; ++k) {
+            unsigned char cc = static_cast<unsigned char>(data[i + k]);
+            if ((cc & 0xC0) != 0x80) return false;
+        }
+        i += need + 1;
+    }
+    return true;
+}
 }
 
 #ifdef __HAIKU__
@@ -172,7 +198,12 @@ void preload_bfs_summaries() {
     if (!p) return;
     char buf[4096];
     while (std::fgets(buf, sizeof(buf), p)) {
-        g_bfs_snapshot += buf;
+        const size_t n = std::strlen(buf);
+        // Drop the whole line if it contains non-UTF-8 bytes
+        // — catattr's raw-typed attribute values will crash
+        // nlohmann::json on serialization otherwise.
+        if (!is_valid_utf8(buf, n)) continue;
+        g_bfs_snapshot.append(buf, n);
     }
     pclose(p);
 }
