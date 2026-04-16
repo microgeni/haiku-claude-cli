@@ -423,6 +423,162 @@ Polish, docs, and Haiku-native integration.
       and external review. Deferred; the HPKG is downloadable from
       the Gitea release page for now.
 
+### v1.2 — BFS attribute tools (filesystem-as-database)
+
+Haiku's BFS carries typed extended attributes on every file and
+indexes them for instant queries. This milestone exposes that
+capability as first-class tools so Claude can persist its
+understanding of a codebase *on the files themselves* and query
+it back in O(1) instead of re-reading everything.
+
+**Token economics** (measured on haiku-claude-cli's own 17-file,
+6 754-line, ~64 K-token codebase):
+
+| Scenario | Input tokens | Savings |
+|----------|-------------|---------|
+| Read ALL source files (status quo) | ~64 000 | — |
+| Load `claude:summary` attributes only | ~425 | 99.3 % |
+| Summaries + 3 targeted file reads | ~3 200 | 95.0 % |
+| Summaries + 1 large file (main.cpp) | ~30 700 | 52.0 % |
+
+On a 1 000-file project the savings scale linearly: a full
+read would cost ~500 K tokens; summaries alone stay under 3 K.
+The difference is the gap between "fits in one turn" and
+"needs aggressive /compact to avoid context overflow".
+
+**Performance**: BFS attribute queries are kernel-level indexed
+lookups (~1–5 ms) vs. `Glob` + `stat()` per match (~20–50 ms
+at 200 matches, scaling linearly). 5–50× faster depending on
+project size; the win grows with file count.
+
+**Attribute persistence**: BFS attributes are local-only — they
+do NOT travel with `git push/clone`. That's intentional: they're
+a local cache of Claude's understanding, not shared project
+state. `git clean`, `git checkout`, `git reset --hard` all
+leave them intact. If the volume is wiped or the repo is cloned
+fresh, Claude just regenerates the summaries on the next session.
+
+#### Tools
+
+- [ ] **`Query`** — execute a BFS query and return matching
+      file paths.
+      ```json
+      {
+        "name": "Query",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string",
+              "description": "BFS query expression, e.g. 'BEOS:TYPE == \"text/x-source-code\" && last_modified > %1hour%'"
+            },
+            "volume": {
+              "type": "string",
+              "description": "Volume to search. Defaults to the volume containing cwd."
+            }
+          },
+          "required": ["expression"]
+        }
+      }
+      ```
+      Internally: `fork/exec` the `query` command (ships with
+      Haiku), capture stdout, return one path per line. Truncate
+      at 32 KiB like other tools. Auto-approved (read-only).
+
+- [ ] **`ReadAttr`** — read one or more attributes from a file.
+      ```json
+      {
+        "name": "ReadAttr",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "names": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Attribute names to read. Empty = list all attributes and their types."
+            }
+          },
+          "required": ["path"]
+        }
+      }
+      ```
+      Internally: `catattr` for reading, `listattr` for listing.
+      Auto-approved (read-only).
+
+- [ ] **`WriteAttr`** — write a typed attribute to a file.
+      ```json
+      {
+        "name": "WriteAttr",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "name": { "type": "string", "description": "Attribute name, e.g. 'claude:summary'" },
+            "type": { "type": "string", "enum": ["string", "int32", "int64", "float", "double", "bool"], "description": "Attribute type. Defaults to string." },
+            "value": { "type": "string", "description": "Value to write (converted to the declared type)." }
+          },
+          "required": ["path", "name", "value"]
+        }
+      }
+      ```
+      Internally: `addattr -t <type> <name> <value> <path>`.
+      **Requires permission** (writes to the filesystem, same
+      tier as `Write`/`Edit`). The preview shows the path,
+      attribute name, type, and value.
+
+- [ ] **`IndexAttr`** — create a BFS index for fast querying.
+      ```json
+      {
+        "name": "IndexAttr",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "Attribute name to index, e.g. 'claude:component'" },
+            "type": { "type": "string", "enum": ["string", "int32", "int64", "float", "double"], "description": "Index type." }
+          },
+          "required": ["name", "type"]
+        }
+      }
+      ```
+      Internally: `mkindex -t <type> <name>`. **Requires
+      permission** (creates a volume-level index). Only offered
+      on Haiku builds (`#ifdef __HAIKU__`).
+
+#### Workflow: auto-summary on first session
+
+When Claude reads a source file for the first time in a
+project, it can write a one-line `claude:summary` attribute:
+
+```
+addattr -t string claude:summary \
+    "OAuth PKCE flow + token refresh for Pro/Max subscriptions" \
+    src/oauth.cpp
+```
+
+Next session, instead of reading 17 files (64 K tokens), Claude
+queries:
+
+```
+catattr -d claude:summary src/*.cpp src/*.h
+```
+
+Gets 17 one-liners (~425 tokens), understands the project
+shape, and reads only the files it actually needs for the
+current task. **95–99 % token reduction per session**.
+
+#### Guard rails
+
+- `claude:*` namespace is reserved for CLI-written attributes.
+  Claude should not overwrite system attributes (`BEOS:TYPE`,
+  `MAIL:*`, `Audio:*`) without explicit user confirmation.
+- `WriteAttr` is permission-gated like `Write`/`Edit`.
+- `IndexAttr` warns that it affects the entire volume, not
+  just the project directory.
+- On non-Haiku builds (macOS via nix), all four tools are
+  omitted from `tools::definitions()` so Claude doesn't see
+  them.
+
 ## Haiku-native extras
 
 Features that don't exist in Claude Code but would make this CLI feel
@@ -430,8 +586,6 @@ native on Haiku. Sprinkle in along the roadmap as they become natural.
 
 - Desktop notification via Haiku's `notify` when a long-running task
   completes.
-- Filesystem attribute queries as a first-class tool
-  (`query 'BEOS:TYPE=text/x-source-code'` style).
 - Tracker integration: accept a dropped file or folder as a session
   scope by registering a `application/x-vnd.claude-cli` signature.
 - Open URLs from Claude's responses via Haiku's `open` command.
