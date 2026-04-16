@@ -686,19 +686,10 @@ Why this won among thirteen drafts:
 
 **Trademark caveat** — HAL 9000 is Kubrick/Clarke's. Close
 enough to a generic "AI icon" in tech culture to be safe for
-personal use on the Taurus dev machine; for any future
-HaikuDepot submission swap to the trademark-clean runner-up
-(`assets/drafts/claude-icon-k-haiku-terminal.svg` — same base,
-"Ai + leaf" screen instead of HAL).
-
-**Archived drafts** (`assets/drafts/`):
-
-Twelve alternate designs preserved for history: label-on-tile
-patterns (A–E), object-based icons (F CRT, G scroll, H seer's
-orb), the Anthropic-asterisk homage (I), the hAIku pun (J),
-the trademark-clean K, and the standalone HAL (M).
-`assets/contact-sheet.html` renders them all side-by-side at
-128/64/32/16 px for comparison.
+personal use on the Taurus dev machine; swap for a
+trademark-clean design (stylized `C`, terminal cursor, scroll
++ brush, etc.) before any HaikuDepot submission or wider
+public distribution.
 
 **Build plumbing**:
 
@@ -717,10 +708,6 @@ the trademark-clean K, and the standalone HAL (M).
       produced. `ICON_HVIF` is overridable so a future design
       swap can point at an alternate file without rewriting
       the Makefile.
-- [x] **Contact sheet HTML** (`assets/contact-sheet.html`) —
-      browsable comparison of canonical + drafts + reference,
-      rendered at four display sizes so the 16×16 survival
-      test is explicit.
 
 **SVG → HVIF conversion (automated via `icon2icon`)**:
 
@@ -759,8 +746,7 @@ small-detail layers, etc.), Icon-O-Matic on a Haiku install
 still works as a fallback — import the SVG, tweak, export.
 
 **Deferred**:
-- A trademark-clean design for HaikuDepot submission (the
-  drafts/K variant is pre-positioned for this).
+- A trademark-clean design for HaikuDepot submission.
 - Binary-embedded resource route via Haiku's `rc` compiler
   (single-binary distribution, no post-install attribute
   step). Doable but more moving parts; the `addattr` route

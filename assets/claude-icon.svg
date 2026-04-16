@@ -11,10 +11,6 @@
   this terminal" — 50-year-old visual shorthand for
   computer consciousness on a Haiku-native chassis.
 
-  Alternative drafts (A–K, M) live under assets/drafts/
-  for history. Side-by-side comparison in
-  assets/contact-sheet.html.
-
   Workflow to produce the HVIF binary Tracker needs:
     1. On a Haiku install, open Icon-O-Matic (ships with
        the OS).
@@ -35,9 +31,8 @@
   Trademark caveat: HAL 9000 is from Kubrick/Clarke's 2001.
   The red-eye design is close enough to a generic "AI icon"
   in tech culture to be safe for personal use, but worth
-  swapping for a trademark-clean alternative (K — "Ai +
-  leaf," or G — scroll + brush) before any HaikuDepot
-  submission or wider public distribution.
+  swapping for a trademark-clean alternative before any
+  HaikuDepot submission or wider public distribution.
 -->
 <svg version="1.1" width="64" height="64" color-interpolation="linearRGB"
      xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg">
