@@ -593,14 +593,40 @@ Auth resolve_auth() {
     return {};
 }
 
+// Session-scoped curl handle. Reused across all send_conversation
+// calls so DNS cache, TLS session, and TCP connections persist
+// between turns instead of being rebuilt on every request.
+// Created lazily on first use; cleaned up via atexit.
+namespace {
+CURL* g_curl = nullptr;
+
+CURL* get_curl() {
+    if (!g_curl) {
+        g_curl = curl_easy_init();
+        std::atexit([]() {
+            if (g_curl) { curl_easy_cleanup(g_curl); g_curl = nullptr; }
+        });
+    }
+    return g_curl;
+}
+} // namespace
+
 SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens,
                              const json& messages, const std::string& custom_system,
                              bool include_tools) {
-    CURL* curl = curl_easy_init();
+    constexpr int kMaxRetries = 3;
+    constexpr int kBaseDelay  = 1000; // ms; doubles on each retry
+
+    CURL* curl = get_curl();
     if (!curl) {
         std::cerr << "error: curl_easy_init failed\n";
         return {1, {}, 0, 0, {}, {}};
     }
+
+    for (int attempt = 1; /* break/return inside */; ++attempt) {
+    // Reset per-request state on the reused handle so stale
+    // headers / callbacks from the previous call don't leak.
+    curl_easy_reset(curl);
 
     json body = {
         {"model",      model},
@@ -666,6 +692,10 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
 
     g_interrupted = 0;
     // ESC guard lives only for the duration of the HTTP stream so
@@ -686,7 +716,6 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     if (g_interrupted) {
         state.renderer.flush();
@@ -696,6 +725,28 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     }
 
     if (res != CURLE_OK) {
+        // Curl-level transient errors (timeout, connection reset,
+        // partial transfer) are retryable. Abort-by-callback is
+        // intentional and should NOT be retried.
+        const bool curl_retryable =
+            res == CURLE_OPERATION_TIMEDOUT ||
+            res == CURLE_COULDNT_CONNECT ||
+            res == CURLE_PARTIAL_FILE ||
+            res == CURLE_GOT_NOTHING ||
+            res == CURLE_RECV_ERROR ||
+            res == CURLE_SEND_ERROR;
+        if (curl_retryable && !g_interrupted && attempt < kMaxRetries) {
+            const int delay = kBaseDelay << (attempt - 1);
+            std::cerr << tui::dim("[retry " + std::to_string(attempt)
+                                  + "/" + std::to_string(kMaxRetries)
+                                  + " in " + std::to_string(delay) + "ms: "
+                                  + curl_easy_strerror(res) + "]")
+                      << "\n";
+            log_line("retry attempt=" + std::to_string(attempt)
+                     + " curl=" + std::to_string(res));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            continue; // retry
+        }
         std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
         return {1, {}, 0, 0, {}, {}};
     }
@@ -712,6 +763,23 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
                 api_msg = err["error"]["message"].get<std::string>();
             }
         } catch (const json::exception&) {}
+
+        // 429 (rate limit) and 5xx (server errors) are transient —
+        // retry with exponential backoff before giving up.
+        const bool http_retryable =
+            (http_status == 429 || http_status >= 500) && !g_interrupted;
+        if (http_retryable && attempt < kMaxRetries) {
+            const int delay = kBaseDelay << (attempt - 1);
+            std::cerr << tui::dim("[retry " + std::to_string(attempt)
+                                  + "/" + std::to_string(kMaxRetries)
+                                  + " in " + std::to_string(delay) + "ms: HTTP "
+                                  + std::to_string(http_status) + "]")
+                      << "\n";
+            log_line("retry attempt=" + std::to_string(attempt)
+                     + " http=" + std::to_string(http_status));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            continue; // retry
+        }
 
         std::cerr << "\n" << tui::error_label() << " ";
         switch (http_status) {
@@ -774,6 +842,8 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     std::cout << "\n";
     return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
             state.content_blocks, state.stop_reason};
+
+    } // end retry loop — only reached via continue; all exits are return
 }
 
 std::string short_input_summary(const json& input) {
@@ -1583,7 +1653,7 @@ private:
     std::thread                  poller_;
 };
 
-int interactive_loop(const Auth& auth, const Config& cfg,
+int interactive_loop(const Auth& initial_auth, const Config& cfg,
                      const std::string& initial_model, int max_tokens,
                      const std::string& custom_system, const json& prices, bool resume,
                      const std::string& initial_message) {
@@ -1600,6 +1670,11 @@ int interactive_loop(const Auth& auth, const Config& cfg,
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
+
+    // Mutable copy of the initial auth so we can refresh tokens
+    // in-place before each turn without touching the caller's
+    // reference.
+    Auth auth = initial_auth;
 
     hooks::fire(hooks::Event::SessionStart, json::object());
     log_line("session start (model=" + model + ")");
@@ -1806,6 +1881,17 @@ int interactive_loop(const Auth& auth, const Config& cfg,
         std::cout << "\n" << tui::claude_prompt();
         const auto turn_start = std::chrono::steady_clock::now();
         const std::string system_for_turn = compose_system(custom_system);
+        // Refresh the OAuth token if it's about to expire so
+        // long-running REPL sessions don't fail mid-conversation.
+        // resolve_auth is cheap — reads credentials.json and
+        // checks the clock; refresh is only attempted when the
+        // current token is within 60 s of expiry.
+        auth = resolve_auth();
+        if (auth.kind == AuthKind::None) {
+            std::cout << "\n" << tui::meta("[error: authentication expired — run /exit and `claude login`]") << "\n";
+            messages = snapshot;
+            continue;
+        }
         // Hold remote_mutex for the full duration of the local
         // turn so the RemoteControl poller (if running) can't
         // interleave its own send_with_tools mid-stream. When
