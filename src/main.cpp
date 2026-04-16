@@ -1404,13 +1404,17 @@ static void send_desktop_notification(const std::string& title,
     pid_t pid = fork();
     if (pid < 0) return;
     if (pid == 0) {
+        // Haiku's `notify` doesn't support `--` as an
+        // end-of-options sentinel — it errors with
+        // "Unrecognized option --" and the notification never
+        // fires. Put the body straight after the flags.
         const char* argv[] = {
             "notify",
             "--type",    "information",
             "--group",   "Claude CLI",
             "--title",   title.c_str(),
             "--timeout", "8",
-            "--",        body.c_str(),
+            body.c_str(),
             nullptr
         };
         execvp("notify", const_cast<char* const*>(argv));
