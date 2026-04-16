@@ -1448,7 +1448,16 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 };
                 hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
             } else {
-                tres = tools::run(tname, tinput);
+                // Keep a spinner spinning for the duration of the
+                // tool run so the user sees continuous feedback
+                // instead of a frozen cursor during multi-step
+                // turns. Especially matters for Bash commands that
+                // can take many seconds.
+                {
+                    tui::Spinner tool_spinner("running " + tname);
+                    tres = tools::run(tname, tinput);
+                    tool_spinner.stop();
+                }
                 const std::string rsize = std::to_string(tres.content.size());
                 std::cout << tui::meta(tres.is_error
                                        ? "[tool: " + tname + " -> error]"
