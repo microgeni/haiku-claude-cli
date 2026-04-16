@@ -35,6 +35,7 @@ MANDIR  ?= $(PREFIX)/documentation/man/man1
 # with a dim note. Generated from assets/claude-icon.svg via
 # Icon-O-Matic — see the comment block in the SVG.
 ICON_HVIF ?= assets/claude-icon.hvif
+APP_SIG   ?= application/x-vnd.Microgeni-claude-cli
 
 PKG_NAME    ?= claude_cli
 PKG_VERSION ?= 0.1.0
@@ -49,9 +50,13 @@ all: $(BIN)
 
 $(BIN): $(OBJS) | $(BUILDDIR)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
-	@if [ -f "$(ICON_HVIF)" ] && command -v addattr >/dev/null 2>&1; then \
-	    echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
-	    addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$@"; \
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$@"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(APP_SIG)"; \
+	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)" "$@"; \
 	fi
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
@@ -68,11 +73,15 @@ install: $(BIN)
 	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/claude
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 644 docs/claude.1 $(DESTDIR)$(MANDIR)/claude.1
-	@if [ -f "$(ICON_HVIF)" ] && command -v addattr >/dev/null 2>&1; then \
-	    echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
-	    addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(DESTDIR)$(BINDIR)/claude"; \
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(DESTDIR)$(BINDIR)/claude"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(APP_SIG)"; \
+	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)" "$(DESTDIR)$(BINDIR)/claude"; \
 	else \
-	    echo "  (skipping icon stamp — no $(ICON_HVIF) or no addattr)"; \
+	    echo "  (skipping icon/sig stamp — no addattr)"; \
 	fi
 
 # Build a Haiku HPKG. Requires Haiku's `package` tool.
@@ -87,9 +96,13 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	mkdir -p "$(PKG_STAGE)/bin" "$(PKG_STAGE)/documentation/man/man1"
 	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
 	cp docs/claude.1 "$(PKG_STAGE)/documentation/man/man1/claude.1"
-	@if [ -f "$(ICON_HVIF)" ] && command -v addattr >/dev/null 2>&1; then \
-	    echo "  stamping BEOS:ICON from $(ICON_HVIF) onto staged binary"; \
-	    addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON from $(ICON_HVIF) onto staged binary"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(APP_SIG) onto staged binary"; \
+	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)" "$(PKG_STAGE)/bin/claude"; \
 	fi
 	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
 	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
