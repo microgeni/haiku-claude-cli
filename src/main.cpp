@@ -718,6 +718,12 @@ struct StreamState {
     // picks up the prompt size the moment `message_start` arrives.
     std::atomic<int>     input_tokens        { 0 };
     std::atomic<int>     output_tokens       { 0 };
+    // Prompt-cache telemetry from the Messages API usage block.
+    // cache_creation = tokens written to cache (1.25× cost, first
+    // hit); cache_read = tokens served from cache (~0.1× cost,
+    // subsequent hits). When caching works, cache_read dominates.
+    std::atomic<int>     cache_creation_input_tokens { 0 };
+    std::atomic<int>     cache_read_input_tokens     { 0 };
     bool                 saw_text            = false;
     bool                 stream_error        = false;
     std::string          stream_error_message;
@@ -741,6 +747,14 @@ struct SendResult {
     int                output_tokens = 0;
     std::vector<json>  content_blocks;
     std::string        stop_reason;
+    // Anthropic prompt-cache usage for this call. cache_read > 0
+    // on repeat turns means the system+tools prefix is reused from
+    // Anthropic's server-side cache — faster TTFT, 10% of normal
+    // input-token cost on that portion. Kept at the end so existing
+    // positional {...} constructions continue to compile with these
+    // as zero-defaulted trailing fields.
+    int                cache_creation_input_tokens = 0;
+    int                cache_read_input_tokens     = 0;
 };
 
 void process_sse_event(const std::string& event, StreamState* state) {
@@ -824,6 +838,12 @@ void process_sse_event(const std::string& event, StreamState* state) {
                                           std::memory_order_relaxed);
                 state->output_tokens.store(u.value("output_tokens", 0),
                                            std::memory_order_relaxed);
+                state->cache_creation_input_tokens.store(
+                    u.value("cache_creation_input_tokens", 0),
+                    std::memory_order_relaxed);
+                state->cache_read_input_tokens.store(
+                    u.value("cache_read_input_tokens", 0),
+                    std::memory_order_relaxed);
             }
         } else if (type == "message_delta") {
             if (j.contains("delta") && j["delta"].contains("stop_reason")
@@ -964,11 +984,37 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     // headers / callbacks from the previous call don't leak.
     curl_easy_reset(curl);
 
+    // Mutable copy of messages so we can stamp cache_control on
+    // the most recent user turn without disturbing the caller's
+    // conversation history.
+    json cached_messages = messages;
+    if (!cached_messages.empty()) {
+        auto& last = cached_messages.back();
+        if (last.contains("content")) {
+            auto& content = last["content"];
+            if (content.is_string()) {
+                // Upgrade string content into an array with a single
+                // text block so we have somewhere to attach
+                // cache_control.
+                const std::string text = content.get<std::string>();
+                content = json::array({
+                    {
+                        {"type", "text"},
+                        {"text", text},
+                        {"cache_control", {{"type", "ephemeral"}}},
+                    },
+                });
+            } else if (content.is_array() && !content.empty()) {
+                content.back()["cache_control"] = {{"type", "ephemeral"}};
+            }
+        }
+    }
+
     json body = {
         {"model",      model},
         {"max_tokens", max_tokens},
         {"stream",     true},
-        {"messages",   messages},
+        {"messages",   cached_messages},
     };
     if (include_tools) {
         body["tools"] = tools::definitions();
@@ -981,15 +1027,30 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     // once CLAUDE.md memory files were appended. Sending `system` as
     // an array with the preamble as element 0 and any extra content
     // as element 1 passes the check.
+    //
+    // Prompt caching: mark the LAST system block with
+    // cache_control: ephemeral. Render order is tools → system →
+    // messages, so one marker here caches both the tools array and
+    // the system prompt together. Subsequent turns in the same
+    // session (stable tools + stable system) hit the cache and
+    // process input ~5-10× faster at ~10% of the normal input
+    // token cost.
     if (auth.kind == AuthKind::OAuth) {
         json system_array = json::array();
         system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
         if (!custom_system.empty()) {
             system_array.push_back({{"type", "text"}, {"text", custom_system}});
         }
+        system_array.back()["cache_control"] = {{"type", "ephemeral"}};
         body["system"] = system_array;
     } else if (!custom_system.empty()) {
-        body["system"] = custom_system;
+        body["system"] = json::array({
+            {
+                {"type", "text"},
+                {"text", custom_system},
+                {"cache_control", {{"type", "ephemeral"}}},
+            },
+        });
     }
     const std::string body_str = body.dump();
 
@@ -1057,7 +1118,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         state.renderer.flush();
         std::cout << "\n" << tui::meta("[interrupted]") << "\n";
         return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
-                state.content_blocks, state.stop_reason};
+                state.content_blocks, state.stop_reason,
+                state.cache_creation_input_tokens.load(),
+                state.cache_read_input_tokens.load()};
     }
 
     if (res != CURLE_OK) {
@@ -1154,7 +1217,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     if (state.stream_error) {
         std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
         return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
-                state.content_blocks, state.stop_reason};
+                state.content_blocks, state.stop_reason,
+                state.cache_creation_input_tokens.load(),
+                state.cache_read_input_tokens.load()};
     }
 
     if (state.content_blocks.empty()) {
@@ -1167,7 +1232,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         // "no content" error that hides the real cause.
         if (state.stop_reason == "max_tokens") {
             return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
-                    state.content_blocks, state.stop_reason};
+                    state.content_blocks, state.stop_reason,
+                    state.cache_creation_input_tokens.load(),
+                    state.cache_read_input_tokens.load()};
         }
         std::cerr << "error: no content received in stream\n";
         std::cerr << "response body: " << state.raw_buffer << "\n";
@@ -1177,7 +1244,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     state.renderer.flush();
     std::cout << "\n";
     return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
-            state.content_blocks, state.stop_reason};
+            state.content_blocks, state.stop_reason,
+            state.cache_creation_input_tokens.load(),
+            state.cache_read_input_tokens.load()};
 
     } // end retry loop — only reached via continue; all exits are return
 }
@@ -1323,8 +1392,10 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
     while (true) {
         SendResult result = send_conversation(auth, model, max_tokens, messages,
                                               custom_system, /*include_tools=*/true);
-        aggregate.input_tokens  += result.input_tokens;
-        aggregate.output_tokens += result.output_tokens;
+        aggregate.input_tokens                 += result.input_tokens;
+        aggregate.output_tokens                += result.output_tokens;
+        aggregate.cache_creation_input_tokens  += result.cache_creation_input_tokens;
+        aggregate.cache_read_input_tokens      += result.cache_read_input_tokens;
         aggregate.assistant_text = result.assistant_text;
         aggregate.stop_reason    = result.stop_reason;
 
@@ -2857,17 +2928,31 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
             }
         }
 
-        char status[192];
+        char status[256];
+        // Append cache info when either creation or read is non-zero
+        // so the user can see caching working without digging into
+        // /stats. " · cache R:N W:N" tail — R = read (near-instant
+        // reuse), W = write (new content, cached for next turn).
+        char cache_tail[64] = {0};
+        const int c_read  = result.cache_read_input_tokens;
+        const int c_write = result.cache_creation_input_tokens;
+        if (c_read > 0 || c_write > 0) {
+            std::snprintf(cache_tail, sizeof(cache_tail),
+                "  \xC2\xB7 cache R:%d W:%d", c_read, c_write);
+        }
         std::snprintf(status, sizeof(status),
-            "[turn %d  %.1fs  in %d/%d  out %d/%d]",
+            "[turn %d  %.1fs  in %d/%d  out %d/%d%s]",
             turn_count, elapsed,
             result.input_tokens, session_input,
-            result.output_tokens, session_output);
+            result.output_tokens, session_output,
+            cache_tail);
         std::cout << tui::meta(status) << "\n";
         log_line("turn " + std::to_string(turn_count)
                  + " model=" + model
                  + " in=" + std::to_string(result.input_tokens)
-                 + " out=" + std::to_string(result.output_tokens));
+                 + " out=" + std::to_string(result.output_tokens)
+                 + " cache_r=" + std::to_string(c_read)
+                 + " cache_w=" + std::to_string(c_write));
 
         // Push the updated session counters into the fixed-bottom
         // status row so the user sees the running totals without
