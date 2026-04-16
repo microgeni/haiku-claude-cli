@@ -18,6 +18,8 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include "paths.h"
+
 using json = nlohmann::json;
 
 namespace {
@@ -74,18 +76,6 @@ size_t write_cb(char* data, size_t size, size_t nmemb, void* userp) {
     auto* out = static_cast<std::string*>(userp);
     out->append(data, size * nmemb);
     return size * nmemb;
-}
-
-bool mkdir_p(const std::string& path) {
-    std::string accum;
-    for (size_t i = 0; i < path.size(); ++i) {
-        accum += path[i];
-        const bool boundary = (path[i] == '/') || (i + 1 == path.size());
-        if (!boundary) continue;
-        if (accum.empty() || accum == "/") continue;
-        if (mkdir(accum.c_str(), 0700) != 0 && errno != EEXIST) return false;
-    }
-    return true;
 }
 
 std::string trim(std::string s) {
@@ -199,7 +189,7 @@ bool save_tokens(const OAuthTokens& tokens) {
     const auto        slash = path.rfind('/');
     if (slash == std::string::npos) return false;
     const std::string dir = path.substr(0, slash);
-    if (!mkdir_p(dir)) {
+    if (!paths::mkdir_p(dir)) {
         std::cerr << "error: cannot create " << dir << "\n";
         return false;
     }

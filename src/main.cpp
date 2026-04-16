@@ -33,8 +33,11 @@
 #include "commands.h"
 #include "hooks.h"
 #include "mcp.h"
+#include "notify.h"
 #include "oauth.h"
+#include "paths.h"
 #include "repl.h"
+#include "stats.h"
 #include "telegram.h"
 #include "tools.h"
 #include "tui.h"
@@ -51,50 +54,12 @@ constexpr const char* kOAuthBeta    = "oauth-2025-04-20";
 constexpr const char* kOAuthSystem  = "You are Claude Code, Anthropic's official CLI for Claude.";
 constexpr int         kMaxTokens    = 8192;
 
-std::string config_dir() {
-#ifdef __HAIKU__
-    const char* home = std::getenv("HOME");
-    return std::string(home ? home : "/boot/home") + "/config/settings/claude-cli";
-#else
-    const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    if (xdg && *xdg) return std::string(xdg) + "/claude-cli";
-    const char* home = std::getenv("HOME");
-    return std::string(home ? home : ".") + "/.config/claude-cli";
-#endif
-}
-
-std::string history_path() {
-    return config_dir() + "/history.json";
-}
-
-std::string repl_history_path() {
-    return config_dir() + "/repl_history";
-}
-
-std::string config_path() {
-    return config_dir() + "/config.json";
-}
-
-std::string log_dir() {
-    return config_dir() + "/logs";
-}
-
 std::ofstream g_log;
 
 void init_logging(bool enabled) {
     if (!enabled) return;
-    const std::string dir = log_dir();
-    {
-        // Tiny inline mkdir_p so logging has no forward-decl hassle.
-        std::string accum;
-        for (size_t i = 0; i < dir.size(); ++i) {
-            accum += dir[i];
-            const bool boundary = (dir[i] == '/') || (i + 1 == dir.size());
-            if (!boundary) continue;
-            if (accum.empty() || accum == "/") continue;
-            if (mkdir(accum.c_str(), 0700) != 0 && errno != EEXIST) return;
-        }
-    }
+    const std::string dir = paths::log_dir();
+    if (!paths::mkdir_p(dir)) return;
 
     const std::time_t t = std::time(nullptr);
     std::tm            tm {};
@@ -114,14 +79,6 @@ void log_line(const std::string& msg) {
     std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm);
     g_log << "[" << ts << "] " << msg << "\n";
     g_log.flush();
-}
-
-std::string user_memory_path() {
-    return config_dir() + "/CLAUDE.md";
-}
-
-std::string project_memory_path() {
-    return "CLAUDE.md";
 }
 
 std::string load_optional_file(const std::string& path) {
@@ -250,232 +207,17 @@ std::string compose_system(const std::string& flag_system) {
         if (!out.empty()) out += "\n\n";
         out += chunk;
     };
-    append(load_optional_file(user_memory_path()));
-    append(load_optional_file(project_memory_path()));
+    append(load_optional_file(paths::user_memory_path()));
+    append(load_optional_file(paths::project_memory_path()));
     append(bfs_system_block());
     append(flag_system);
-    return out;
-}
-
-bool mkdir_p(const std::string& path) {
-    std::string accum;
-    for (size_t i = 0; i < path.size(); ++i) {
-        accum += path[i];
-        const bool boundary = (path[i] == '/') || (i + 1 == path.size());
-        if (!boundary) continue;
-        if (accum.empty() || accum == "/") continue;
-        if (mkdir(accum.c_str(), 0700) != 0 && errno != EEXIST) return false;
-    }
-    return true;
-}
-
-// ── Persistent lifetime stats ─────────────────────────────────
-//
-// Accumulate session / turn / token / tool counters in a JSON
-// file so the user can see long-term trends and BFS savings.
-
-std::string stats_path() {
-    return config_dir() + "/stats.json";
-}
-
-json load_stats() {
-    std::ifstream f(stats_path());
-    if (!f.is_open()) {
-        return {
-            {"first_session", ""},
-            {"sessions",      0},
-            {"turns",         0},
-            {"input_tokens",  0},
-            {"output_tokens", 0},
-            {"tool_calls",    json::object()},
-        };
-    }
-    try {
-        return json::parse(f);
-    } catch (const json::exception&) {
-        return {
-            {"first_session", ""},
-            {"sessions",      0},
-            {"turns",         0},
-            {"input_tokens",  0},
-            {"output_tokens", 0},
-            {"tool_calls",    json::object()},
-        };
-    }
-}
-
-void save_stats(const json& stats) {
-    const auto dir = config_dir();
-    mkdir_p(dir);
-    std::ofstream f(stats_path());
-    if (f.is_open()) {
-        f << stats.dump(2) << "\n";
-    }
-}
-
-void stats_record_session() {
-    json s = load_stats();
-    s["sessions"] = s.value("sessions", 0) + 1;
-    if (s.value("first_session", std::string{}).empty()) {
-        const std::time_t t = std::time(nullptr);
-        std::tm tm{};
-        localtime_r(&t, &tm);
-        char date[16];
-        std::strftime(date, sizeof(date), "%Y-%m-%d", &tm);
-        s["first_session"] = date;
-    }
-    save_stats(s);
-}
-
-void stats_record_turn(int input_tokens, int output_tokens) {
-    json s = load_stats();
-    s["turns"]         = s.value("turns", 0) + 1;
-    s["input_tokens"]  = s.value("input_tokens", 0) + input_tokens;
-    s["output_tokens"] = s.value("output_tokens", 0) + output_tokens;
-    save_stats(s);
-}
-
-void stats_record_tool(const std::string& tool_name, int result_bytes,
-                       long saved_bytes = 0) {
-    json s = load_stats();
-    auto& tc = s["tool_calls"];
-    if (!tc.is_object()) tc = json::object();
-    if (!tc.contains(tool_name)) {
-        tc[tool_name] = {{"count", 0}, {"bytes", 0}, {"saved_bytes", 0}};
-    }
-    tc[tool_name]["count"] = tc[tool_name].value("count", 0) + 1;
-    tc[tool_name]["bytes"] = tc[tool_name].value("bytes", 0) + result_bytes;
-    if (saved_bytes > 0) {
-        tc[tool_name]["saved_bytes"] =
-            tc[tool_name].value("saved_bytes", static_cast<long>(0)) + saved_bytes;
-    }
-    save_stats(s);
-}
-
-// Insert thousands separators into a non-negative integer so
-// "654229" renders as "654,229" in the stats table. Keeps the
-// numbers scannable — the difference between 6,600 and 66,000
-// saved tokens is the whole story of /stats.
-static std::string thousands(long n) {
-    if (n < 0) return "-" + thousands(-n);
-    std::string s = std::to_string(n);
-    for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) {
-        s.insert(i, ",");
-    }
-    return s;
-}
-
-std::string format_stats_display() {
-    const json s = load_stats();
-    const std::string since = s.value("first_session", std::string{"(unknown)"});
-    const int  sessions = s.value("sessions", 0);
-    const int  turns    = s.value("turns", 0);
-    const long in_tok   = s.value("input_tokens",  static_cast<long>(0));
-    const long out_tok  = s.value("output_tokens", static_cast<long>(0));
-
-    // Ballpark lifetime cost using Sonnet rates ($3 / M input,
-    // $15 / M output). Stats are cross-model but Sonnet is the
-    // default and gives an order-of-magnitude number.
-    const double est_cost = (in_tok  / 1'000'000.0) * 3.0
-                          + (out_tok / 1'000'000.0) * 15.0;
-
-    // BFS counters — computed first so the summary block can
-    // lead with the savings number.
-    long read_attr_saved = 0, read_attr_used = 0;
-    int  read_attr_calls = 0;
-    long query_saved     = 0, query_used    = 0;
-    int  query_calls     = 0;
-    if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
-        const auto& tc = s["tool_calls"];
-        if (tc.contains("ReadAttr")) {
-            read_attr_saved = tc["ReadAttr"].value("saved_bytes", static_cast<long>(0));
-            read_attr_used  = tc["ReadAttr"].value("bytes",       static_cast<long>(0));
-            read_attr_calls = tc["ReadAttr"].value("count",       0);
-        }
-        if (tc.contains("Query")) {
-            query_saved = tc["Query"].value("saved_bytes", static_cast<long>(0));
-            query_used  = tc["Query"].value("bytes",       static_cast<long>(0));
-            query_calls = tc["Query"].value("count",       0);
-        }
-    }
-    const long total_saved_bytes = read_attr_saved + query_saved;
-    const long total_used_bytes  = read_attr_used  + query_used;
-    const long saved_tokens      = total_saved_bytes / 4;
-    const long used_tokens       = total_used_bytes  / 4;
-    const long full_tokens       = saved_tokens + used_tokens;
-    const int  bfs_pct           = full_tokens > 0
-        ? static_cast<int>((saved_tokens * 100) / full_tokens)
-        : 0;
-    const double bfs_cost_saved  = (saved_tokens / 1'000'000.0) * 3.0;
-
-    char buf[768];
-    std::string out;
-
-    out += "haiku-claude-cli lifetime stats";
-    if (!since.empty() && since != "(unknown)") {
-        out += " (since " + since + ")";
-    }
-    out += "\n\n";
-
-    std::snprintf(buf, sizeof(buf),
-        "  Sessions:  %d\n"
-        "  Turns:     %d\n"
-        "  Input:     %s tokens\n"
-        "  Output:    %s tokens\n"
-        "  Est cost:  $%.2f  (Sonnet rates)\n",
-        sessions, turns,
-        thousands(in_tok).c_str(),
-        thousands(out_tok).c_str(),
-        est_cost);
-    out += buf;
-
-    // ── BFS showcase block ───────────────────────────────
-    out += "\n";
-    out += "  \xE2\x94\x83 BFS — the Haiku advantage\n";
-    out += "  \xE2\x94\x83\n";
-    if (saved_tokens > 0) {
-        std::snprintf(buf, sizeof(buf),
-            "  \xE2\x94\x83  Saved %s tokens  (%d%% of full-read cost)\n"
-            "  \xE2\x94\x83  Cost avoided: $%.4f\n"
-            "  \xE2\x94\x83\n"
-            "  \xE2\x94\x83  %d BFS calls  (%d ReadAttr + %d Query)\n"
-            "  \xE2\x94\x83  Tokens they used:     %8s\n"
-            "  \xE2\x94\x83  Tokens they avoided:  %8s\n",
-            thousands(saved_tokens).c_str(), bfs_pct, bfs_cost_saved,
-            read_attr_calls + query_calls,
-            read_attr_calls, query_calls,
-            thousands(used_tokens).c_str(),
-            thousands(saved_tokens).c_str());
-    } else {
-        std::snprintf(buf, sizeof(buf),
-            "  \xE2\x94\x83  Cache empty — builds itself as Claude\n"
-            "  \xE2\x94\x83  reads files this session.\n");
-    }
-    out += buf;
-    out += "\n";
-
-    // ── Tool call table ──────────────────────────────────
-    if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
-        out += "  Tool calls (lifetime):\n";
-        for (const auto& [name, val] : s["tool_calls"].items()) {
-            const int  count = val.value("count", 0);
-            const bool is_bfs = (name == "ReadAttr"  || name == "Query"
-                              || name == "WriteAttr" || name == "IndexAttr");
-            std::snprintf(buf, sizeof(buf),
-                "    %-14s %5d calls%s\n",
-                name.c_str(), count,
-                is_bfs ? "  [BFS]" : "");
-            out += buf;
-        }
-    }
-
     return out;
 }
 
 // ── History persistence ───────────────────────────────────────
 
 std::optional<json> load_history() {
-    std::ifstream f(history_path());
+    std::ifstream f(paths::history_path());
     if (!f.is_open()) return std::nullopt;
     try {
         json j = json::parse(f);
@@ -489,10 +231,10 @@ std::optional<json> load_history() {
 }
 
 bool save_history(const json& messages, const std::string& model) {
-    const std::string path = history_path();
+    const std::string path = paths::history_path();
     const auto        slash = path.rfind('/');
     if (slash == std::string::npos) return false;
-    if (!mkdir_p(path.substr(0, slash))) return false;
+    if (!paths::mkdir_p(path.substr(0, slash))) return false;
 
     const json j = {
         {"messages", messages},
@@ -669,7 +411,7 @@ Config load_config() {
     Config cfg;
     cfg.model = kDefaultModel;
 
-    std::ifstream f(config_path());
+    std::ifstream f(paths::config_path());
     if (!f.is_open()) return cfg;
 
     try {
@@ -696,7 +438,7 @@ Config load_config() {
             cfg.compact_context_window = j["compact"].value("context_window", 0);
         }
     } catch (const json::exception& e) {
-        std::cerr << "warning: failed to parse " << config_path() << ": " << e.what() << "\n";
+        std::cerr << "warning: failed to parse " << paths::config_path() << ": " << e.what() << "\n";
     }
     return cfg;
 }
@@ -918,12 +660,12 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "  -V, --version        Print version and exit.\n"
               << "  -h, --help           Show this help and exit.\n"
               << "\n"
-              << "Config file: " << config_path() << "\n"
+              << "Config file: " << paths::config_path() << "\n"
               << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
               << "  allow_destructive_tools, prices. CLI flags override config values.\n"
               << "\n"
               << "Memory files (prepended to the system prompt, user before project):\n"
-              << "  " << user_memory_path() << "\n"
+              << "  " << paths::user_memory_path() << "\n"
               << "  ./CLAUDE.md (per-project, loaded from the current working directory)\n"
               << "\n"
               << "Authentication (in priority order):\n"
@@ -1375,7 +1117,7 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
             "cannot prompt for " + tool_name + " permission: stdin is not a "
             "terminal. Re-run with -y/--yes to auto-approve destructive tools "
             "for this invocation, set \"allow_destructive_tools\": true in "
-            + config_path() + ", or use -i/--interactive from a real terminal.";
+            + paths::config_path() + ", or use -i/--interactive from a real terminal.";
         std::cerr << tui::meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
                   << tui::dim("  " + msg) << "\n";
         if (denial_reason) *denial_reason = msg;
@@ -1647,7 +1389,7 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 const long s = total - static_cast<long>(tres.content.size());
                 if (s > 0) saved_bytes = s;
             }
-            stats_record_tool(tname, static_cast<int>(tres.content.size()), saved_bytes);
+            stats::record_tool(tname, static_cast<int>(tres.content.size()), saved_bytes);
 
             tool_results.push_back({
                 {"type",        "tool_result"},
@@ -1692,178 +1434,6 @@ struct LoopCtx {
     std::function<void()>     redraw_status;
 };
 
-// Pull http:// and https:// URLs out of a block of assistant text.
-// Handles markdown `[label](url)`, angle-bracketed `<url>`, and
-// trailing sentence punctuation (period, comma, etc.). Not a full
-// RFC 3986 parser — the goal is "grab something openable that a
-// user would recognize as a link," not bulletproof validation.
-static std::vector<std::string> extract_urls(const std::string& text) {
-    std::vector<std::string> out;
-    const char* schemes[] = { "http://", "https://" };
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t best = std::string::npos;
-        for (const char* s : schemes) {
-            const auto p = text.find(s, pos);
-            if (p < best) best = p;
-        }
-        if (best == std::string::npos) break;
-        size_t end = best;
-        while (end < text.size()) {
-            const char c = text[end];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-                c == '<' || c == '>' || c == '"' || c == '\'' ||
-                c == '(' || c == ')' || c == '[' || c == ']' ||
-                c == '{' || c == '}' || c == '|' || c == '`') break;
-            ++end;
-        }
-        std::string url = text.substr(best, end - best);
-        while (!url.empty()) {
-            const char c = url.back();
-            if (c == '.' || c == ',' || c == ';' || c == ':' ||
-                c == '!' || c == '?') url.pop_back();
-            else break;
-        }
-        if (url.size() > 10) out.push_back(std::move(url));
-        pos = end;
-    }
-    return out;
-}
-
-// Compact a response into something a notification body can show:
-// the first sentence (or line), whitespace-collapsed, capped at
-// max_chars with an ellipsis. Defensive about empty text so a
-// turn that somehow produced no content still notifies without a
-// weird empty body.
-static std::string first_sentence_for_notify(const std::string& text,
-                                             size_t max_chars) {
-    std::string body;
-    body.reserve(text.size());
-    bool prev_space = true;
-    for (char c : text) {
-        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-        if (c == ' ' && prev_space) continue;
-        body += c;
-        prev_space = (c == ' ');
-    }
-    while (!body.empty() && body.back() == ' ') body.pop_back();
-
-    const auto punct = body.find_first_of(".!?\n");
-    if (punct != std::string::npos && punct + 1 <= max_chars) {
-        body.resize(punct + 1);
-    }
-    if (body.size() > max_chars) {
-        body.resize(max_chars);
-        body += "\xE2\x80\xA6"; // UTF-8 ellipsis
-    }
-    if (body.empty()) body = "(empty response)";
-    return body;
-}
-
-// Locate the canonical Claude icon at runtime. Checked in order:
-// the source tree (dev), the HPKG-installed data dir, and the
-// non-packaged install dir. First match wins; empty return means
-// "skip the --icon flag."
-#ifdef __HAIKU__
-static std::string find_claude_icon_path() {
-    static const char* const candidates[] = {
-        "assets/claude-icon.hvif",
-        "/boot/system/data/claude-cli/icon.hvif",
-        "/boot/system/non-packaged/data/claude-cli/icon.hvif",
-        "assets/claude-icon-preview.png",
-        nullptr
-    };
-    for (int i = 0; candidates[i]; ++i) {
-        struct stat st;
-        if (::stat(candidates[i], &st) == 0) return candidates[i];
-    }
-    return {};
-}
-#endif
-
-// Pick a playful past-tense notification title that pairs with the
-// spinner's gerund verbs. The spinner says "Pondering…" during the
-// turn; the bubble that pops afterward says "Pondering complete
-// (24s)." Small personality win; adds nothing to the payload beyond
-// the bytes of the chosen phrase.
-static std::string pick_playful_title(double elapsed) {
-    static const char* const titles[] = {
-        "Pondering complete",
-        "Cogitation concluded",
-        "Musing resolved",
-        "Contemplation cleared",
-        "Reverie returned",
-        "Reflection ready",
-        "Deliberation delivered",
-        "Rumination wrapped",
-        "Thought crystallized",
-        "Percolating done",
-        "Brewing finished",
-        "Thinking through",
-    };
-    constexpr int n = sizeof(titles) / sizeof(titles[0]);
-    const int idx = static_cast<int>(std::time(nullptr)) % n;
-    char out[128];
-    std::snprintf(out, sizeof(out), "%s (%.0fs)", titles[idx], elapsed);
-    return out;
-}
-
-// Fire a desktop notification via Haiku's `notify` CLI. Runs as a
-// short-lived child (notify-server is BMessage-based, so the CLI
-// itself returns in milliseconds once the message is dispatched).
-// No-op on non-Haiku builds so macOS dev under nix stays silent.
-static void send_desktop_notification(const std::string& title,
-                                      const std::string& body) {
-#ifdef __HAIKU__
-    const std::string icon = find_claude_icon_path();
-    pid_t pid = fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        // Detach from the parent's session + controlling
-        // terminal. Without this, notify inherits the REPL's
-        // cbreak termios and scroll-region state and the
-        // BMessage dispatch to notification_server silently
-        // drops the alert even though the `notify` child
-        // exits with status 0.
-        setsid();
-        int devnull = ::open("/dev/null", O_RDWR);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            if (devnull > 2) close(devnull);
-        }
-
-        // Haiku's `notify` doesn't support `--` as an
-        // end-of-options sentinel — it errors with
-        // "Unrecognized option --" and the notification never
-        // fires. Put the body straight after the flags.
-        // --icon is added conditionally so we don't hand notify a
-        // missing path (it would silently skip the icon or, worse,
-        // fail the whole dispatch on older Haiku builds).
-        std::vector<const char*> argv;
-        argv.reserve(16);
-        argv.push_back("notify");
-        argv.push_back("--type");    argv.push_back("information");
-        argv.push_back("--group");   argv.push_back("Claude CLI");
-        argv.push_back("--title");   argv.push_back(title.c_str());
-        argv.push_back("--timeout"); argv.push_back("8");
-        if (!icon.empty()) {
-            argv.push_back("--icon");
-            argv.push_back(icon.c_str());
-        }
-        argv.push_back(body.c_str());
-        argv.push_back(nullptr);
-        execvp("notify", const_cast<char* const*>(argv.data()));
-        _exit(127);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-#else
-    (void)title;
-    (void)body;
-#endif
-}
 
 // Safely wrap a string in single quotes for a shell command. Any
 // embedded `'` is split out as `'\''`. Used by /open so a URL with
@@ -2041,15 +1611,15 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         return SlashAction::Continue;
     }
     if (cmd == "/stats") {
-        std::cout << tui::meta(format_stats_display()) << "\n";
+        std::cout << tui::meta(stats::format_display()) << "\n";
         return SlashAction::Continue;
     }
     if (cmd == "/memory") {
-        const std::string target = (args == "user") ? user_memory_path()
-                                                     : project_memory_path();
+        const std::string target = (args == "user") ? paths::user_memory_path()
+                                                     : paths::project_memory_path();
         if (args == "user") {
             const auto slash = target.rfind('/');
-            if (slash != std::string::npos) mkdir_p(target.substr(0, slash));
+            if (slash != std::string::npos) paths::mkdir_p(target.substr(0, slash));
         }
         const char* editor_env = std::getenv("EDITOR");
         const std::string editor = editor_env && *editor_env ? editor_env : "nano";
@@ -2713,9 +2283,9 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     json messages = json::array();
     std::string model = initial_model;
 
-    repl::init(repl_history_path());
+    repl::init(paths::repl_history_path());
 
-    commands::load(config_dir() + "/commands");
+    commands::load(paths::config_dir() + "/commands");
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
         "/todos", "/memory", "/stats", "/open", "/notify",
@@ -2730,7 +2300,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     Auth auth = initial_auth;
 
     hooks::fire(hooks::Event::SessionStart, json::object());
-    stats_record_session();
+    stats::record_session();
     log_line("session start (model=" + model + ")");
 
     int turn_count         = 0;
@@ -2753,10 +2323,10 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         if (auto loaded = load_history(); loaded && loaded->is_array()) {
             messages = *loaded;
             std::cout << tui::meta("[resumed " + std::to_string(messages.size())
-                                   + " messages from " + history_path() + "]")
+                                   + " messages from " + paths::history_path() + "]")
                       << "\n";
         } else {
-            std::cout << tui::meta("[no prior session to resume at " + history_path() + "]")
+            std::cout << tui::meta("[no prior session to resume at " + paths::history_path() + "]")
                       << "\n";
         }
     }
@@ -3020,12 +2590,12 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         ++turn_count;
         session_input  += result.input_tokens;
         session_output += result.output_tokens;
-        stats_record_turn(result.input_tokens, result.output_tokens);
+        stats::record_turn(result.input_tokens, result.output_tokens);
 
         // Harvest any URLs Claude mentioned so `/open N` can launch
         // them later. Dedup in insertion order so the index stays
         // stable across turns.
-        for (auto& url : extract_urls(result.assistant_text)) {
+        for (auto& url : notify::extract_urls(result.assistant_text)) {
             if (std::find(session_urls.begin(), session_urls.end(), url)
                 == session_urls.end()) {
                 session_urls.push_back(std::move(url));
@@ -3038,9 +2608,9 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         // Body is the first sentence of the reply so the user can
         // glance at the notification and know whether to come back.
         if (notify_enabled && elapsed >= notify_min_duration) {
-            send_desktop_notification(
-                pick_playful_title(elapsed),
-                first_sentence_for_notify(result.assistant_text, 120));
+            notify::send(
+                notify::pick_playful_title(elapsed),
+                notify::first_sentence(result.assistant_text, 120));
         }
 
         // Auto-compact: if this turn's input-token count crosses
@@ -3567,8 +3137,8 @@ int run_telegram_bridge(const Config& cfg) {
     // Main thread — libedit-backed local REPL. Each committed line
     // grabs the same process_mutex so it serializes cleanly against
     // concurrent Telegram traffic.
-    repl::init(repl_history_path());
-    commands::load(config_dir() + "/commands");
+    repl::init(paths::repl_history_path());
+    commands::load(paths::config_dir() + "/commands");
     {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
