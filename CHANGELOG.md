@@ -6,6 +6,96 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-17
+
+### Added
+- **BFS default-on** — the four BFS attribute tools (Query,
+  ReadAttr, WriteAttr, IndexAttr) are now surfaced
+  prominently in the system prompt with usage guidance, and
+  the CLI auto-seeds a `claude:summary` attribute the first
+  time Claude reads a source file. Later sessions read the
+  summary via ReadAttr (~10–30 tokens) instead of the full
+  file (~thousands), persisting understanding across
+  sessions for free. A BFS-summary snapshot of the project
+  is also preloaded into the system prompt so Claude knows
+  what's already indexed before the first question.
+- **Prompt caching** — system prompt, tool definitions, and
+  the last user turn are now marked with
+  `cache_control: ephemeral`. Subsequent turns in the same
+  session hit the cache and process input ~5–10× faster at
+  ~10% of the normal input-token cost.
+- **Auto /compact** — when the conversation approaches ~80%
+  of the model's context window, a /compact runs
+  automatically to summarize the history and reclaim
+  headroom. The auto-fire also upgrades existing
+  `claude:summary` attributes in the same pass.
+- **Lifetime stats** — `/stats` command shows sessions,
+  turns, tokens, estimated cost, and a BFS-advantage block
+  that computes real bytes saved from per-call `stat()` of
+  files read via ReadAttr vs. what a full Read would have
+  cost. Persisted in `<config_dir>/stats.json`.
+- **Desktop notifications** (Haiku only) — `/notify on|off`
+  fires a Haiku notification bubble after long turns
+  complete, with the project's HAL icon and playful
+  past-tense titles ("Pondering complete (24s)",
+  "Cogitation concluded (18s)", …) that pair with the
+  spinner's gerund verbs. Child process detaches from the
+  parent session so the notification_server dispatch works
+  through a running REPL.
+- **/open URL launcher** — after a turn, any http(s) URLs
+  in the reply are collected and `/open` launches the
+  `open` command on them (Haiku's native launcher, also
+  works on macOS).
+- **/model with no args** lists all available models from
+  the Anthropic `/v1/models` endpoint so you can pick a
+  model without leaving the REPL.
+- **Build modes** — `make release` now produces an
+  optimized binary (`-O3 -flto -Wl,-s`) in `build-release/`,
+  27% smaller than the dev build. Dev (`make`) is unchanged.
+- **Persistent understanding workflow** — `WriteAttr` is
+  auto-approved for the `claude:*` namespace so Claude can
+  record `claude:summary` / `claude:component` /
+  `claude:reviewed` without a permission prompt, but system
+  attributes (BEOS:*, MAIL:*, Audio:*, …) remain
+  permission-gated.
+
+### Changed
+- **Spinner** now renders during tool execution too (not
+  just API streaming), so the UI never goes silent between
+  "calling tool" and "tool result received".
+- **TUI palette** consolidated — rule lines, meta text,
+  status bar, and the dim channel all use 256-color
+  gray-244 instead of a mix of CSI 2;90m and 256-color,
+  for consistent brightness across terminals.
+- **Spinner glyph + verb** are now rainbow-colorized per
+  frame for a subtle personality nod.
+- **main.cpp refactor** — pulled `paths`, `stats`, and
+  `notify` into their own modules. Clean parallel build
+  drops from 17.0s to 13.4s (-21%); incremental builds of
+  the extracted modules rebuild in under a second. No
+  behavior change.
+
+### Fixed
+- **Notification dispatch** — `notify` child now detaches
+  from the parent session and redirects stdio to /dev/null
+  before execvp so notification_server actually delivers
+  the BMessage. Also drops the `--` sentinel, which Haiku's
+  `notify` doesn't accept.
+- **/model and /clear** now redraw the status bar so the
+  model name / turn counters stay visible after either
+  command.
+- **BFS preload** now skips non-UTF-8 attribute lines so a
+  stray binary summary can't break the system-prompt
+  snapshot.
+- **Config drift** — `PKG_VERSION` in Makefile now tracks
+  `kVersion` in source (both read `1.3.0` here).
+
+### Build
+- `make release` target (see Added) for optimized release
+  builds.
+- `build-release/` added to `.gitignore`.
+- `CLAUDE.md` documents both modes.
+
 ## [1.2.0] - 2026-04-16
 
 ### Added

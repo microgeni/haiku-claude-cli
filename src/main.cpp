@@ -46,7 +46,7 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr const char* kVersion      = "1.2.0-dev";
+constexpr const char* kVersion      = "1.3.0";
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
 constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
