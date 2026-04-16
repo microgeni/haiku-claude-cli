@@ -968,6 +968,62 @@ CURL* get_curl() {
 }
 } // namespace
 
+// Fetch the list of available models from GET /v1/models.
+// Returns a vector of (id, display_name) pairs sorted by `created_at`
+// descending (newest first), matching the default API ordering.
+// On any error the returned vector is empty.
+struct ModelEntry { std::string id; std::string display_name; };
+
+std::vector<ModelEntry> fetch_models(const Auth& auth) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return {};
+
+    // Accumulate the response body.
+    std::string body;
+    auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+        auto* s = static_cast<std::string*>(userdata);
+        s->append(ptr, size * nmemb);
+        return size * nmemb;
+    };
+
+    curl_slist* headers = nullptr;
+    if (auth.kind == AuthKind::OAuth) {
+        headers = curl_slist_append(headers, ("authorization: Bearer " + auth.credential).c_str());
+        headers = curl_slist_append(headers, (std::string("anthropic-beta: ") + kOAuthBeta).c_str());
+    } else {
+        headers = curl_slist_append(headers, ("x-api-key: " + auth.credential).c_str());
+    }
+    headers = curl_slist_append(headers, (std::string("anthropic-version: ") + kApiVersion).c_str());
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/models?limit=100");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<size_t(*)(char*,size_t,size_t,void*)>(write_cb));
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+
+    const CURLcode res = curl_easy_perform(curl);
+    long http_status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || http_status != 200) return {};
+
+    std::vector<ModelEntry> out;
+    try {
+        const auto j = json::parse(body);
+        if (!j.contains("data") || !j["data"].is_array()) return {};
+        for (const auto& m : j["data"]) {
+            ModelEntry e;
+            e.id           = m.value("id", "");
+            e.display_name = m.value("display_name", e.id);
+            if (!e.id.empty()) out.push_back(std::move(e));
+        }
+    } catch (...) {}
+    return out;
+}
+
 SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens,
                              const json& messages, const std::string& custom_system,
                              bool include_tools) {
@@ -1959,7 +2015,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "slash commands:\n"
             "  /help              this list\n"
             "  /clear             reset the running conversation\n"
-            "  /model <name>      swap the active model\n"
+            "  /model [name]      list all available models, or swap to <name>\n"
             "  /compact           summarize and replace the running history\n"
             "  /usage             session tokens, cost estimate, subscription windows\n"
             "  /todos             show the current in-session todo list\n"
@@ -2098,7 +2154,24 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
     }
     if (cmd == "/model") {
         if (args.empty()) {
-            std::cout << tui::meta("[current model: " + ctx.model + "]") << "\n";
+            // List all available models from the API, marking the active one.
+            const auto models = fetch_models(ctx.auth);
+            if (models.empty()) {
+                std::cout << tui::meta("[current model: " + ctx.model + "]") << "\n";
+                std::cout << tui::meta("[could not fetch model list — check connection/key]") << "\n";
+            } else {
+                std::string listing = "available models (active marked with *):\n";
+                for (const auto& m : models) {
+                    const bool active = (m.id == ctx.model);
+                    listing += std::string("  ") + (active ? "* " : "  ")
+                             + m.id;
+                    if (m.display_name != m.id)
+                        listing += "  (" + m.display_name + ")";
+                    listing += "\n";
+                }
+                listing += "\nuse /model <id> to switch";
+                std::cout << tui::meta(listing) << "\n";
+            }
         } else {
             ctx.model = args;
             std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
