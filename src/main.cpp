@@ -228,15 +228,20 @@ void stats_record_turn(int input_tokens, int output_tokens) {
     save_stats(s);
 }
 
-void stats_record_tool(const std::string& tool_name, int result_bytes) {
+void stats_record_tool(const std::string& tool_name, int result_bytes,
+                       long saved_bytes = 0) {
     json s = load_stats();
     auto& tc = s["tool_calls"];
     if (!tc.is_object()) tc = json::object();
     if (!tc.contains(tool_name)) {
-        tc[tool_name] = {{"count", 0}, {"bytes", 0}};
+        tc[tool_name] = {{"count", 0}, {"bytes", 0}, {"saved_bytes", 0}};
     }
     tc[tool_name]["count"] = tc[tool_name].value("count", 0) + 1;
     tc[tool_name]["bytes"] = tc[tool_name].value("bytes", 0) + result_bytes;
+    if (saved_bytes > 0) {
+        tc[tool_name]["saved_bytes"] =
+            tc[tool_name].value("saved_bytes", static_cast<long>(0)) + saved_bytes;
+    }
     save_stats(s);
 }
 
@@ -274,27 +279,36 @@ std::string format_stats_display() {
             out += buf;
         }
 
-        // BFS savings estimate: ReadAttr bytes vs. what a full
-        // Read would have cost. Each ReadAttr call returned N
-        // bytes of attribute data; the corresponding file would
-        // have been ~10-100x larger. Use a conservative 50x
-        // multiplier as a rough estimate.
+        // BFS savings — actual bytes saved by the Haiku-native
+        // ReadAttr + Query tools vs. the equivalent full-file
+        // Read approach. Computed at tool-call time via stat()
+        // on the target file(s) so the numbers are measured,
+        // not estimated. This is the headline Haiku-native
+        // feature of the CLI; give it its own block.
         const auto& tc = s["tool_calls"];
-        if (tc.contains("ReadAttr")) {
-            const int attr_bytes  = tc["ReadAttr"].value("bytes", 0);
-            const int attr_tokens = attr_bytes / 4;
-            const int est_full    = attr_bytes * 50;
-            const int est_tokens  = est_full / 4;
-            const int saved       = est_tokens - attr_tokens;
-            if (saved > 0) {
-                std::snprintf(buf, sizeof(buf),
-                    "  BFS savings estimate:\n"
-                    "    Attr reads:    %d tokens\n"
-                    "    Full reads:    ~%d tokens (est. 50x)\n"
-                    "    Saved:         ~%d tokens\n",
-                    attr_tokens, est_tokens, saved);
-                out += buf;
-            }
+        long   total_saved_bytes = 0;
+        long   total_attr_bytes  = 0;
+        int    bfs_calls         = 0;
+        for (const char* t : {"ReadAttr", "Query"}) {
+            if (!tc.contains(t)) continue;
+            total_saved_bytes += tc[t].value("saved_bytes", static_cast<long>(0));
+            total_attr_bytes  += tc[t].value("bytes",       static_cast<long>(0));
+            bfs_calls         += tc[t].value("count",       0);
+        }
+        if (total_saved_bytes > 0) {
+            const long saved_tokens = total_saved_bytes / 4;
+            const long attr_tokens  = total_attr_bytes  / 4;
+            const long full_tokens  = saved_tokens + attr_tokens;
+            const int  pct = full_tokens > 0
+                ? static_cast<int>((saved_tokens * 100) / full_tokens)
+                : 0;
+            std::snprintf(buf, sizeof(buf),
+                "\n"
+                "  BFS attribute tools (Haiku-native):\n"
+                "    %d calls saved %ld tokens (%d%% of what full-file reads\n"
+                "    would have cost — %ld tokens used vs. %ld tokens avoided).\n",
+                bfs_calls, saved_tokens, pct, attr_tokens, saved_tokens);
+            out += buf;
         }
     }
     return out;
