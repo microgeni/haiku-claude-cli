@@ -1698,6 +1698,54 @@ static std::string first_sentence_for_notify(const std::string& text,
     return body;
 }
 
+// Locate the canonical Claude icon at runtime. Checked in order:
+// the source tree (dev), the HPKG-installed data dir, and the
+// non-packaged install dir. First match wins; empty return means
+// "skip the --icon flag."
+#ifdef __HAIKU__
+static std::string find_claude_icon_path() {
+    static const char* const candidates[] = {
+        "assets/claude-icon.hvif",
+        "/boot/system/data/claude-cli/icon.hvif",
+        "/boot/system/non-packaged/data/claude-cli/icon.hvif",
+        "assets/claude-icon-preview.png",
+        nullptr
+    };
+    for (int i = 0; candidates[i]; ++i) {
+        struct stat st;
+        if (::stat(candidates[i], &st) == 0) return candidates[i];
+    }
+    return {};
+}
+#endif
+
+// Pick a playful past-tense notification title that pairs with the
+// spinner's gerund verbs. The spinner says "Pondering…" during the
+// turn; the bubble that pops afterward says "Pondering complete
+// (24s)." Small personality win; adds nothing to the payload beyond
+// the bytes of the chosen phrase.
+static std::string pick_playful_title(double elapsed) {
+    static const char* const titles[] = {
+        "Pondering complete",
+        "Cogitation concluded",
+        "Musing resolved",
+        "Contemplation cleared",
+        "Reverie returned",
+        "Reflection ready",
+        "Deliberation delivered",
+        "Rumination wrapped",
+        "Thought crystallized",
+        "Percolating done",
+        "Brewing finished",
+        "Thinking through",
+    };
+    constexpr int n = sizeof(titles) / sizeof(titles[0]);
+    const int idx = static_cast<int>(std::time(nullptr)) % n;
+    char out[128];
+    std::snprintf(out, sizeof(out), "%s (%.0fs)", titles[idx], elapsed);
+    return out;
+}
+
 // Fire a desktop notification via Haiku's `notify` CLI. Runs as a
 // short-lived child (notify-server is BMessage-based, so the CLI
 // itself returns in milliseconds once the message is dispatched).
@@ -1705,6 +1753,7 @@ static std::string first_sentence_for_notify(const std::string& text,
 static void send_desktop_notification(const std::string& title,
                                       const std::string& body) {
 #ifdef __HAIKU__
+    const std::string icon = find_claude_icon_path();
     pid_t pid = fork();
     if (pid < 0) return;
     if (pid == 0) {
@@ -1727,16 +1776,23 @@ static void send_desktop_notification(const std::string& title,
         // end-of-options sentinel — it errors with
         // "Unrecognized option --" and the notification never
         // fires. Put the body straight after the flags.
-        const char* argv[] = {
-            "notify",
-            "--type",    "information",
-            "--group",   "Claude CLI",
-            "--title",   title.c_str(),
-            "--timeout", "8",
-            body.c_str(),
-            nullptr
-        };
-        execvp("notify", const_cast<char* const*>(argv));
+        // --icon is added conditionally so we don't hand notify a
+        // missing path (it would silently skip the icon or, worse,
+        // fail the whole dispatch on older Haiku builds).
+        std::vector<const char*> argv;
+        argv.reserve(16);
+        argv.push_back("notify");
+        argv.push_back("--type");    argv.push_back("information");
+        argv.push_back("--group");   argv.push_back("Claude CLI");
+        argv.push_back("--title");   argv.push_back(title.c_str());
+        argv.push_back("--timeout"); argv.push_back("8");
+        if (!icon.empty()) {
+            argv.push_back("--icon");
+            argv.push_back(icon.c_str());
+        }
+        argv.push_back(body.c_str());
+        argv.push_back(nullptr);
+        execvp("notify", const_cast<char* const*>(argv.data()));
         _exit(127);
     }
     int status = 0;
@@ -2900,11 +2956,8 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
         // Body is the first sentence of the reply so the user can
         // glance at the notification and know whether to come back.
         if (notify_enabled && elapsed >= notify_min_duration) {
-            char title[96];
-            std::snprintf(title, sizeof(title),
-                "Claude response ready (%.0fs)", elapsed);
             send_desktop_notification(
-                title,
+                pick_playful_title(elapsed),
                 first_sentence_for_notify(result.assistant_text, 120));
         }
 

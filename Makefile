@@ -28,6 +28,7 @@ DEPS := $(OBJS:.o=.d)
 PREFIX  ?= /boot/system/non-packaged
 BINDIR  ?= $(PREFIX)/bin
 MANDIR  ?= $(PREFIX)/documentation/man/man1
+DATADIR ?= $(PREFIX)/data/claude-cli
 
 # Haiku vector icon stamped onto the installed binary via
 # `addattr … BEOS:ICON`. Optional: if the file is missing or
@@ -73,6 +74,11 @@ install: $(BIN)
 	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/claude
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 644 docs/claude.1 $(DESTDIR)$(MANDIR)/claude.1
+	@if [ -f "$(ICON_HVIF)" ]; then \
+	    echo "  installing icon to $(DATADIR)/icon.hvif"; \
+	    install -d "$(DESTDIR)$(DATADIR)"; \
+	    install -m 644 "$(ICON_HVIF)" "$(DESTDIR)$(DATADIR)/icon.hvif"; \
+	fi
 	@if command -v addattr >/dev/null 2>&1; then \
 	    if [ -f "$(ICON_HVIF)" ]; then \
 	        echo "  stamping BEOS:ICON from $(ICON_HVIF)"; \
@@ -96,6 +102,11 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	mkdir -p "$(PKG_STAGE)/bin" "$(PKG_STAGE)/documentation/man/man1"
 	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
 	cp docs/claude.1 "$(PKG_STAGE)/documentation/man/man1/claude.1"
+	@if [ -f "$(ICON_HVIF)" ]; then \
+	    echo "  staging icon to data/claude-cli/icon.hvif"; \
+	    mkdir -p "$(PKG_STAGE)/data/claude-cli"; \
+	    cp "$(ICON_HVIF)" "$(PKG_STAGE)/data/claude-cli/icon.hvif"; \
+	fi
 	@if command -v addattr >/dev/null 2>&1; then \
 	    if [ -f "$(ICON_HVIF)" ]; then \
 	        echo "  stamping BEOS:ICON from $(ICON_HVIF) onto staged binary"; \
