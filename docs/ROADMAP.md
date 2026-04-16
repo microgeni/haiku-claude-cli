@@ -337,6 +337,66 @@ Deferred for a later slice:
 - Voice notes / image attachments from Telegram.
 - Multi-chat / group-chat support.
 
+### v1.1.1 — Reliability fixes ✓
+
+- [x] One-shot runs no longer silently deny destructive tools.
+      `prompt_permission` now detects non-TTY stdin and emits a
+      loud error pointing at `-y`/`--yes` or
+      `allow_destructive_tools` config key.
+- [x] `-y`/`--yes` CLI flag auto-approves destructive tools for
+      one-shot and piped-stdin runs.
+- [x] Top-level `allow_destructive_tools` config key, persistent
+      equivalent of `-y`.
+- [x] `max_tokens` truncation is no longer silent — loud stderr
+      warning with output/max numbers and re-run guidance.
+- [x] Orphan `tool_use` blocks on truncation stripped from REPL
+      history to avoid API 400 on continuation.
+- [x] Default `max_tokens` raised from 1024 to 8192.
+- [x] `/mute` and `/unmute` bridge commands gating every outbound
+      Telegram Bot API call.
+
+### v1.1.2 — TUI + /remote-control ✓
+
+Major TUI overhaul and in-REPL remote control toggle.
+
+- [x] **Fixed-bottom status frame** via DECSTBM scroll region.
+      4-row frame: rule above input, fixed input row, rule below,
+      status content (model, turn, tokens, max). SIGWINCH rebuild,
+      atexit crash-safe teardown.
+- [x] **Rich spinner** matching Claude Code style — rotating star
+      glyphs (✶ ✷ ✸ ✹ ✺ ✻ ✼ ✽), randomized gerund verb with
+      ~1 Hz dim/bright pulse, live `↑ N tokens` count from
+      `message_start`, `Xm Ys` elapsed format, `esc:cancel` hint.
+- [x] **Markdown table alignment** — pipe tables are buffered,
+      column widths computed, emitted with box-drawing borders
+      (┌ ┬ ┐ ├ ┼ ┤ └ ┴ ┘), bolded headers, and `:---`/`---:`/
+      `:---:` alignment markers honored.
+- [x] **ESC cancels in-flight work** — stdin goes cbreak during
+      curl, a background thread watches for bare `0x1B`, sets
+      `g_interrupted` via the same path as Ctrl+C.
+- [x] **Cursor hidden during streaming** via DECTCEM so it
+      doesn't bounce through the rendered output.
+- [x] **Tool permission prompts on the fixed input row** — the
+      question text goes into the scroll history, the y/a/n
+      answer reads at the `>` prompt, choice is replayed as a
+      dim `-> yes/always/no` line.
+- [x] **`/remote-control` toggle** — spawns a lean background
+      Telegram poller from inside `claude -i`. Toggle on/off,
+      fast stop via curl progress callback (~1 s instead of
+      ~20 s). Green `Remote Control active` label in the status
+      row. Local turns mirror to the primary Telegram chat.
+      Each Telegram user has independent rolling history.
+- [x] **Session resilience** — TCP keepalive
+      (60 s idle / 30 s interval), per-turn OAuth token refresh,
+      persistent curl handle with connection reuse, exponential
+      backoff retry on 429/5xx/curl-transient (3 attempts,
+      1 s / 2 s / 4 s).
+- [x] **Tab completion** for hyphenated slash commands —
+      `rl_completer_word_break_characters` set to whitespace only.
+- [x] **SIGWINCH handling** — `tui::terminal_width()` /
+      `terminal_rows()` cache refreshed on resize, scroll region
+      rebuilt between prompts.
+
 ### v1.0 — Stable release ✓
 
 Polish, docs, and Haiku-native integration.
@@ -354,8 +414,8 @@ Polish, docs, and Haiku-native integration.
       parsed for `error.message`, well-known codes (401/403/429/5xx)
       get plain-language explanations, and the opaque Claude Code
       "Error" 429 gate is distinguished from a real rate limit.
-      Auto-refresh of expired OAuth tokens mid-stream is still a
-      future polish item.
+      Per-turn OAuth token refresh added in v1.1.2 so long sessions
+      don't fail mid-conversation.
 - [x] End-to-end README walkthrough rewritten covering install, auth,
       REPL, slash commands, tools, memory, hooks, MCP, config keys,
       and environment variables.
