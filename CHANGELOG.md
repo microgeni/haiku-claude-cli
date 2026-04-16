@@ -6,6 +6,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **BFS attribute tools** (Haiku only, `#ifdef __HAIKU__`):
+  - `Query` — execute BFS filesystem queries via the `query`
+    command. Indexed attribute lookups in O(1) instead of
+    directory traversal. Auto-approved (read-only).
+  - `ReadAttr` — read or list extended attributes on a file
+    via `catattr` / `listattr`. Auto-approved.
+  - `WriteAttr` — write typed attributes via `addattr`.
+    Permission-gated like `Write` / `Edit`. Preview shows the
+    path, attribute name, type, and value. Enables the
+    `claude:summary` / `claude:component` workflow for
+    persisting understanding across sessions.
+  - `IndexAttr` — create BFS attribute indices via `mkindex`.
+    Permission-gated with a volume-level warning in the
+    preview.
+  All four share a new `exec_capture()` helper that
+  fork/exec/waitpid's a command and captures output (same
+  pattern as `run_bash` but reusable). Definitions are
+  registered via `haiku_definitions()` and appended to
+  `tools::definitions()` only on `__HAIKU__` builds; macOS
+  builds skip them entirely.
+- **BFS tools benchmark script** at
+  `tests/bfs_tools_test.sh` — measures token savings
+  (full-read vs. summary-read) and query latency (glob vs.
+  BFS query) on real Haiku hardware. Writes test
+  `claude:summary` attributes, reads them back, compares
+  tokens, times BFS queries, and cleans up.
+
+### Fixed
+- **Session resilience** — TCP keepalive (60 s / 30 s),
+  15 s connect timeout, per-turn OAuth token refresh,
+  persistent curl handle with connection reuse, exponential
+  backoff retry on 429/5xx/curl-transient (3 attempts,
+  1 s / 2 s / 4 s).
+- **`/remote-control` Telegram output now visible on
+  terminal** via DECSC/DECRC cursor save/restore into the
+  scroll region. Local turns mirror to the primary Telegram
+  chat via `mirror_to_primary()`.
+
 ## [1.1.2] - 2026-04-15
 
 ### Added

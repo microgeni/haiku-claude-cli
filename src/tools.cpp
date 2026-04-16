@@ -844,6 +844,249 @@ json builtin_definitions() {
     });
 }
 
+// ── BFS attribute tools (Haiku only) ──────────────────────────
+//
+// These wrap Haiku's command-line attribute/query utilities so
+// Claude can use the filesystem as a database. Guarded by
+// __HAIKU__ — on macOS/Linux builds the tools simply don't
+// exist and Claude never sees them.
+
+#ifdef __HAIKU__
+
+ToolResult exec_capture(const char* const argv[]) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return {std::string("error: pipe() failed: ") + std::strerror(errno), true};
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        return {std::string("error: fork() failed: ") + std::strerror(errno), true};
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
+        close(pipefd[1]);
+        execvp(argv[0], const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string output;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+        output.append(buf, static_cast<size_t>(n));
+    }
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    constexpr size_t kMaxBytes = 32 * 1024;
+    if (output.size() > kMaxBytes) {
+        output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
+    }
+    if (!WIFEXITED(status)) {
+        return {"error: command terminated abnormally\n" + output, true};
+    }
+    const int code = WEXITSTATUS(status);
+    if (code != 0 && output.empty()) {
+        return {"exit " + std::to_string(code), true};
+    }
+    if (code != 0) {
+        return {"exit " + std::to_string(code) + "\n" + output, true};
+    }
+    return {output.empty() ? "(no output)" : output, false};
+}
+
+ToolResult run_query(const json& input) {
+    const std::string expr = input.value("expression", std::string{});
+    if (expr.empty()) {
+        return {"error: Query requires an `expression` argument", true};
+    }
+    const std::string vol = input.value("volume", std::string{});
+    if (vol.empty()) {
+        const char* argv[] = {"query", expr.c_str(), nullptr};
+        return exec_capture(argv);
+    }
+    const char* argv[] = {"query", "-v", vol.c_str(), expr.c_str(), nullptr};
+    return exec_capture(argv);
+}
+
+ToolResult run_read_attr(const json& input) {
+    const std::string path = input.value("path", std::string{});
+    if (path.empty()) {
+        return {"error: ReadAttr requires a `path` argument", true};
+    }
+    const auto names = input.value("names", std::vector<std::string>{});
+    if (names.empty()) {
+        const char* argv[] = {"listattr", path.c_str(), nullptr};
+        return exec_capture(argv);
+    }
+    std::string combined;
+    for (const auto& name : names) {
+        const char* argv[] = {"catattr", "-d", name.c_str(), path.c_str(), nullptr};
+        auto result = exec_capture(argv);
+        if (!combined.empty()) combined += "\n";
+        combined += name + " : " + result.content;
+        if (result.is_error) combined += " [error]";
+    }
+    return {combined, false};
+}
+
+ToolResult run_write_attr(const json& input) {
+    const std::string path  = input.value("path", std::string{});
+    const std::string name  = input.value("name", std::string{});
+    const std::string value = input.value("value", std::string{});
+    const std::string type  = input.value("type", std::string{"string"});
+    if (path.empty() || name.empty()) {
+        return {"error: WriteAttr requires `path` and `name` arguments", true};
+    }
+    const char* argv[] = {"addattr", "-t", type.c_str(),
+                          name.c_str(), value.c_str(),
+                          path.c_str(), nullptr};
+    return exec_capture(argv);
+}
+
+ToolResult run_index_attr(const json& input) {
+    const std::string name = input.value("name", std::string{});
+    const std::string type = input.value("type", std::string{});
+    if (name.empty() || type.empty()) {
+        return {"error: IndexAttr requires `name` and `type` arguments", true};
+    }
+    const char* argv[] = {"mkindex", "-t", type.c_str(),
+                          name.c_str(), nullptr};
+    return exec_capture(argv);
+}
+
+std::string preview_write_attr(const json& input) {
+    const std::string path  = input.value("path", std::string{});
+    const std::string name  = input.value("name", std::string{});
+    const std::string value = input.value("value", std::string{});
+    const std::string type  = input.value("type", std::string{"string"});
+    return "  -> WriteAttr " + path + "\n"
+         + "     " + name + " (" + type + ") = " + value;
+}
+
+std::string preview_index_attr(const json& input) {
+    const std::string name = input.value("name", std::string{});
+    const std::string type = input.value("type", std::string{});
+    return "  -> IndexAttr: mkindex -t " + type + " " + name + "\n"
+         + "     WARNING: creates a volume-level index";
+}
+
+json haiku_definitions() {
+    return json::array({
+        {
+            {"name", "Query"},
+            {"description",
+                "Execute a BFS filesystem query and return matching file paths. "
+                "Uses Haiku's indexed attribute system for O(1) lookups instead "
+                "of directory traversal. Example expressions: "
+                "'BEOS:TYPE == \"text/x-source-code\"', "
+                "'name == \"*.cpp\" && last_modified > %1hour%', "
+                "'claude:component == \"networking\"'. "
+                "Returns one path per line, truncated at 32 KiB."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"expression", {
+                        {"type", "string"},
+                        {"description", "BFS query expression."},
+                    }},
+                    {"volume", {
+                        {"type", "string"},
+                        {"description", "Volume to search. Defaults to the volume containing cwd."},
+                    }},
+                }},
+                {"required", json::array({"expression"})},
+            }},
+        },
+        {
+            {"name", "ReadAttr"},
+            {"description",
+                "Read extended attributes from a file on Haiku's BFS filesystem. "
+                "Pass specific attribute names to read their values, or pass an "
+                "empty names array to list all attributes and their types. "
+                "Useful for reading claude:summary, BEOS:TYPE, Audio:Artist, "
+                "and any other metadata stored on the file."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"path", {
+                        {"type", "string"},
+                        {"description", "File path to read attributes from."},
+                    }},
+                    {"names", {
+                        {"type", "array"},
+                        {"items", {{"type", "string"}}},
+                        {"description", "Attribute names to read. Empty or omitted = list all."},
+                    }},
+                }},
+                {"required", json::array({"path"})},
+            }},
+        },
+        {
+            {"name", "WriteAttr"},
+            {"description",
+                "Write a typed extended attribute to a file on Haiku's BFS "
+                "filesystem. Requires user permission (same tier as Write/Edit). "
+                "The claude: namespace is reserved for CLI metadata — use "
+                "claude:summary, claude:component, claude:reviewed, etc. to "
+                "persist understanding across sessions. Attributes survive "
+                "git operations and branch switches."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"path", {
+                        {"type", "string"},
+                        {"description", "File path to write the attribute on."},
+                    }},
+                    {"name", {
+                        {"type", "string"},
+                        {"description", "Attribute name, e.g. 'claude:summary'."},
+                    }},
+                    {"type", {
+                        {"type", "string"},
+                        {"enum", {"string", "int32", "int64", "float", "double", "bool"}},
+                        {"description", "Attribute type. Defaults to string."},
+                    }},
+                    {"value", {
+                        {"type", "string"},
+                        {"description", "Value to write."},
+                    }},
+                }},
+                {"required", json::array({"path", "name", "value"})},
+            }},
+        },
+        {
+            {"name", "IndexAttr"},
+            {"description",
+                "Create a BFS attribute index on the current volume so that "
+                "Query can search by this attribute in O(1). Only needs to be "
+                "done once per attribute name per volume. Example: index "
+                "'claude:component' as string so 'Query claude:component == "
+                "\"networking\"' returns instantly. Requires user permission "
+                "(modifies volume-level state)."},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"name", {
+                        {"type", "string"},
+                        {"description", "Attribute name to index, e.g. 'claude:component'."},
+                    }},
+                    {"type", {
+                        {"type", "string"},
+                        {"enum", {"string", "int32", "int64", "float", "double"}},
+                        {"description", "Index type."},
+                    }},
+                }},
+                {"required", json::array({"name", "type"})},
+            }},
+        },
+    });
+}
+#endif // __HAIKU__
+
 } // namespace
 
 json definitions() {
@@ -867,6 +1110,9 @@ json definitions() {
             }},
         });
     }
+#ifdef __HAIKU__
+    for (const auto& t : haiku_definitions()) out.push_back(t);
+#endif
     for (const auto& t : mcp::tool_definitions()) out.push_back(t);
     return out;
 }
@@ -883,12 +1129,21 @@ ToolResult run(const std::string& name, const json& input) {
     if (name == "TodoWrite") return run_todowrite(input);
     if (name == "TodoRead")  return run_todoread(input);
     if (name == "Task")      return {"error: Task is handled by the agent loop", true};
+#ifdef __HAIKU__
+    if (name == "Query")     return run_query(input);
+    if (name == "ReadAttr")  return run_read_attr(input);
+    if (name == "WriteAttr") return run_write_attr(input);
+    if (name == "IndexAttr") return run_index_attr(input);
+#endif
     if (auto mcp_res = mcp::run(name, input); mcp_res) return *mcp_res;
     return {"error: unknown tool " + name, true};
 }
 
 bool requires_permission(const std::string& name) {
     if (name == "Bash" || name == "Write" || name == "Edit") return true;
+#ifdef __HAIKU__
+    if (name == "WriteAttr" || name == "IndexAttr") return true;
+#endif
     if (mcp::is_mcp_tool(name)) return true;
     return false;
 }
@@ -896,6 +1151,10 @@ bool requires_permission(const std::string& name) {
 std::string preview(const std::string& name, const json& input) {
     if (name == "Write") return preview_write(input);
     if (name == "Edit")  return preview_edit(input);
+#ifdef __HAIKU__
+    if (name == "WriteAttr") return preview_write_attr(input);
+    if (name == "IndexAttr") return preview_index_attr(input);
+#endif
     return {};
 }
 
