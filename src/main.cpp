@@ -11,6 +11,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -1628,6 +1629,11 @@ struct LoopCtx {
     std::vector<std::string>& session_urls;
     bool&                     notify_enabled;
     double&                   notify_min_duration;
+    // Invoked by slash commands that mutate state which shows up
+    // in the fixed-bottom status frame (model name, turn counter,
+    // session totals). Default is a no-op so non-REPL callers (the
+    // Telegram bridge) don't need to wire anything up.
+    std::function<void()>     redraw_status;
 };
 
 // Pull http:// and https:// URLs out of a block of assistant text.
@@ -2087,6 +2093,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         ctx.session_input   = 0;
         ctx.session_output  = 0;
         std::cout << tui::meta("[conversation cleared]") << "\n";
+        if (ctx.redraw_status) ctx.redraw_status();
         return SlashAction::Continue;
     }
     if (cmd == "/model") {
@@ -2095,6 +2102,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         } else {
             ctx.model = args;
             std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
+            if (ctx.redraw_status) ctx.redraw_status();
         }
         return SlashAction::Continue;
     }
@@ -2869,7 +2877,8 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
 
             LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
                         turn_count, session_input, session_output, messages,
-                        session_urls, notify_enabled, notify_min_duration};
+                        session_urls, notify_enabled, notify_min_duration,
+                        [&]() { tui::set_status_bar(compose_status()); }};
             std::string expanded;
             const SlashAction action = dispatch_slash(line, ctx, expanded);
             repl::record(line);
@@ -3566,7 +3575,8 @@ int run_telegram_bridge(const Config& cfg) {
             LoopCtx ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,
                         active_model, turn_count, session_input, session_output,
                         messages_ref, telegram_session_urls,
-                        telegram_notify_enabled, telegram_notify_min_duration};
+                        telegram_notify_enabled, telegram_notify_min_duration,
+                        [&]() { tui::set_status_bar(compose_bridge_status()); }};
             std::string expanded;
             const SlashAction action = dispatch_slash(line, ctx, expanded);
             repl::record(line);
