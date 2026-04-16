@@ -143,7 +143,7 @@ void draw_fixed_frame(int rows, int cols, const std::string& status) {
     // Row N-3: rule above the input row.
     std::cout << "\x1b[" << (rows - 3) << ";1H"
               << "\x1b[2K"
-              << dim(rule);
+              << muted(rule);
 
     // Row N-2: input row. Clear any leftover content so a stale
     // prompt doesn't bleed into the next turn; we don't draw
@@ -156,7 +156,7 @@ void draw_fixed_frame(int rows, int cols, const std::string& status) {
     // Row N-1: rule below the input row.
     std::cout << "\x1b[" << (rows - 1) << ";1H"
               << "\x1b[2K"
-              << dim(rule);
+              << muted(rule);
 
     // Row N: status content. Truncated to cols by the caller.
     std::cout << "\x1b[" << rows << ";1H"
@@ -295,6 +295,7 @@ std::string blue(const std::string& s)    { return wrap("\x1b[34m", s); }
 std::string magenta(const std::string& s) { return wrap("\x1b[35m", s); }
 std::string cyan(const std::string& s)    { return wrap("\x1b[36m", s); }
 std::string gray(const std::string& s)    { return wrap("\x1b[90m", s); }
+std::string muted(const std::string& s)   { return wrap("\x1b[2;90m", s); }
 
 std::string user_prompt() {
     return wrap("\x1b[1;36m", "> ");

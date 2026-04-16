@@ -114,6 +114,11 @@ std::string blue(const std::string& s);
 std::string magenta(const std::string& s);
 std::string cyan(const std::string& s);
 std::string gray(const std::string& s);
+// muted() = dim + bright-black, the consistent "darker gray" used
+// on the rule lines framing the input row and on the status-row
+// fields (except the model name and the Remote-Control label,
+// which get their own color so they stand out).
+std::string muted(const std::string& s);
 
 // Semantic wrappers. These return the full string to print (including
 // trailing reset), or a plain equivalent when color is off.

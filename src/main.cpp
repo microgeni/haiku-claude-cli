@@ -2160,11 +2160,11 @@ std::string format_status_row(const std::string& model,
     std::string left;
     left.reserve(96);
     left += " ";
-    left += tui::dim(short_model(model));
-    left += tui::dim(" \xC2\xB7 turn ") + tui::dim(std::to_string(turn_count));
-    left += tui::dim(" \xC2\xB7 \xE2\x86\x91 ") + tui::dim(compact_tokens(session_input));
-    left += tui::dim(" \xC2\xB7 \xE2\x86\x93 ") + tui::dim(compact_tokens(session_output));
-    left += tui::dim(" \xC2\xB7 max ") + tui::dim(std::to_string(max_tokens));
+    left += tui::bold(short_model(model));
+    left += tui::muted(" \xC2\xB7 turn ") + tui::muted(std::to_string(turn_count));
+    left += tui::muted(" \xC2\xB7 \xE2\x86\x91 ") + tui::muted(compact_tokens(session_input));
+    left += tui::muted(" \xC2\xB7 \xE2\x86\x93 ") + tui::muted(compact_tokens(session_output));
+    left += tui::muted(" \xC2\xB7 max ") + tui::muted(std::to_string(max_tokens));
 
     if (right_label.empty()) return left;
 
