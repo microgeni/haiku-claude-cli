@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-04-17
+
+### Fixed
+- **Spinner truncation cuts glyph short** — the old tail-trim
+  loop popped raw bytes one at a time and decremented the
+  display-column counter for every byte, including zero-width
+  ANSI escape bytes. This caused over-trimming so the animated
+  spinner frame was visibly cut one or two columns early on
+  narrow terminals. Replaced with a single forward pass that
+  skips escape sequences entirely, handles multi-byte UTF-8
+  sequences as one column each, records the exact byte offset
+  where the budget is exceeded, then slices and appends `…` in
+  one step — no more clipping.
+
 ## [1.4.1] - 2026-04-17
 
 ### Fixed
