@@ -46,7 +46,7 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr const char* kVersion      = "1.3.0";
+constexpr const char* kVersion      = "1.4.1";
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
 constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
@@ -130,6 +130,41 @@ bool is_valid_utf8(const char* data, size_t len) {
         i += need + 1;
     }
     return true;
+}
+
+// Replace every invalid UTF-8 byte (or truncated sequence) with the
+// Unicode replacement character U+FFFD (0xEF 0xBF 0xBD) so that
+// nlohmann::json never sees a byte that would trigger type_error.316.
+// Tool output from Bash commands that cat binary files (driver blobs,
+// /dev entries, etc.) can easily contain raw 0x80-0xFF bytes.
+std::string sanitize_utf8(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    const unsigned char* p   = reinterpret_cast<const unsigned char*>(s.data());
+    const unsigned char* end = p + s.size();
+    while (p < end) {
+        unsigned char c = *p;
+        int need = 0;
+        if      (c < 0x80)             { out += static_cast<char>(c); ++p; continue; }
+        else if ((c & 0xE0) == 0xC0)   need = 1;
+        else if ((c & 0xF0) == 0xE0)   need = 2;
+        else if ((c & 0xF8) == 0xF0)   need = 3;
+        else { out += "\xEF\xBF\xBD"; ++p; continue; }   // bad lead byte
+
+        if (p + need >= end) {                             // truncated sequence
+            out += "\xEF\xBF\xBD"; p = end; continue;
+        }
+        bool ok = true;
+        for (int k = 1; k <= need; ++k) {
+            if ((p[k] & 0xC0) != 0x80) { ok = false; break; }
+        }
+        if (!ok) { out += "\xEF\xBF\xBD"; ++p; continue; }
+
+        // valid sequence — copy it verbatim
+        for (int k = 0; k <= need; ++k) out += static_cast<char>(p[k]);
+        p += need + 1;
+    }
+    return out;
 }
 }
 
@@ -1466,6 +1501,13 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
                 if (s > 0) saved_bytes = s;
             }
             stats::record_tool(tname, static_cast<int>(tres.content.size()), saved_bytes);
+
+            // Sanitize tool output before handing it to nlohmann::json.
+            // Binary tool output (e.g. `cat` on a driver blob, /dev node,
+            // or any file with non-UTF-8 bytes) will throw
+            // json::type_error.316 if passed raw. Replace invalid bytes
+            // with U+FFFD so the model still sees the content shape.
+            tres.content = sanitize_utf8(tres.content);
 
             tool_results.push_back({
                 {"type",        "tool_result"},
