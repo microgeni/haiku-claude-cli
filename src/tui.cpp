@@ -1142,43 +1142,51 @@ void Spinner::run() {
         frame += "\x1b[0m  ";
         frame += muted(tail);
 
-        // Truncate to terminal_width() so long lines don't wrap.
-        // We keep the leading spinner glyph + verb block intact
-        // and drop the tail from the right if needed. Byte-count
-        // truncation is close enough since everything after the
-        // glyph is ASCII.
+        // Truncate to terminal_width()-1 so long lines never wrap.
+        // Walk the frame string tracking visible columns (ANSI escape
+        // sequences are zero-width; UTF-8 multi-byte sequences count
+        // as one column each). When we hit the budget we record the
+        // cut point and stop — then rebuild the string up to that
+        // byte offset and append … (1 col).  This is O(n) in the
+        // frame length and never pops bytes from the raw string, so
+        // it can't mis-count escape bytes as display columns.
         const int width = terminal_width();
         if (width > 4) {
-            const int budget = width - 1;
-            // Approximate display width: treat every escape
-            // sequence as zero columns, and each byte of UTF-8
-            // glyph content as its byte count minus 2 (since our
-            // star glyphs are 3 UTF-8 bytes but 1 column).
-            int display_cols = 0;
-            bool in_esc = false;
-            for (size_t i = 0; i < frame.size(); ++i) {
+            const int budget = width - 2; // -1 for safety, -1 for the … we may append
+            int  display_cols = 0;
+            bool in_esc       = false;
+            size_t cut        = frame.size(); // byte index to cut at (default: no cut)
+            bool   needs_cut  = false;
+
+            for (size_t i = 0; i < frame.size(); ) {
                 const unsigned char c = static_cast<unsigned char>(frame[i]);
                 if (in_esc) {
                     if (c == 'm') in_esc = false;
+                    ++i;
                     continue;
                 }
-                if (c == 0x1b) { in_esc = true; continue; }
-                if (c < 0x80) { ++display_cols; continue; }
-                // UTF-8 lead byte: count as one column, skip
-                // continuation bytes.
-                ++display_cols;
-                if ((c & 0xE0) == 0xC0) i += 1;
-                else if ((c & 0xF0) == 0xE0) i += 2;
-                else if ((c & 0xF8) == 0xF0) i += 3;
-            }
-            if (display_cols > budget) {
-                // Simple tail trim: drop bytes from the end until
-                // we're under budget. Cheap and rarely needed.
-                while (!frame.empty() && display_cols > budget) {
-                    frame.pop_back();
-                    --display_cols;
+                if (c == 0x1b) { in_esc = true; ++i; continue; }
+
+                // Determine byte-length and column-width of this char.
+                int char_bytes = 1;
+                if      ((c & 0xE0) == 0xC0) char_bytes = 2;
+                else if ((c & 0xF0) == 0xE0) char_bytes = 3;
+                else if ((c & 0xF8) == 0xF0) char_bytes = 4;
+                // All of our spinner glyphs and Latin text are 1 column.
+                const int char_cols = (char_bytes == 1 && c < 0x80) ? 1 : 1;
+
+                if (display_cols + char_cols > budget) {
+                    cut = i;
+                    needs_cut = true;
+                    break;
                 }
-                frame += "\xE2\x80\xA6"; // …
+                display_cols += char_cols;
+                i += char_bytes;
+            }
+
+            if (needs_cut) {
+                frame.resize(cut);
+                frame += "\xE2\x80\xA6"; // … (1 column)
             }
         }
 
