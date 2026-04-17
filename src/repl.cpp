@@ -119,8 +119,13 @@ void init(const std::string& history_file) {
 
     // Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
     // read_message() re-prompts via backslash-continuation.
+    //
+    // rl_bind_key('\n', ...) is unreliable in libedit's readline compat
+    // layer because 0x0A is hardwired as "accept-line" in libedit's
+    // internal keymap before the compat shim can intercept it.
+    // rl_set_key() with the explicit byte string is the correct API.
     rl_add_defun("soft-newline", soft_newline, -1);
-    rl_bind_key('\n', soft_newline);          // Ctrl+J
+    rl_set_key("\x0a", soft_newline, rl_get_keymap());  // Ctrl+J
 
     // Alt+Enter (ESC \r in most terminals) → same action.
     // emacs_meta_keymap lives at index 0x0D ('\r').

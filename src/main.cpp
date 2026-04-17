@@ -1658,6 +1658,11 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
 
     if (cmd == "/help" || cmd == "/?") {
         std::cout << tui::meta(
+            "multi-line input:\n"
+            "  \\ + Enter          new line (works everywhere, including SSH)\n"
+            "  Ctrl+J             new line (local terminal)\n"
+            "  Alt+Enter          new line (local terminal)\n"
+            "\n"
             "slash commands:\n"
             "  /help              this list\n"
             "  /clear             reset the running conversation\n"
@@ -2307,6 +2312,15 @@ static std::vector<std::string> shell_tokenize(const std::string& s) {
 // without a leading slash are NOT treated as drops so a user can
 // still type "main.cpp" as a literal question without the REPL
 // swallowing it.
+
+// Returns true when the process is running inside an SSH session.
+// The SSH daemon always exports at least one of these variables.
+static bool is_ssh_session() {
+    return std::getenv("SSH_CLIENT")     != nullptr
+        || std::getenv("SSH_TTY")        != nullptr
+        || std::getenv("SSH_CONNECTION") != nullptr;
+}
+
 static bool line_is_path_drop(const std::string& line,
                               std::vector<std::string>& out_abs_paths) {
     auto tokens = shell_tokenize(line);
@@ -2415,7 +2429,10 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     }
 
     std::cout << tui::bold("Claude CLI interactive mode") << tui::dim(" (model: " + model + ")") << ".\n"
-              << tui::dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n\n";
+              << tui::dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
+              << tui::dim(is_ssh_session()
+                  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
+                  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
 
     // Shared mutex between the REPL main thread and an optional
     // RemoteControl poller thread. When /remote-control is toggled
