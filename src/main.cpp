@@ -2934,10 +2934,6 @@ int run_telegram_bridge(const Config& cfg) {
         if (message_id == 0) return;
         client.edit_message_text(chat, message_id, text, kb);
     };
-    auto tg_typing = [&](int64_t chat) {
-        if (g_telegram_muted.load()) return;
-        client.send_chat_action(chat, "typing");
-    };
 
     // Shared worker: runs one send_with_tools call and mirrors the
     // whole thing (user echo + typing + streaming edits + buttons
@@ -2962,37 +2958,48 @@ int run_telegram_bridge(const Config& cfg) {
             ? 0
             : tg_send_id(chat_id, "\xE2\x80\xA6"); // …
 
-        // 3. Updater thread: typing indicator + streaming edits.
+        // 3. Updater thread: thinking indicator + streaming text edits.
+        //    Before first token: cycles "⏳ thinking…" with animated dots
+        //    so the user sees immediate feedback.
+        //    Once text arrives: edits the placeholder every ~1 s with the
+        //    accumulated text and a ▌ cursor so it looks like live typing.
         StreamProgress    progress;
         g_stream_progress = &progress;
         std::atomic<bool> updater_running { chat_id != 0 };
         int               last_version = 0;
+        int               dot_phase    = 0;
         std::thread updater;
         if (updater_running.load()) {
             updater = std::thread([&]() {
-                // Check immediately on entry, then every 500 ms.
-                // The 1-second-sleep-first pattern caused short responses
-                // (< 1 s) to never show streaming progress — the placeholder
-                // stayed "…" until the final edit fired after the join.
-                bool first_iteration = true;
                 while (updater_running.load()) {
-                    if (!first_iteration) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    }
-                    first_iteration = false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                     if (!updater_running.load()) break;
-                    tg_typing(chat_id);
                     if (placeholder_id == 0) continue;
+
                     const int v = progress.version.load(std::memory_order_relaxed);
-                    if (v == last_version) continue;
-                    last_version = v;
-                    std::string snapshot_text;
-                    {
-                        std::lock_guard<std::mutex> lk(progress.mu);
-                        snapshot_text = progress.text;
-                    }
-                    if (!snapshot_text.empty()) {
-                        tg_edit(chat_id, placeholder_id, snapshot_text);
+                    if (v == last_version) {
+                        // No new tokens yet — animate a "thinking" indicator.
+                        static const char* kDots[] = {
+                            "\xE2\x8F\xB3 thinking\xE2\x80\xA6",   // ⏳ thinking…
+                            "\xE2\x8F\xB3 thinking\xE2\x80\xA4",   // ⏳ thinking.
+                            "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",  // ⏳ thinking..
+                            "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4", // ⏳ thinking...
+                        };
+                        tg_edit(chat_id, placeholder_id,
+                                kDots[dot_phase % 4]);
+                        ++dot_phase;
+                    } else {
+                        // Tokens are streaming — show accumulated text + cursor.
+                        last_version = v;
+                        std::string snapshot_text;
+                        {
+                            std::lock_guard<std::mutex> lk(progress.mu);
+                            snapshot_text = progress.text;
+                        }
+                        if (!snapshot_text.empty()) {
+                            tg_edit(chat_id, placeholder_id,
+                                    snapshot_text + " \xE2\x96\x8C"); // ▌
+                        }
                     }
                 }
             });
@@ -3160,30 +3167,36 @@ int run_telegram_bridge(const Config& cfg) {
         g_stream_progress = &progress;
         std::atomic<bool> updater_running { true };
         int last_version = 0;
+        int dot_phase    = 0;
         std::thread updater([&]() {
-            // Check immediately on entry, then every 500 ms.
-            // The 1-second-sleep-first pattern caused short responses
-            // (< 1 s) to never show streaming progress — the placeholder
-            // stayed "…" until the final edit fired after the join.
-            bool first_iteration = true;
             while (updater_running.load()) {
-                if (!first_iteration) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                }
-                first_iteration = false;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 if (!updater_running.load()) break;
-                tg_typing(chat_id);
                 if (placeholder_id == 0) continue;
+
                 const int v = progress.version.load(std::memory_order_relaxed);
-                if (v == last_version) continue;
-                last_version = v;
-                std::string snapshot_text;
-                {
-                    std::lock_guard<std::mutex> lk(progress.mu);
-                    snapshot_text = progress.text;
-                }
-                if (!snapshot_text.empty()) {
-                    tg_edit(chat_id, placeholder_id, snapshot_text);
+                if (v == last_version) {
+                    // No tokens yet — animate a thinking indicator.
+                    static const char* kDots[] = {
+                        "\xE2\x8F\xB3 thinking\xE2\x80\xA6",
+                        "\xE2\x8F\xB3 thinking\xE2\x80\xA4",
+                        "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",
+                        "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4",
+                    };
+                    tg_edit(chat_id, placeholder_id, kDots[dot_phase % 4]);
+                    ++dot_phase;
+                } else {
+                    // Tokens streaming — show accumulated text + cursor.
+                    last_version = v;
+                    std::string snapshot_text;
+                    {
+                        std::lock_guard<std::mutex> lk(progress.mu);
+                        snapshot_text = progress.text;
+                    }
+                    if (!snapshot_text.empty()) {
+                        tg_edit(chat_id, placeholder_id,
+                                snapshot_text + " \xE2\x96\x8C"); // ▌
+                    }
                 }
             }
         });
