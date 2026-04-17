@@ -110,12 +110,12 @@ Haiku's Terminal app (ANSI + UTF-8, 256 colors, no sixel/kitty).
       theme (dark or light) controls the actual rendered colors.
       True dark/light auto-detection via terminal queries or
       `COLORFGBG` is deferred until we hit a concrete need.
-- [ ] **Unicode box-drawing frame** around the REPL — explicitly
-      deferred. Fixed-bottom frames need DECSTBM scroll regions and
+- [x] **Unicode box-drawing frame** around the REPL — explicitly
+      deferred in v0.3. Fixed-bottom frames need DECSTBM scroll regions and
       careful SIGWINCH tracking, which is a bigger refactor than
       v0.3 warrants. The transient status line above covers the
       actually-useful information window (the thinking phase) at a
-      fraction of the complexity.
+      fraction of the complexity. Shipped in v1.1.2.
 
 The TUI layer should be isolated behind a small abstraction so a
 `--plain` flag or a non-TTY stdout disables it entirely and falls back
@@ -624,11 +624,13 @@ been cached.
       tools aren't even registered).
 
 Deferred:
-- Auto-create `claude:summary` index via `mkindex` so Query
-  can target the attribute directly. Currently the preload
-  walks files individually. Fine for projects up to
-  low-thousands of files; the index unlocks O(1) lookups for
-  larger trees.
+- [x] **Auto-create `claude:summary` index** — on startup,
+      `main()` fork+exec's `mkindex -t string claude:summary`
+      (Haiku-only, `#ifdef __HAIKU__`). Fully silent: the
+      child redirects stdio to `/dev/null` and we ignore the
+      exit code, so "already exists" errors are harmless and
+      a missing/read-only volume fails quietly. Query now
+      runs O(1) on fresh installs without any manual step.
 - Background refresh of the summary snapshot mid-session
   when WriteAttr is called. Currently stale until next
   session start.

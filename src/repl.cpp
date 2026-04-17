@@ -11,6 +11,22 @@
 
 #include <editline/readline.h>
 
+// Soft-newline: accept the current line with a trailing backslash so
+// that read_message()'s backslash-continuation logic re-prompts for the
+// next line.  Using rl_insert_text("\n") doesn't work because libedit
+// treats a \n in the edit buffer as "accept line", not a literal
+// newline character — so pressing Ctrl+J or Alt+Enter would just submit
+// the message instead of continuing it.  Appending '\\' and then
+// calling rl_newline() (accept) achieves real multi-line input without
+// any libedit internals hacks.
+extern "C" {
+static int soft_newline(int /*count*/, int /*key*/) {
+    rl_insert_text("\\");   // append trailing backslash
+    rl_newline(1, '\n');    // accept the line
+    return 0;
+}
+}
+
 namespace repl {
 namespace {
 
@@ -100,6 +116,20 @@ void init(const std::string& history_file) {
         read_history(g_history_file.c_str());
     }
     rl_attempted_completion_function = slash_completion;
+
+    // Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
+    // read_message() re-prompts via backslash-continuation.
+    //
+    // rl_bind_key('\n', ...) is unreliable in libedit's readline compat
+    // layer because 0x0A is hardwired as "accept-line" in libedit's
+    // internal keymap before the compat shim can intercept it.
+    // rl_set_key() with the explicit byte string is the correct API.
+    rl_add_defun("soft-newline", soft_newline, -1);
+    rl_set_key("\x0a", soft_newline, rl_get_keymap());  // Ctrl+J
+
+    // Alt+Enter (ESC \r in most terminals) → same action.
+    // emacs_meta_keymap lives at index 0x0D ('\r').
+    rl_bind_key_in_map('\r', soft_newline, emacs_meta_keymap);
 
     // Override libedit's word-break character set so only
     // whitespace breaks words. libedit's default set includes

@@ -1038,6 +1038,26 @@ void Spinner::stop() {
 }
 
 void Spinner::run() {
+    // Hide the cursor for the duration of the spinner so it doesn't
+    // jump around the scroll region with every \r frame redraw.
+    // The ShowGuard below restores it on every exit path, including
+    // exceptions thrown from string allocation / stream I/O /
+    // cv_.wait_for inside the render loop. Without the guard, an
+    // exception would unwind out of the thread entry point and
+    // std::terminate without running the trailing show_cursor(),
+    // leaving the user's terminal with a hidden cursor until reset.
+    hide_cursor();
+    struct ShowGuard {
+        ~ShowGuard() {
+            // Mirror the normal teardown: clear the spinner line so
+            // the next writer starts at column 0, then restore the
+            // cursor. Runs exactly once per Spinner lifetime thanks
+            // to RAII, regardless of how run() exits.
+            std::cout << "\r\x1b[2K" << std::flush;
+            show_cursor();
+        }
+    } show_guard;
+
     // Pick a verb once per Spinner lifetime. The incoming label_ is
     // ignored in favor of the randomized gerund — callers used to
     // pass "thinking" but the richer rendering now wants a gerund
@@ -1171,8 +1191,8 @@ void Spinner::run() {
         cv_.wait_for(lock, std::chrono::milliseconds(80),
                      [this] { return stopping_.load(); });
     }
-    // Clear the spinner line so the next write starts at column 0.
-    std::cout << "\r\x1b[2K" << std::flush;
+    // ShowGuard's dtor clears the spinner line and restores the
+    // cursor on the way out — nothing else to do here.
 }
 
 } // namespace tui

@@ -6,6 +6,96 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-04-17
+
+### Added
+- **Inline multi-line input** — compose multi-line prompts
+  directly in the readline buffer without the `"""` fence
+  syntax. Three ways to drop a newline:
+  - `\` + Enter — portable, works over any SSH/tmux/mosh
+    combination (routed through the existing
+    backslash-continuation path).
+  - `Ctrl+J` — local terminals.
+  - `Alt+Enter` — local terminals (bound via
+    `emacs_meta_keymap`).
+  The startup banner detects SSH sessions
+  (`SSH_CLIENT`/`SSH_TTY`/`SSH_CONNECTION`) and advertises
+  only the portable form when remote, since some SSH
+  clients and multiplexers swallow `Ctrl+J`/`Alt+Enter`
+  before they reach libedit. `/help` lists all three.
+- **Telegram streaming with live thinking indicator** — the
+  Telegram bridge now shows immediate feedback and edits
+  the placeholder message in-place as tokens arrive, so it
+  visually looks like Claude is typing live in the chat:
+  - Before the first token: animated `⏳ thinking…` with
+    cycling dots (0–3) every second.
+  - While streaming: accumulated text with a `▌` block
+    cursor appended, updated every second via
+    `editMessageText`.
+  - On completion: final edit strips the cursor and renders
+    inline-keyboard buttons for numbered choices.
+  Applies to both local-origin turns mirrored to Telegram
+  and Telegram-origin messages.
+- **Auto-bootstrap of `claude:summary` BFS index** — on
+  Haiku, the CLI forks `mkindex -t string claude:summary`
+  at startup so the attribute index always exists on the
+  current volume. Idempotent, silent, and a no-op on
+  non-BFS volumes or if `mkindex` is absent. Query lookups
+  over `claude:summary` now run O(1) on fresh installs
+  with zero manual setup.
+
+### Fixed
+- **Telegram: final response silently dropped on edit
+  failure** — `edit_message_text` used to return `true`
+  unconditionally, so a rate-limited `editMessageText` call
+  swallowed the response and the user saw `...` forever.
+  It now returns `false` on real failures (treating
+  "message is not modified" as success), and both
+  `process_turn` and `process_telegram` fall back to a
+  fresh `sendMessage` if the placeholder edit is rejected.
+- **Telegram: streaming invisible for short responses** —
+  the updater thread slept 1 s *before* its first poll, so
+  replies that completed in under a second never updated
+  the placeholder. First check now runs immediately, then
+  polls every 500 ms.
+- **Telegram: 401s after ~8 h in long bridge sessions** —
+  `run_telegram_bridge` resolved the OAuth token once at
+  startup and never refreshed it. Token is now re-resolved
+  before each `send_with_tools` call, matching the
+  interactive REPL pattern. Expired-and-unrefreshable
+  sessions now surface a clear error in the chat instead
+  of silently dropping the response.
+- **Ctrl+J / Alt+Enter now actually insert a newline** —
+  `rl_insert_text("\n")` submits the line under libedit's
+  readline compat layer instead of inserting a literal
+  newline. Replaced with a `soft_newline` handler that
+  appends `\\` to the buffer and calls `rl_newline()`, so
+  `read_message()`'s existing backslash-continuation path
+  handles the multi-line assembly. Also: `rl_bind_key('\n',
+  ...)` is unreliable under libedit because `0x0A` is
+  hardwired as `accept-line` before the compat shim can
+  intercept; switched to `rl_set_key("\x0a", ...,
+  rl_get_keymap())`.
+- **Spinner cursor restore hardened with RAII** — if
+  `Spinner::run()` threw between `hide_cursor()` and
+  `show_cursor()` (e.g. `std::bad_alloc` from string
+  concatenation, or `system_error` from `cv_.wait_for`),
+  the worker thread terminated via `std::terminate` without
+  restoring the cursor, leaving the user's terminal with
+  a hidden cursor until reset. `std::atexit` does not fire
+  on `std::terminate`, so the existing teardown-safety net
+  did not cover this path. `hide_cursor()` is now wrapped
+  in a `ShowGuard` whose destructor emits line-clear +
+  `show_cursor()` on every exit path, including unwinding
+  exceptions.
+- **Cursor flicker around curl calls** — removed the
+  redundant `tui::hide_cursor()` / `tui::show_cursor()`
+  pair bracketing `curl_easy_perform` in
+  `send_conversation`. The Spinner now owns cursor
+  visibility for its full lifetime, so the extra calls
+  could cause a brief flicker if curl returned before the
+  spinner stopped.
+
 ## [1.3.0] - 2026-04-17
 
 ### Added

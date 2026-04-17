@@ -264,10 +264,24 @@ bool Client::edit_message_text(int64_t chat_id, int64_t message_id,
     }
 
     std::string response;
-    post_json("editMessageText", body.dump(), &response, 10);
-    // "message is not modified" and rate-limit errors are non-fatal.
-    // We don't bubble failures up because missing an edit is
-    // cosmetically fine.
+    const bool ok = post_json("editMessageText", body.dump(), &response, 10);
+    // Distinguish "message is not modified" (harmless, treat as ok)
+    // from real failures (network error, rate-limit, wrong message_id)
+    // so callers can fall back to sendMessage when the edit fails.
+    if (!ok) {
+        // Check if Telegram rejected with "message is not modified" —
+        // that's cosmetically fine and should not trigger a fallback.
+        try {
+            const json j = nlohmann::json::parse(response);
+            if (!j.value("ok", true)) {
+                const std::string desc = j.value("description", std::string{});
+                if (desc.find("message is not modified") != std::string::npos) {
+                    return true; // not actually an error
+                }
+            }
+        } catch (...) {}
+        return false;
+    }
     return true;
 }
 
