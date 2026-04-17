@@ -11,12 +11,19 @@
 
 #include <editline/readline.h>
 
-// Insert a literal newline into the edit buffer.
-// Bound to Ctrl+J and Alt+Enter so the user can compose multi-line
-// prompts without the """ fence syntax.
+// Soft-newline: accept the current line with a trailing backslash so
+// that read_message()'s backslash-continuation logic re-prompts for the
+// next line.  Using rl_insert_text("\n") doesn't work because libedit
+// treats a \n in the edit buffer as "accept line", not a literal
+// newline character — so pressing Ctrl+J or Alt+Enter would just submit
+// the message instead of continuing it.  Appending '\\' and then
+// calling rl_newline() (accept) achieves real multi-line input without
+// any libedit internals hacks.
 extern "C" {
-static int insert_newline(int /*count*/, int /*key*/) {
-    return rl_insert_text("\n");
+static int soft_newline(int /*count*/, int /*key*/) {
+    rl_insert_text("\\");   // append trailing backslash
+    rl_newline(1, '\n');    // accept the line
+    return 0;
 }
 }
 
@@ -110,14 +117,14 @@ void init(const std::string& history_file) {
     }
     rl_attempted_completion_function = slash_completion;
 
-    // Ctrl+J (0x0A) → insert a literal newline into the buffer so the
-    // user can compose multi-line prompts inline without the """ fence.
-    rl_add_defun("insert-newline", insert_newline, -1);
-    rl_bind_key('\n', insert_newline);          // Ctrl+J
+    // Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
+    // read_message() re-prompts via backslash-continuation.
+    rl_add_defun("soft-newline", soft_newline, -1);
+    rl_bind_key('\n', soft_newline);          // Ctrl+J
 
     // Alt+Enter (ESC \r in most terminals) → same action.
     // emacs_meta_keymap lives at index 0x0D ('\r').
-    rl_bind_key_in_map('\r', insert_newline, emacs_meta_keymap);
+    rl_bind_key_in_map('\r', soft_newline, emacs_meta_keymap);
 
     // Override libedit's word-break character set so only
     // whitespace breaks words. libedit's default set includes
