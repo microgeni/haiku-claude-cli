@@ -3062,7 +3062,10 @@ int run_telegram_bridge(const Config& cfg) {
         // 7. Final edit with the complete text + buttons.
         if (chat_id != 0) {
             if (placeholder_id) {
-                tg_edit(chat_id, placeholder_id, result.assistant_text, keyboard);
+                if (!client.edit_message_text(chat_id, placeholder_id, result.assistant_text, keyboard)) {
+                    // edit failed (rate-limit, wrong message_id, etc.) — send fresh
+                    tg_send(chat_id, result.assistant_text, keyboard);
+                }
             } else {
                 tg_send(chat_id, result.assistant_text, keyboard);
             }
@@ -3239,7 +3242,10 @@ int run_telegram_bridge(const Config& cfg) {
             keyboard.push_back({ std::move(b) });
         }
         if (placeholder_id) {
-            tg_edit(chat_id, placeholder_id, result.assistant_text, keyboard);
+            if (!client.edit_message_text(chat_id, placeholder_id, result.assistant_text, keyboard)) {
+                // edit failed (rate-limit, wrong message_id, etc.) — send fresh
+                tg_send(chat_id, result.assistant_text, keyboard);
+            }
         } else {
             tg_send(chat_id, result.assistant_text, keyboard);
         }
