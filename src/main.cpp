@@ -216,35 +216,112 @@ std::string compose_system(const std::string& flag_system) {
 
 // ── History persistence ───────────────────────────────────────
 
-std::optional<json> load_history() {
-    std::ifstream f(paths::history_path());
+// Maximum tool-result content stored in history (bytes). The full
+// output was already streamed to the terminal; storing only the head
+// keeps history.json small while preserving enough for Claude to
+// follow the conversation on --resume.
+static constexpr size_t kHistoryToolResultCap = 4096;
+
+// Maximum number of messages kept when loading a saved session.
+// A hard cap prevents unbounded growth from sessions that never
+// trigger auto-compact (many short turns, low token counts).
+// 200 messages ≈ 100 turns — enough context for any real session.
+static constexpr size_t kHistoryMessageCap = 200;
+
+// Trim tool_result content blocks inside a messages array so each
+// individual result is at most kHistoryToolResultCap bytes. Returns
+// a new array; the in-memory messages vector is not mutated so the
+// live session context stays intact (only the saved file is capped).
+static json trim_tool_results(const json& messages) {
+    json out = json::array();
+    for (const auto& msg : messages) {
+        // tool_result blocks live in user turns whose "content" is
+        // an array of typed blocks.
+        if (msg.value("role", "") == "user" && msg["content"].is_array()) {
+            json trimmed_content = json::array();
+            for (const auto& block : msg["content"]) {
+                if (block.value("type", "") == "tool_result") {
+                    std::string content = block.value("content", "");
+                    if (content.size() > kHistoryToolResultCap) {
+                        content = content.substr(0, kHistoryToolResultCap)
+                                  + "\n[... truncated for history storage ...]";
+                    }
+                    json b = block;
+                    b["content"] = content;
+                    trimmed_content.push_back(std::move(b));
+                } else {
+                    trimmed_content.push_back(block);
+                }
+            }
+            json m = msg;
+            m["content"] = trimmed_content;
+            out.push_back(std::move(m));
+        } else {
+            out.push_back(msg);
+        }
+    }
+    return out;
+}
+
+std::optional<json> load_history(const std::string& name = "") {
+    const std::string path = name.empty()
+        ? paths::history_path()
+        : paths::named_history_path(name);
+    std::ifstream f(path);
     if (!f.is_open()) return std::nullopt;
     try {
         json j = json::parse(f);
-        if (j.contains("messages") && j["messages"].is_array()) {
-            return j["messages"];
+        if (!j.contains("messages") || !j["messages"].is_array())
+            return std::nullopt;
+        json msgs = j["messages"];
+        // Apply turn cap: keep only the last kHistoryMessageCap messages.
+        if (msgs.size() > kHistoryMessageCap) {
+            json capped = json::array();
+            const size_t start = msgs.size() - kHistoryMessageCap;
+            for (size_t i = start; i < msgs.size(); ++i)
+                capped.push_back(msgs[i]);
+            msgs = std::move(capped);
         }
+        return msgs;
     } catch (...) {
         // fall through
     }
     return std::nullopt;
 }
 
-bool save_history(const json& messages, const std::string& model) {
-    const std::string path = paths::history_path();
-    const auto        slash = path.rfind('/');
+bool save_history(const json& messages, const std::string& model,
+                  const std::string& name = "") {
+    const std::string path = name.empty()
+        ? paths::history_path()
+        : paths::named_history_path(name);
+    const auto slash = path.rfind('/');
     if (slash == std::string::npos) return false;
     if (!paths::mkdir_p(path.substr(0, slash))) return false;
 
     const json j = {
-        {"messages", messages},
+        {"messages", trim_tool_results(messages)},
         {"model",    model},
         {"saved_at", static_cast<long>(std::time(nullptr))},
     };
-    std::ofstream f(path);
-    if (!f.is_open()) return false;
-    f << j.dump(2) << "\n";
-    chmod(path.c_str(), 0600);
+
+    // Atomic write: serialize to a tmp file alongside the real path,
+    // then rename(2) into place. A crash or power loss mid-write
+    // leaves the previous good file intact.
+    const std::string tmp_path = path + ".tmp";
+    {
+        std::ofstream f(tmp_path);
+        if (!f.is_open()) return false;
+        f << j.dump(2) << "\n";
+        if (!f.good()) {
+            std::remove(tmp_path.c_str());
+            return false;
+        }
+    }
+    chmod(tmp_path.c_str(), 0600);
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -645,8 +722,11 @@ void print_usage(const char* prog, const std::string& default_model, int default
               << "                       required Claude Code prefix when OAuth is used).\n"
               << "  -u, --usage          After the response, print input/output token\n"
               << "                       usage to stderr.\n"
-              << "  -r, --resume         Start the REPL pre-loaded with the last saved\n"
-              << "                       session (implies -i).\n"
+              << "  -r, --resume [NAME]  Start the REPL pre-loaded with the last saved\n"
+              << "                       session (implies -i). Without NAME loads the\n"
+              << "                       default session (history.json). With NAME loads\n"
+              << "                       (or creates) a named session stored as\n"
+              << "                       history-<NAME>.json alongside it.\n"
               << "  -y, --yes            Auto-approve destructive tools (Bash/Write/Edit)\n"
               << "                       for this run. Needed for one-shot invocations\n"
               << "                       without a TTY to answer the y/a/n prompt.\n"
@@ -2277,6 +2357,7 @@ static std::string format_attached_line(const std::vector<std::string>& paths) {
 int interactive_loop(const Auth& initial_auth, const Config& cfg,
                      const std::string& initial_model, int max_tokens,
                      const std::string& custom_system, const json& prices, bool resume,
+                     const std::string& resume_name,
                      const std::string& initial_message,
                      std::vector<std::string> initial_attachments) {
     InterruptGuard interrupt_guard;
@@ -2320,13 +2401,19 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     const int    compact_window_override = cfg.compact_context_window;
 
     if (resume) {
-        if (auto loaded = load_history(); loaded && loaded->is_array()) {
+        if (auto loaded = load_history(resume_name); loaded && loaded->is_array()) {
             messages = *loaded;
+            const std::string hist_path = resume_name.empty()
+                ? paths::history_path()
+                : paths::named_history_path(resume_name);
             std::cout << tui::meta("[resumed " + std::to_string(messages.size())
-                                   + " messages from " + paths::history_path() + "]")
+                                   + " messages from " + hist_path + "]")
                       << "\n";
         } else {
-            std::cout << tui::meta("[no prior session to resume at " + paths::history_path() + "]")
+            const std::string hist_path = resume_name.empty()
+                ? paths::history_path()
+                : paths::named_history_path(resume_name);
+            std::cout << tui::meta("[no prior session to resume at " + hist_path + "]")
                       << "\n";
         }
     }
@@ -2673,7 +2760,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
             remote->mirror_to_primary(line, result.assistant_text);
         }
 
-        save_history(messages, model);
+        save_history(messages, model, resume_name);
 
         hooks::fire(hooks::Event::Stop, json{{"assistant_text", result.assistant_text}});
     }
@@ -2735,7 +2822,7 @@ int run_telegram_bridge(const Config& cfg) {
     const bool allow_destructive =
         cfg.telegram.value("allow_destructive_tools", false);
 
-    const Auth auth = resolve_auth();
+    Auth auth = resolve_auth();
     if (auth.kind == AuthKind::None) {
         std::cerr << "error: no authentication configured. Run `claude login` "
                      "or set ANTHROPIC_API_KEY before `claude telegram`.\n";
@@ -2883,8 +2970,16 @@ int run_telegram_bridge(const Config& cfg) {
         std::thread updater;
         if (updater_running.load()) {
             updater = std::thread([&]() {
+                // Check immediately on entry, then every 500 ms.
+                // The 1-second-sleep-first pattern caused short responses
+                // (< 1 s) to never show streaming progress — the placeholder
+                // stayed "…" until the final edit fired after the join.
+                bool first_iteration = true;
                 while (updater_running.load()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    if (!first_iteration) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+                    first_iteration = false;
                     if (!updater_running.load()) break;
                     tg_typing(chat_id);
                     if (placeholder_id == 0) continue;
@@ -2910,6 +3005,22 @@ int run_telegram_bridge(const Config& cfg) {
 
         g_non_interactive_tools             = non_interactive;
         g_non_interactive_allow_destructive = allow_destructive;
+        // Refresh OAuth token before each call so long-running
+        // bridge sessions don't hit 401 after the token expires.
+        auth = resolve_auth();
+        if (auth.kind == AuthKind::None) {
+            updater_running.store(false);
+            if (updater.joinable()) updater.join();
+            g_stream_progress = nullptr;
+            messages = snapshot;
+            const std::string err = "(error: authentication expired — run `claude logout && claude login`)";
+            if (chat_id != 0) {
+                if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+                else                 tg_send(chat_id, err);
+            }
+            log_line(std::string(source_label) + " tx -> auth expired");
+            return;
+        }
         std::cout << tui::claude_prompt();
         const std::string effective_system = compose_system(cfg.system);
         const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
@@ -3047,8 +3158,16 @@ int run_telegram_bridge(const Config& cfg) {
         std::atomic<bool> updater_running { true };
         int last_version = 0;
         std::thread updater([&]() {
+            // Check immediately on entry, then every 500 ms.
+            // The 1-second-sleep-first pattern caused short responses
+            // (< 1 s) to never show streaming progress — the placeholder
+            // stayed "…" until the final edit fired after the join.
+            bool first_iteration = true;
             while (updater_running.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                if (!first_iteration) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                first_iteration = false;
                 if (!updater_running.load()) break;
                 tg_typing(chat_id);
                 if (placeholder_id == 0) continue;
@@ -3072,6 +3191,20 @@ int run_telegram_bridge(const Config& cfg) {
 
         g_non_interactive_tools              = true;
         g_non_interactive_allow_destructive  = allow_destructive;
+        // Refresh OAuth token before each call so long-running
+        // bridge sessions don't hit 401 after the token expires.
+        auth = resolve_auth();
+        if (auth.kind == AuthKind::None) {
+            updater_running.store(false);
+            if (updater.joinable()) updater.join();
+            g_stream_progress = nullptr;
+            messages = snapshot;
+            const std::string err = "(error: authentication expired — run `claude logout && claude login` on the server)";
+            if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+            else                 tg_send(chat_id, err);
+            log_line("telegram tx user=" + std::to_string(u.user_id) + " -> auth expired");
+            return;
+        }
         std::cout << tui::claude_prompt();
         const std::string effective_system = compose_system(cfg.system);
         const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
@@ -3309,6 +3442,7 @@ int main(int argc, char* argv[]) {
     bool                     interactive   = false;
     bool                     show_usage    = cfg.show_usage;
     bool                     resume        = false;
+    std::string              resume_name;   // empty = default history.json
     std::string              custom_system = cfg.system;
     std::vector<std::string> parts;
     std::vector<std::string> attachments;
@@ -3339,6 +3473,12 @@ int main(int argc, char* argv[]) {
         if (arg == "-r" || arg == "--resume") {
             resume      = true;
             interactive = true;
+            // Optional next argument is the session name. Consume it
+            // only if it doesn't look like a flag (i.e. doesn't start
+            // with '-') so `claude -r -i` still works.
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                resume_name = argv[++i];
+            }
             continue;
         }
         if (arg == "-y" || arg == "--yes") {
@@ -3473,7 +3613,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (interactive) {
-        return interactive_loop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, message, std::move(resolved_attachments));
+        return interactive_loop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, resume_name, message, std::move(resolved_attachments));
     }
 
     InterruptGuard interrupt_guard;

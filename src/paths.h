@@ -19,9 +19,11 @@
 namespace paths {
 
 std::string config_dir();
-std::string config_path();          // <config_dir>/config.json
-std::string history_path();         // <config_dir>/history.json
-std::string repl_history_path();    // <config_dir>/repl_history
+std::string config_path();               // <config_dir>/config.json
+std::string history_path();              // <config_dir>/history.json
+std::string named_history_path(         // <config_dir>/history-<name>.json
+    const std::string& name);
+std::string repl_history_path();         // <config_dir>/repl_history
 std::string log_dir();              // <config_dir>/logs
 std::string user_memory_path();     // <config_dir>/CLAUDE.md
 std::string project_memory_path();  // ./CLAUDE.md (cwd-relative)

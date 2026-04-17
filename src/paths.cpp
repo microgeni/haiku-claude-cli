@@ -1,5 +1,6 @@
 #include "paths.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <sys/stat.h>
@@ -20,6 +21,20 @@ std::string config_dir() {
 
 std::string config_path()         { return config_dir() + "/config.json"; }
 std::string history_path()        { return config_dir() + "/history.json"; }
+
+// Sanitise `name` to only alphanumerics, hyphens, and underscores
+// so it is safe to embed directly in a filename.
+std::string named_history_path(const std::string& name) {
+    std::string safe;
+    safe.reserve(name.size());
+    for (unsigned char c : name) {
+        if (std::isalnum(c) || c == '-' || c == '_') safe += static_cast<char>(c);
+        else safe += '_';
+    }
+    if (safe.empty()) safe = "default";
+    return config_dir() + "/history-" + safe + ".json";
+}
+
 std::string repl_history_path()   { return config_dir() + "/repl_history"; }
 std::string log_dir()             { return config_dir() + "/logs"; }
 std::string user_memory_path()    { return config_dir() + "/CLAUDE.md"; }
