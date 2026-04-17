@@ -976,18 +976,14 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     g_interrupted = 0;
     // ESC guard lives only for the duration of the HTTP stream so
     // stdin goes back to cooked mode the moment we return and the
-    // REPL's libedit prompt reads the next line normally. We also
-    // hide the terminal cursor during the stream so it doesn't
-    // visibly bounce around through the rendered output — it's
-    // shown again the moment curl returns, and the REPL loop's
-    // top-of-iteration show_cursor() catches any crash paths.
+    // REPL's libedit prompt reads the next line normally. The cursor
+    // is hidden/shown by the Spinner itself (in Spinner::run()), so
+    // no explicit hide_cursor()/show_cursor() pair is needed here.
     CURLcode res;
     {
         EscInterruptGuard esc_guard;
-        tui::hide_cursor();
         res = curl_easy_perform(curl);
         spinner.stop();
-        tui::show_cursor();
     }
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
@@ -3451,6 +3447,38 @@ int main(int argc, char* argv[]) {
     init_logging(cfg.logging_enabled);
     hooks::load(cfg.hooks);
     mcp::init(cfg.mcp_servers);
+
+#ifdef __HAIKU__
+    // Ensure the claude:summary BFS index exists on this volume so
+    // Query("\"claude:summary\" == \"*\"") runs in O(1) rather than
+    // walking every file. mkindex is idempotent: it exits non-zero
+    // with "File or Directory already exists" when the index is
+    // already present, which we intentionally ignore. Fork+exec keeps
+    // the failure mode fully silent — no output, no effect on the
+    // running process if mkindex is absent or the volume is read-only.
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child: redirect stdio to /dev/null, exec mkindex.
+            int devnull = ::open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                if (devnull > 2) close(devnull);
+            }
+            const char* argv_mk[] = {
+                "mkindex", "-t", "string", "claude:summary", nullptr
+            };
+            execvp("mkindex", const_cast<char* const*>(argv_mk));
+            _exit(127);
+        }
+        if (pid > 0) {
+            int status = 0;
+            waitpid(pid, &status, 0); // reap; ignore exit code
+        }
+    }
+#endif
 
     if (argc >= 2 && std::string(argv[1]) == "telegram") {
         return run_telegram_bridge(cfg);
