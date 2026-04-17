@@ -6,6 +6,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-04-18
+
+### Fixed
+- **Spinner glyph pixel-bleed clipping** — the star glyphs
+  (U+2736–U+273D, `✶✷✸✹✺✻✼✽`) rendered with pixel overhang in
+  Haiku Terminal's default font. The glyph's pixels bled into the
+  adjacent cell, which was then painted over by the space character
+  printed after the glyph, visually clipping the right side of the
+  star on every frame. Replaced with braille rotation glyphs
+  (`⣾⣽⣻⢿⡿⠿⢯⣷`, U+28xx block) which are designed for terminal use
+  and sit cleanly within their cell boundary.
+- **Spinner truncation CSI parser** — the escape-sequence skip loop
+  previously only exited `in_esc` on `'m'`; broadened to the full
+  standard CSI final-byte range `0x40–0x7E` so any future sequence
+  ending on a non-`m` byte is handled correctly.
+- **Spinner truncation off-by-one** — `budget = width - 1` caused
+  the frame to be cut one column too early (a frame exactly `width`
+  columns wide had its last character replaced by `…`). The walker
+  now allows content up to `width` columns and only truncates when
+  content would exceed `width`, backing up to `width - 1` visible
+  columns before appending `…`.
+- **Spinner ellipsis colour bleed** — when truncation fired and
+  `frame.resize(cut)` sliced mid-escape, the appended `…` was
+  rendered in whatever rainbow colour was active at the cut point.
+  A `\x1b[0m` reset is now inserted before `…`.
+
 ## [1.4.2] - 2026-04-17
 
 ### Fixed
