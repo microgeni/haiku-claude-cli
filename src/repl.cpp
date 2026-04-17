@@ -11,6 +11,15 @@
 
 #include <editline/readline.h>
 
+// Insert a literal newline into the edit buffer.
+// Bound to Ctrl+J and Alt+Enter so the user can compose multi-line
+// prompts without the """ fence syntax.
+extern "C" {
+static int insert_newline(int /*count*/, int /*key*/) {
+    return rl_insert_text("\n");
+}
+}
+
 namespace repl {
 namespace {
 
@@ -100,6 +109,15 @@ void init(const std::string& history_file) {
         read_history(g_history_file.c_str());
     }
     rl_attempted_completion_function = slash_completion;
+
+    // Ctrl+J (0x0A) → insert a literal newline into the buffer so the
+    // user can compose multi-line prompts inline without the """ fence.
+    rl_add_defun("insert-newline", insert_newline, -1);
+    rl_bind_key('\n', insert_newline);          // Ctrl+J
+
+    // Alt+Enter (ESC \r in most terminals) → same action.
+    // emacs_meta_keymap lives at index 0x0D ('\r').
+    rl_bind_key_in_map('\r', insert_newline, emacs_meta_keymap);
 
     // Override libedit's word-break character set so only
     // whitespace breaks words. libedit's default set includes
