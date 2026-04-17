@@ -5,8 +5,10 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
+#include <fcntl.h>
 #include <iostream>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 #include <unordered_set>
 
@@ -968,20 +970,25 @@ const char* kSpinnerVerbs[] = {
 };
 constexpr int kVerbCount = sizeof(kSpinnerVerbs) / sizeof(kSpinnerVerbs[0]);
 
-// Rotating star-shaped glyphs for the leading spinner character.
-// These match Claude Code's `✶ ... ✷ ...` feel and all render as a
-// single column on monospace terminals.
+// Spinner frames — braille dots give a smooth 8-step rotation and are
+// unambiguously 1 column wide in every terminal including Haiku Terminal.
+// The U+2736–U+273D star glyphs look great but their rendered pixels
+// bleed beyond the terminal cell boundary in Haiku's default font,
+// causing the space printed in the next cell to clip the right side of
+// the glyph.  Braille block (U+2800) glyphs are designed for terminal
+// use and sit cleanly within their cell.
 const char* kSpinnerGlyphs[] = {
-    "\xE2\x9C\xB6",  // ✶ U+2736 SIX POINTED BLACK STAR
-    "\xE2\x9C\xB7",  // ✷ U+2737 EIGHT POINTED RECTILINEAR BLACK STAR
-    "\xE2\x9C\xB8",  // ✸ U+2738 HEAVY EIGHT POINTED RECTILINEAR BLACK STAR
-    "\xE2\x9C\xB9",  // ✹ U+2739 TWELVE POINTED BLACK STAR
-    "\xE2\x9C\xBA",  // ✺ U+273A SIXTEEN POINTED ASTERISK
-    "\xE2\x9C\xBB",  // ✻ U+273B TEARDROP-SPOKED ASTERISK
-    "\xE2\x9C\xBC",  // ✼ U+273C OPEN CENTRE TEARDROP-SPOKED ASTERISK
-    "\xE2\x9C\xBD",  // ✽ U+273D HEAVY TEARDROP-SPOKED ASTERISK
+    "\xE2\xA3\xBE",  // ⣾ U+28FE
+    "\xE2\xA3\xBD",  // ⣽ U+28FD
+    "\xE2\xA3\xBB",  // ⣻ U+28FB
+    "\xE2\xA2\xBF",  // ⢿ U+28BF
+    "\xE2\xA1\xBF",  // ⡿ U+287F
+    "\xE2\xA0\xBF",  // ⠿ U+283F
+    "\xE2\xA2\xAF",  // ⢯ U+28AF
+    "\xE2\xA3\xB7",  // ⣷ U+28F7
 };
 constexpr int kGlyphCount = sizeof(kSpinnerGlyphs) / sizeof(kSpinnerGlyphs[0]);
+constexpr int kGlyphCols  = 1; // braille glyphs are unambiguously 1-column wide
 
 // Format `N seconds` as either `Xs` for short waits or `Xm Ys`
 // for long ones, matching Claude Code's compact time rendering.
@@ -1135,62 +1142,86 @@ void Spinner::run() {
         frame.reserve(128);
         frame += glyph_wrap;
         frame += glyph;
-        frame += "\x1b[0m ";
+        frame += "\x1b[0m "; // 1 space — braille glyphs are cleanly 1-col wide
         frame += verb_wrap;
         if (!verb_bright) frame += "\x1b[2m"; // stack faint for the pulse dip
         frame += verb_str;
         frame += "\x1b[0m  ";
         frame += muted(tail);
 
-        // Truncate to terminal_width()-1 so long lines never wrap.
-        // Walk the frame string tracking visible columns (ANSI escape
-        // sequences are zero-width; UTF-8 multi-byte sequences count
-        // as one column each). When we hit the budget we record the
-        // cut point and stop — then rebuild the string up to that
-        // byte offset and append … (1 col).  This is O(n) in the
-        // frame length and never pops bytes from the raw string, so
-        // it can't mis-count escape bytes as display columns.
+        // Truncate the frame so it never exceeds terminal_width() visible
+        // columns and cannot wrap.  Strategy:
+        //   • Walk the frame counting visible columns, skipping ANSI CSI
+        //     escape sequences (which are zero-width).  UTF-8 multi-byte
+        //     sequences are counted as 1 column each (all of our spinner
+        //     glyphs and Latin text satisfy this).
+        //   • If the frame fits within `width` columns → render as-is.
+        //   • If the frame exceeds `width` columns → cut to `width - 1`
+        //     visible columns, close any open colour escape, then append
+        //     `…` (1 col).  Total rendered width is then exactly `width`.
+        //
+        // Two bugs fixed vs. the previous version:
+        //   1. `budget = width - 1` caused content to be cut one column
+        //      too early: a frame of exactly `width` columns was truncated
+        //      and had its last character replaced by `…`, making the
+        //      spinner appear clipped when it would have fit.
+        //   2. The CSI final-byte check only exited `in_esc` on 'm'.
+        //      The standard range is 0x40–0x7E; using only 'm' meant any
+        //      future sequence ending differently would be mis-counted.
         const int width = terminal_width();
         if (width > 4) {
-            const int budget = width - 2; // -1 for safety, -1 for the … we may append
-            int  display_cols = 0;
-            bool in_esc       = false;
-            size_t cut        = frame.size(); // byte index to cut at (default: no cut)
-            bool   needs_cut  = false;
+            int    display_cols  = 0;
+            bool   in_esc        = false;
+            // Byte index of the start of the last character that fit.
+            // Initialised to 0; only valid when display_cols > 0.
+            size_t last_char_start = 0;
+            size_t cut             = std::string::npos; // set when truncation needed
+            bool   needs_cut       = false;
 
             for (size_t i = 0; i < frame.size(); ) {
                 const unsigned char c = static_cast<unsigned char>(frame[i]);
                 if (in_esc) {
-                    if (c == 'm') in_esc = false;
+                    // Standard CSI final byte range 0x40–0x7E (includes 'm',
+                    // 'K', 'H', 'J', 'A'–'D', …).
+                    if (c >= 0x40 && c <= 0x7E) in_esc = false;
                     ++i;
                     continue;
                 }
                 if (c == 0x1b) { in_esc = true; ++i; continue; }
 
-                // Determine byte-length and column-width of this char.
+                // Byte-length of this UTF-8 code point.
                 int char_bytes = 1;
                 if      ((c & 0xE0) == 0xC0) char_bytes = 2;
                 else if ((c & 0xF0) == 0xE0) char_bytes = 3;
                 else if ((c & 0xF8) == 0xF0) char_bytes = 4;
-                // All of our spinner glyphs and Latin text are 1 column.
-                const int char_cols = (char_bytes == 1 && c < 0x80) ? 1 : 1;
+                // The spinner glyph (first visible char, 3-byte UTF-8) is
+                // 1 column wide — braille glyphs fit cleanly in their cell.
+                const int char_cols = 1;
 
-                if (display_cols + char_cols > budget) {
-                    cut = i;
+                if (display_cols + char_cols > width) {
+                    // This character would push the line past the terminal
+                    // edge.  Back up: cut just before the previous
+                    // character (so the frame ends at width-1 cols) and
+                    // append … (1 col) → total exactly width.
+                    cut = last_char_start;
                     needs_cut = true;
                     break;
                 }
-                display_cols += char_cols;
-                i += char_bytes;
+
+                last_char_start = i;
+                display_cols   += char_cols;
+                i              += char_bytes;
             }
 
             if (needs_cut) {
                 frame.resize(cut);
+                // Close any open colour escape so … isn't rainbow-tinted.
+                frame += "\x1b[0m";
                 frame += "\xE2\x80\xA6"; // … (1 column)
             }
         }
 
-        std::cout << "\r\x1b[2K" << dim(frame) << std::flush;
+        std::cout << "\r\x1b[2K" << frame << "\x1b[0m" << std::flush;
 
         glyph_idx = (glyph_idx + 1) % kGlyphCount;
         ++frame_count;
