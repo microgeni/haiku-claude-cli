@@ -20,6 +20,14 @@ See `docs/GIT_WORKFLOW.md` for full details.
 - **Tags**: semantic versioning `v{MAJOR}.{MINOR}.{PATCH}`
 - **CI**: Gitea Actions builds and tests every push (`.gitea/workflows/build-test.yml`)
 
+### Release checklist (do in this order)
+1. `bash ci_scripts/test.sh` — all tests must pass
+2. Update `CHANGELOG.md` — add `## [x.y.z] - YYYY-MM-DD` section **before** tagging
+3. `git add CHANGELOG.md && git commit -m "docs: changelog for vx.y.z"`
+4. `make release` — verify the binary builds clean
+5. `git tag -a vx.y.z -m "Release vx.y.z — <one-line summary>"`
+6. `git push origin main --tags`
+
 
 ## Build Environment
 
