@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <numeric>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -51,7 +52,7 @@ volatile sig_atomic_t g_interrupted = 0;
 
 namespace {
 
-constexpr const char* kVersion      = "1.4.4";
+constexpr const char* kVersion      = "1.4.5";
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
 constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
@@ -1208,12 +1209,48 @@ std::atomic<bool> g_telegram_muted { false };
 // etc.). Interactive TTY sessions still prompt normally.
 bool g_allow_destructive_tools = false;
 
+// Ludicrous mode: session-scoped toggle that auto-approves all
+// destructive tool calls and skips permission prompts entirely.
+// Toggled on/off via the /ludicrous slash command.
+std::atomic<bool> g_ludicrous_mode { false };
+
+// Telegram permission hook. When the bridge is handling a turn it
+// installs a callback here so that prompt_permission can send an
+// inline-keyboard message and block until the user taps a button,
+// instead of falling through to the blanket allow/deny logic.
+// Signature: (tool_name, preview_text) → Permission.
+// Cleared to nullptr after each turn.
+std::function<Permission(const std::string&, const std::string&)> g_telegram_permission_hook;
+
 Permission prompt_permission(const std::string& tool_name, const json& input,
                              std::string* denial_reason = nullptr) {
     if (always_allowed().count(tool_name)) return Permission::Allow;
     if (!tools::requires_permission(tool_name)) return Permission::Allow;
 
+    // Ludicrous mode: all permissions auto-approved, no prompts.
+    if (g_ludicrous_mode.load()) {
+        std::cout << tui::dim("  \xE2\x9A\xA1 ludicrous: auto-approved " + tool_name) << "\n";
+        return Permission::Allow;
+    }
+
     if (g_non_interactive_tools) {
+        // If the Telegram bridge has installed a permission hook,
+        // use it: send a message with inline buttons and block until
+        // the user taps one, rather than silently allowing/denying.
+        if (g_telegram_permission_hook) {
+            const std::string extra = tools::preview(tool_name, input);
+            const std::string preview = extra.empty()
+                ? (tool_name + " " + short_input_summary(input))
+                : extra;
+            // Also show on local terminal so operator sees the prompt.
+            if (!extra.empty()) std::cout << tui::dim(extra) << "\n";
+            else std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n";
+            std::cout << tui::bold("allow " + tool_name + "? ") << tui::dim("[awaiting Telegram response]") << "\n" << std::flush;
+            const Permission p = g_telegram_permission_hook(tool_name, preview);
+            const char* lbl = (p == Permission::Allow) ? "yes" : "no";
+            std::cout << tui::dim(std::string("  -> ") + lbl) << "\n";
+            return p;
+        }
         if (g_non_interactive_allow_destructive) return Permission::Allow;
         if (denial_reason) {
             *denial_reason =
@@ -1253,76 +1290,35 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
     } else {
         std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n";
     }
-    std::cout << tui::bold("allow " + tool_name + "? ")
-              << tui::dim("(y)es once, (a)lways this session, (n)o") << "\n"
-              << std::flush;
+    std::cout << tui::bold("allow " + tool_name + "?") << "\n" << std::flush;
 
-    // Hop the cursor down to the fixed input row so the answer
-    // keystrokes echo there instead of inside the scroll region.
-    // No-op when the status frame isn't active; in that case the
-    // prompt still reads normally from wherever the cursor is.
-    tui::position_cursor_for_input();
-    std::cout << tui::user_prompt() << std::flush;
-
-    // The outer EscInterruptGuard (active during tool turns) holds stdin
-    // in cbreak/non-canonical mode. Restore cooked mode briefly so that
-    // getline works normally (echoes chars, waits for Enter). We'll
-    // re-arm cbreak after reading the answer.
-    struct termios cooked {};
-    bool restored_cooked = false;
-    if (isatty(STDIN_FILENO)) {
-        struct termios cur {};
-        if (tcgetattr(STDIN_FILENO, &cur) == 0) {
-            cooked = cur;
-            cur.c_lflag |= (ICANON | ECHO);
-            cur.c_cc[VMIN]  = 1;
-            cur.c_cc[VTIME] = 0;
-            tcsetattr(STDIN_FILENO, TCSANOW, &cur);
-            restored_cooked = true;
-        }
-    }
-
-    std::string line;
-    const bool got = static_cast<bool>(std::getline(std::cin, line));
-
-    // Put stdin back into cbreak so the outer EscInterruptGuard can
-    // keep detecting Esc between tool calls.
-    if (restored_cooked) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &cooked);
-    }
-
-    // After getline the cursor has advanced one row below the
-    // input (because the enter key echoed a newline), which is
-    // the rule row. Pull it back into the scroll region so the
-    // next streamed output lands in the right place.
+    // Render the three choices as a vertical arrow-key menu.
+    // tui::select_option puts stdin into raw mode, draws the list,
+    // and returns a 0-based index. We don't touch termios ourselves.
+    tui::position_cursor_for_chat();
+    const std::vector<std::string> choices = {
+        "Yes, allow once",
+        "Always allow this session",
+        "No, deny",
+    };
+    const int picked = tui::select_option(choices);
     tui::position_cursor_for_chat();
 
-    // Esc pressed while waiting for permission → treat as "no".
-    if (g_interrupted) {
-        std::cout << tui::dim("  -> no (interrupted)") << "\n";
+    // Echo the choice into scroll history so the record is clear.
+    const char* label = (picked == 0) ? "yes"
+                      : (picked == 1) ? "always"
+                      :                 "no";
+    std::cout << tui::dim(std::string("  -> ") + label) << "\n";
+
+    if (g_interrupted && picked >= static_cast<int>(choices.size()) - 1) {
         if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
         return Permission::Deny;
     }
-
-    if (!got) {
-        if (denial_reason) {
-            *denial_reason = "stdin closed before permission answer for " + tool_name;
-        }
-        return Permission::Deny;
-    }
-    const char c = line.empty() ? 'n' : static_cast<char>(std::tolower(static_cast<unsigned char>(line[0])));
-    // Echo the user's choice back into the scroll history so the
-    // record shows what they answered — otherwise the answer is
-    // only visible on the ephemeral input row.
-    const char* label = (c == 'y') ? "yes"
-                      : (c == 'a') ? "always"
-                      :              "no";
-    std::cout << tui::dim(std::string("  -> ") + label) << "\n";
-    if (c == 'a') {
+    if (picked == 1) {
         always_allowed().insert(tool_name);
         return Permission::Allow;
     }
-    if (c == 'y') return Permission::Allow;
+    if (picked == 0) return Permission::Allow;
     if (denial_reason) {
         *denial_reason = "user declined permission for " + tool_name;
     }
@@ -1771,6 +1767,7 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
             "  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
             "  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
             "  /remote-control    toggle Telegram remote poller on/off\n"
+            "  /ludicrous         toggle ludicrous mode (auto-approve all tool permissions)\n"
             "  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
                   << "\n";
         const auto custom = commands::names();
@@ -1792,11 +1789,33 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         return SlashAction::Continue;
     }
     if (cmd == "/memory") {
-        const std::string target = (args == "user") ? paths::user_memory_path()
-                                                     : paths::project_memory_path();
+        // With an explicit "user" arg go straight there; otherwise
+        // show a picker so the user can choose project or user scope.
+        std::string target;
         if (args == "user") {
+            target = paths::user_memory_path();
             const auto slash = target.rfind('/');
             if (slash != std::string::npos) paths::mkdir_p(target.substr(0, slash));
+        } else if (!args.empty()) {
+            // Any other explicit arg is treated as a direct path (future-proofing).
+            target = paths::project_memory_path();
+        } else {
+            // Interactive picker: project vs user.
+            const std::string proj = paths::project_memory_path();
+            const std::string user = paths::user_memory_path();
+            const std::vector<std::string> options = {
+                "Project  (" + proj + ")",
+                "User     (" + user + ")",
+            };
+            std::cout << tui::bold("open memory file:") << "\n";
+            const int picked = tui::select_option(options);
+            if (picked == 1) {
+                target = user;
+                const auto slash = target.rfind('/');
+                if (slash != std::string::npos) paths::mkdir_p(target.substr(0, slash));
+            } else {
+                target = proj;
+            }
         }
         const char* editor_env = std::getenv("EDITOR");
         const std::string editor = editor_env && *editor_env ? editor_env : "nano";
@@ -1890,6 +1909,18 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
     if (cmd == "/exit" || cmd == "/quit") {
         return SlashAction::Quit;
     }
+    if (cmd == "/ludicrous") {
+        const bool now = !g_ludicrous_mode.load();
+        g_ludicrous_mode.store(now);
+        if (now) {
+            std::cout << tui::yellow("\xE2\x9A\xA1 LUDICROUS MODE ENGAGED")
+                      << tui::dim(" \xe2\x80\x94 all tool permissions auto-approved") << "\n";
+        } else {
+            std::cout << tui::dim("\xE2\x9A\xA1 Ludicrous mode off \xe2\x80\x94 permission prompts restored") << "\n";
+        }
+        if (ctx.redraw_status) ctx.redraw_status();
+        return SlashAction::Continue;
+    }
     if (cmd == "/clear") {
         ctx.messages        = json::array();
         ctx.turn_count      = 0;
@@ -1901,23 +1932,55 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
     }
     if (cmd == "/model") {
         if (args.empty()) {
-            // List all available models from the API, marking the active one.
+            // Fetch the model list and show an interactive picker.
             const auto models = fetch_models(ctx.auth);
             if (models.empty()) {
                 std::cout << tui::meta("[current model: " + ctx.model + "]") << "\n";
                 std::cout << tui::meta("[could not fetch model list — check connection/key]") << "\n";
+                return SlashAction::Continue;
+            }
+            // Build option strings. Include display_name if it differs from id.
+            std::vector<std::string> options;
+            options.reserve(models.size());
+            int preselect = 0;
+            for (int i = 0; i < static_cast<int>(models.size()); ++i) {
+                const auto& m = models[i];
+                std::string label = m.id;
+                if (m.display_name != m.id)
+                    label += "  (" + m.display_name + ")";
+                options.push_back(std::move(label));
+                if (m.id == ctx.model) preselect = i;
+            }
+            std::cout << tui::bold("select model:") << "\n";
+            // Prime the selector on the currently active model.
+            // select_option always starts at index 0; swap the active
+            // model to the top so it's highlighted by default, then
+            // map back to the real index after the user picks.
+            // Simpler: just note the preselect index and pass it via
+            // a wrapper that renders with the cursor starting there.
+            // tui::select_option starts at 0, so we pass a reordered
+            // list with the active model first, then remap.
+            std::vector<std::string> ordered = options;
+            std::vector<int>         index_map(models.size());
+            std::iota(index_map.begin(), index_map.end(), 0);
+            if (preselect > 0) {
+                // Rotate so active model is first.
+                std::rotate(ordered.begin(),
+                            ordered.begin() + preselect,
+                            ordered.end());
+                std::rotate(index_map.begin(),
+                            index_map.begin() + preselect,
+                            index_map.end());
+            }
+            const int picked = tui::select_option(ordered);
+            const int real_idx = index_map[picked];
+            const std::string chosen = models[real_idx].id;
+            if (chosen != ctx.model) {
+                ctx.model = chosen;
+                std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
+                if (ctx.redraw_status) ctx.redraw_status();
             } else {
-                std::string listing = "available models (active marked with *):\n";
-                for (const auto& m : models) {
-                    const bool active = (m.id == ctx.model);
-                    listing += std::string("  ") + (active ? "* " : "  ")
-                             + m.id;
-                    if (m.display_name != m.id)
-                        listing += "  (" + m.display_name + ")";
-                    listing += "\n";
-                }
-                listing += "\nuse /model <id> to switch";
-                std::cout << tui::meta(listing) << "\n";
+                std::cout << tui::meta("[model unchanged: " + ctx.model + "]") << "\n";
             }
         } else {
             ctx.model = args;
@@ -2009,6 +2072,19 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
         if (ctx.messages.empty()) {
             std::cout << tui::meta("[nothing to compact]") << "\n";
             return SlashAction::Continue;
+        }
+        // Confirmation prompt — compacting replaces the whole history.
+        {
+            const std::vector<std::string> options = {
+                "Yes, summarize and replace history",
+                "No, keep history as-is",
+            };
+            std::cout << tui::bold("compact conversation history?") << "\n";
+            const int picked = tui::select_option(options);
+            if (picked != 0) {
+                std::cout << tui::meta("[compact cancelled]") << "\n";
+                return SlashAction::Continue;
+            }
         }
         json request_messages = ctx.messages;
         request_messages.push_back({
@@ -2337,7 +2413,8 @@ private:
         const auto result = send_with_tools(auth_, cfg_model_, cfg_max_tokens_,
                                             messages, effective_system);
         std::cout << "\n";
-        g_non_interactive_tools = false;
+        g_non_interactive_tools    = false;
+        g_telegram_permission_hook = nullptr;
 
         if (result.exit_code != 0 || result.assistant_text.empty()) {
             messages = snapshot;
@@ -2476,7 +2553,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     std::vector<std::string> all_slash = {
         "/help", "/clear", "/model", "/compact", "/usage",
         "/todos", "/memory", "/stats", "/open", "/notify",
-        "/remote-control", "/exit", "/quit",
+        "/remote-control", "/ludicrous", "/exit", "/quit",
     };
     for (const auto& c : commands::names()) all_slash.push_back("/" + c);
     repl::set_slash_commands(all_slash);
@@ -2545,8 +2622,12 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
     // Mute state gets an appended "· muted" marker in yellow.
     auto compose_status = [&]() {
         std::string right;
+        if (g_ludicrous_mode.load()) {
+            right = tui::yellow("\xE2\x9A\xA1 LUDICROUS");
+        }
         if (remote && remote->running()) {
-            right = tui::green("Remote Control active");
+            if (!right.empty()) right += tui::dim("  \xC2\xB7  ");
+            right += tui::green("Remote Control active");
             if (g_telegram_muted.load()) {
                 right += tui::yellow(" \xC2\xB7 muted");
             }
@@ -2599,6 +2680,7 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
                 std::cout << "\n";
                 break;
             }
+            tui::clear_input_row();
             // libedit drew the prompt on the fixed input row and
             // echoed a newline on enter. Push the cursor back
             // into the scroll region and replay the submitted
@@ -3009,11 +3091,13 @@ int run_telegram_bridge(const Config& cfg) {
     // the operator always sees that the bridge is live, with
     // "· muted" appended in yellow when /mute is toggled on.
     auto compose_bridge_status = [&]() {
-        const std::string base_label =
-            tui::green("Remote Control active");
-        const std::string label = g_telegram_muted.load()
-            ? base_label + tui::yellow(" \xC2\xB7 muted")
-            : base_label;
+        std::string label = tui::green("Remote Control active");
+        if (g_ludicrous_mode.load()) {
+            label = tui::yellow("\xE2\x9A\xA1 LUDICROUS") + tui::dim("  \xC2\xB7  ") + label;
+        }
+        if (g_telegram_muted.load()) {
+            label += tui::yellow(" \xC2\xB7 muted");
+        }
         return format_status_row(active_model, turn_count, session_input,
                                  session_output, cfg.max_tokens, label);
     };
@@ -3121,6 +3205,47 @@ int run_telegram_bridge(const Config& cfg) {
 
         g_non_interactive_tools             = non_interactive;
         g_non_interactive_allow_destructive = allow_destructive;
+
+        // Install a Telegram permission hook so prompt_permission can
+        // ask the user via inline keyboard buttons instead of silently
+        // denying. The hook sends a message with three buttons and
+        // mini-polls getUpdates until a callback or "always" comes
+        // back from this chat.
+        if (non_interactive && chat_id != 0) {
+            g_telegram_permission_hook = [&](const std::string& tool_name,
+                                             const std::string& preview) -> Permission {
+                // Build the question message.
+                const std::string question =
+                    "\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
+                // Three buttons, one per row.
+                const std::vector<std::vector<telegram::Button>> kb = {
+                    {{ "1. Yes, allow once",          "perm:yes"    }},
+                    {{ "2. Always allow this session", "perm:always" }},
+                    {{ "3. No, deny",                 "perm:no"     }},
+                };
+                client.send_message(chat_id, question, kb);
+                // Mini-poll loop: short-poll (2 s) until we get one of
+                // our perm:* callbacks from this user/chat.
+                std::atomic<bool> keep_going { true };
+                while (!g_interrupted) {
+                    const auto updates = client.poll(2, &keep_going);
+                    for (const auto& u : updates) {
+                        if (!u.is_callback) continue;
+                        if (u.chat_id != chat_id) continue;
+                        client.answer_callback(u.callback_query_id);
+                        if (u.text == "perm:always") {
+                            always_allowed().insert(tool_name);
+                            return Permission::Allow;
+                        }
+                        if (u.text == "perm:yes")  return Permission::Allow;
+                        if (u.text == "perm:no")   return Permission::Deny;
+                        // Tap on some unrelated button — keep waiting.
+                    }
+                }
+                return Permission::Deny; // interrupted
+            };
+        }
+
         // Refresh OAuth token before each call so long-running
         // bridge sessions don't hit 401 after the token expires.
         auth = resolve_auth();
@@ -3142,7 +3267,8 @@ int run_telegram_bridge(const Config& cfg) {
         const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
                                             messages, effective_system);
         std::cout << "\n";
-        g_non_interactive_tools = false;
+        g_non_interactive_tools    = false;
+        g_telegram_permission_hook = nullptr;
 
         ++turn_count;
         session_input  += result.input_tokens;
@@ -3335,7 +3461,8 @@ int run_telegram_bridge(const Config& cfg) {
         const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
                                             messages, effective_system);
         std::cout << "\n";
-        g_non_interactive_tools = false;
+        g_non_interactive_tools    = false;
+        g_telegram_permission_hook = nullptr;
 
         ++turn_count;
         session_input  += result.input_tokens;
@@ -3404,7 +3531,7 @@ int run_telegram_bridge(const Config& cfg) {
         std::vector<std::string> all_slash = {
             "/help", "/clear", "/model", "/compact", "/usage",
             "/todos", "/memory", "/stats", "/open", "/notify",
-            "/mute", "/unmute", "/exit", "/quit",
+            "/mute", "/unmute", "/ludicrous", "/exit", "/quit",
         };
         for (const auto& c : commands::names()) all_slash.push_back("/" + c);
         repl::set_slash_commands(all_slash);
@@ -3421,6 +3548,7 @@ int run_telegram_bridge(const Config& cfg) {
             std::cout << "\n";
             break;
         }
+        tui::clear_input_row();
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
             line.pop_back();
         }
