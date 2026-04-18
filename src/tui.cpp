@@ -340,7 +340,14 @@ int select_option(const std::vector<std::string>& options) {
             } else {
                 std::cout << "  " << dim(num) << dim(options[i]);
             }
-            if (i < n - 1) std::cout << "\n"; // no trailing newline after last
+            if (i < n - 1) {
+                // Use \x1b[1B\r (cursor-down + CR) instead of \n.
+                // The cursor starts at the bottom of the DECSTBM scroll
+                // region; emitting \n there causes the terminal to scroll
+                // the region up, shifting the menu's absolute row on every
+                // redraw and breaking highlight updates on arrow keypresses.
+                std::cout << "\x1b[1B\r";
+            }
         }
         // Move cursor back to the first option line so the next
         // render overwrites from the same position.

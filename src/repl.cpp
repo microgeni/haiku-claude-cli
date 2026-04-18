@@ -174,10 +174,10 @@ bool read_message(const std::string& prompt,
         const std::string fence = first;
         while (true) {
             std::string next;
-            // Park the cursor at the bottom of the scroll region so
-            // libedit draws the continuation prompt inside the
-            // scrolling chat area rather than below the fixed frame.
-            tui::position_cursor_for_chat();
+            // Park the cursor back in the fixed input row (N-2) so
+            // libedit draws the continuation prompt there, not in the
+            // scroll region above it.
+            tui::position_cursor_for_input();
             if (!read_line(continuation_prompt, next)) {
                 return !out.empty();
             }
@@ -194,10 +194,10 @@ bool read_message(const std::string& prompt,
         out.push_back('\n');
         while (true) {
             std::string next;
-            // Park the cursor at the bottom of the scroll region so
-            // libedit draws the continuation prompt inside the
-            // scrolling chat area rather than below the fixed frame.
-            tui::position_cursor_for_chat();
+            // Park the cursor back in the fixed input row (N-2) so
+            // libedit draws the continuation prompt there, not in the
+            // scroll region above it.
+            tui::position_cursor_for_input();
             if (!read_line(continuation_prompt, next)) {
                 return true;
             }
