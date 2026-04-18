@@ -329,8 +329,9 @@ int select_option(const std::vector<std::string>& options) {
     // Render the menu. Each option takes one line. We'll use ANSI
     // cursor-up to redraw in-place on each keystroke.
     auto render = [&]() {
-        // On first call we're already positioned in the scroll region.
-        // Erase and reprint each option line.
+        // Always start from column 0 so erased+reprinted text aligns
+        // correctly regardless of where the previous render left the cursor.
+        std::cout << "\r";
         for (int i = 0; i < n; ++i) {
             std::cout << "\x1b[2K"; // erase line
             const std::string num = std::to_string(i + 1) + ". ";
@@ -349,10 +350,11 @@ int select_option(const std::vector<std::string>& options) {
                 std::cout << "\x1b[1B\r";
             }
         }
-        // Move cursor back to the first option line so the next
-        // render overwrites from the same position.
+        // Move cursor back to the first option line so the next render
+        // overwrites from the same position. \r resets column to 0 since
+        // \x1b[NA is a vertical-only move and preserves the current column.
         if (n > 1) std::cout << "\x1b[" << (n - 1) << "A";
-        std::cout << std::flush;
+        std::cout << "\r" << std::flush;
     };
 
     render();
