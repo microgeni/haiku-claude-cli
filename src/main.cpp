@@ -457,11 +457,18 @@ public:
         running_.store(true);
         thread_ = std::thread([this]() {
             while (running_.load()) {
+                // When paused, spin on a short sleep without touching stdin
+                // so that tui::select_option() has exclusive access to it.
+                if (paused_.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+
                 struct pollfd pfd {};
                 pfd.fd     = STDIN_FILENO;
                 pfd.events = POLLIN;
                 const int r = ::poll(&pfd, 1, 100);
-                if (!running_.load()) break;
+                if (!running_.load() || paused_.load()) continue;
                 if (r <= 0) continue;
                 if (!(pfd.revents & POLLIN)) continue;
 
@@ -492,15 +499,27 @@ public:
         }
     }
 
+    // Temporarily stop reading stdin so another component (e.g.
+    // tui::select_option) can have exclusive access to it.
+    // The background thread spins on a sleep until resume() is called.
+    void pause()  { paused_.store(true);  }
+    void resume() { paused_.store(false); }
+
     EscInterruptGuard(const EscInterruptGuard&) = delete;
     EscInterruptGuard& operator=(const EscInterruptGuard&) = delete;
 
 private:
     std::atomic<bool> running_ { false };
+    std::atomic<bool> paused_  { false };
     std::thread       thread_;
     termios           saved_ {};
     bool              saved_valid_ = false;
 };
+
+// Pointer to the currently active EscInterruptGuard (if any).
+// Set in send_with_tools so that prompt_permission can pause/resume
+// it around tui::select_option() calls.
+static EscInterruptGuard* g_active_esc_guard = nullptr;
 
 struct Config {
     std::string model;
@@ -1301,7 +1320,15 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
         "Always allow this session",
         "No, deny",
     };
+    // Pause the EscInterruptGuard background thread while select_option()
+    // has exclusive ownership of stdin in raw mode. Without this, the
+    // guard's thread races to read ESC bytes and arrow-key sequences
+    // (ESC [ A/B) are either consumed before select_option sees them or
+    // split across both readers — causing ↑/↓ to misbehave or register
+    // as a "no" answer.
+    if (g_active_esc_guard) g_active_esc_guard->pause();
     const int picked = tui::select_option(choices);
+    if (g_active_esc_guard) g_active_esc_guard->resume();
     tui::position_cursor_for_chat();
 
     // Echo the choice into scroll history so the record is clear.
@@ -1340,6 +1367,12 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
     // are executing (Bash, WebFetch, etc.). EscInterruptGuard already
     // handles the non-TTY / isatty check internally and is a no-op there.
     EscInterruptGuard esc_guard;
+    g_active_esc_guard = &esc_guard;
+    // Clear the global pointer when send_with_tools returns so nobody
+    // holds a dangling reference to esc_guard after it is destroyed.
+    struct EscGuardScope {
+        ~EscGuardScope() { g_active_esc_guard = nullptr; }
+    } esc_guard_scope;
 
     while (true) {
         // Honour any interrupt that arrived between turns (e.g. Esc pressed
