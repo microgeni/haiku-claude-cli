@@ -18,7 +18,14 @@ jobs:
     runs-on: haiku-x64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        run: |
+          if [ -d .git ]; then
+            git fetch origin
+            git reset --hard origin/${GITHUB_REF_NAME:-dev}
+          else
+            git clone "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
+            git checkout "${GITHUB_REF_NAME:-dev}"
+          fi
 
       - name: Build
         run: make
