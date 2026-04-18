@@ -12,26 +12,33 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  HAIKU_HOST: taurus.microgeni.synology.me
+  HAIKU_USER: user
+  HAIKU_PROJECT_PATH: /Data/Code/Projects/haiku-claude-cli
+
 jobs:
   build-and-test:
     name: Build & Test
     runs-on: haiku-x64
     steps:
       - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync to Haiku
+        env:
+          REF: ${{ github.ref_name }}
+        run: ./ci_scripts/sync_to_haiku.sh
+
+      - name: Build on Haiku
         run: |
-          if [ -d .git ]; then
-            git fetch origin
-            git reset --hard origin/${GITHUB_REF_NAME:-dev}
-          else
-            git clone "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
-            git checkout "${GITHUB_REF_NAME:-dev}"
-          fi
+          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh </dev/null"
 
-      - name: Build
-        run: make
-
-      - name: Test
-        run: ./ci_scripts/test.sh
+      - name: Test on Haiku
+        run: |
+          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/test.sh </dev/null"
 
       - name: Summary
         if: always()
