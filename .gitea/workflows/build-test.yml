@@ -27,12 +27,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Add Haiku host key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEVOPS_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           echo "taurus.microgeni.synology.me ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICnfvfj1NfZYS9f9wDO1/uvjEt4xPI+JsKtTSdUJDoDD" >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-          echo "${{ secrets.DEVOPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
       - name: Sync to Haiku
