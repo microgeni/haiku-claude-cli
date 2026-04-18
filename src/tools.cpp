@@ -2,14 +2,21 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstring>
 #include <fstream>
 #include <glob.h>
+#include <poll.h>
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
+
+// Shared cancellation flag — set by Esc or Ctrl+C in main.cpp.
+extern volatile sig_atomic_t g_interrupted;
 
 #include <curl/curl.h>
 
@@ -430,7 +437,6 @@ ToolResult run_webfetch(const json& input) {
 ToolResult run_bash(const json& input) {
     const std::string command  = input.value("command", std::string{});
     const int         timeout  = input.value("timeout_seconds", 60);
-    (void)timeout; // not enforced in this slice — parent trusts grace of fork+wait
     if (command.empty()) {
         return {"error: Bash requires a `command` argument", true};
     }
@@ -448,6 +454,9 @@ ToolResult run_bash(const json& input) {
     }
 
     if (pid == 0) {
+        // Put the child in its own process group so we can kill the
+        // whole group (child + any grandchildren) cleanly on cancel.
+        setsid();
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
         if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
@@ -458,16 +467,69 @@ ToolResult run_bash(const json& input) {
     }
 
     close(pipefd[1]);
+
+    // Deadline for the timeout (0 means no timeout enforced).
+    const auto start_time = std::chrono::steady_clock::now();
+    const bool has_timeout = (timeout > 0);
+
     std::string output;
     char        buf[4096];
-    ssize_t     n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+    bool        killed = false;
+
+    // Poll the read end in short bursts so we can react to
+    // g_interrupted (Esc / Ctrl+C) or a timeout without blocking
+    // indefinitely in read().
+    while (true) {
+        if (g_interrupted) {
+            killed = true;
+            break;
+        }
+        if (has_timeout) {
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - start_time).count();
+            if (elapsed >= static_cast<double>(timeout)) {
+                killed = true;
+                break;
+            }
+        }
+
+        struct pollfd pfd {};
+        pfd.fd     = pipefd[0];
+        pfd.events = POLLIN;
+        const int r = ::poll(&pfd, 1, 100); // 100 ms tick
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) continue; // timeout tick — loop back to check flags
+
+        if (!(pfd.revents & POLLIN)) break; // HUP / ERR — child closed pipe
+        const ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) break; // EOF
         output.append(buf, static_cast<size_t>(n));
     }
+
     close(pipefd[0]);
+
+    if (killed) {
+        // Kill the entire process group (negative pid = pgid from setsid).
+        ::kill(-pid, SIGTERM);
+        // Give it a moment to die gracefully, then SIGKILL.
+        struct timespec ts { 0, 200'000'000 }; // 200 ms
+        ::nanosleep(&ts, nullptr);
+        ::kill(-pid, SIGKILL);
+    }
 
     int status = 0;
     waitpid(pid, &status, 0);
+
+    if (killed && g_interrupted) {
+        return {"[interrupted]", true};
+    }
+    if (killed) {
+        // Timeout path.
+        return {"error: command timed out after " + std::to_string(timeout) + "s\n" + output, true};
+    }
 
     constexpr size_t kMaxBytes = 32 * 1024;
     if (output.size() > kMaxBytes) {
@@ -563,6 +625,7 @@ ToolResult run_grep(const json& input) {
     }
 
     if (pid == 0) {
+        setsid(); // own process group so kill(-pid, ...) reaches it
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
         if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
@@ -574,14 +637,39 @@ ToolResult run_grep(const json& input) {
     close(pipefd[1]);
     std::string output;
     char        buf[4096];
-    ssize_t     n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+    bool        killed = false;
+
+    while (true) {
+        if (g_interrupted) { killed = true; break; }
+
+        struct pollfd pfd {};
+        pfd.fd     = pipefd[0];
+        pfd.events = POLLIN;
+        const int r = ::poll(&pfd, 1, 100); // 100 ms tick
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) continue; // tick — recheck g_interrupted
+
+        if (!(pfd.revents & POLLIN)) break; // HUP/ERR
+        const ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) break; // EOF
         output.append(buf, static_cast<size_t>(n));
     }
     close(pipefd[0]);
 
+    if (killed) {
+        ::kill(-pid, SIGTERM);
+        struct timespec ts { 0, 200'000'000 };
+        ::nanosleep(&ts, nullptr);
+        ::kill(-pid, SIGKILL);
+    }
+
     int status = 0;
     waitpid(pid, &status, 0);
+
+    if (killed) return {"[interrupted]", true};
 
     if (!WIFEXITED(status)) {
         return {"error: grep terminated abnormally", true};
@@ -864,6 +952,7 @@ ToolResult exec_capture(const char* const argv[]) {
         return {std::string("error: fork() failed: ") + std::strerror(errno), true};
     }
     if (pid == 0) {
+        setsid(); // own process group so we can kill descendants
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
         if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
@@ -873,14 +962,41 @@ ToolResult exec_capture(const char* const argv[]) {
     }
     close(pipefd[1]);
     std::string output;
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+    char        buf[4096];
+    bool        killed = false;
+
+    while (true) {
+        if (g_interrupted) { killed = true; break; }
+
+        struct pollfd pfd {};
+        pfd.fd     = pipefd[0];
+        pfd.events = POLLIN;
+        const int r = ::poll(&pfd, 1, 100); // 100 ms tick
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) continue; // tick — recheck g_interrupted
+
+        if (!(pfd.revents & POLLIN)) break; // HUP/ERR
+        const ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) break; // EOF
         output.append(buf, static_cast<size_t>(n));
     }
     close(pipefd[0]);
+
+    if (killed) {
+        ::kill(-pid, SIGTERM);
+        struct timespec ts { 0, 200'000'000 };
+        ::nanosleep(&ts, nullptr);
+        ::kill(-pid, SIGKILL);
+    }
+
     int status = 0;
     waitpid(pid, &status, 0);
+
+    if (killed) return {"[interrupted]", true};
+
     constexpr size_t kMaxBytes = 32 * 1024;
     if (output.size() > kMaxBytes) {
         output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
