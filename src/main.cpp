@@ -459,10 +459,14 @@ public:
             while (running_.load()) {
                 // When paused, spin on a short sleep without touching stdin
                 // so that tui::select_option() has exclusive access to it.
+                // Set paused_ack_ while inside this sleep so pause() can
+                // confirm the thread has stopped reading before returning.
                 if (paused_.load()) {
+                    paused_ack_.store(true);
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     continue;
                 }
+                paused_ack_.store(false);
 
                 struct pollfd pfd {};
                 pfd.fd     = STDIN_FILENO;
@@ -500,17 +504,33 @@ public:
     }
 
     // Temporarily stop reading stdin so another component (e.g.
-    // tui::select_option) can have exclusive access to it.
-    // The background thread spins on a sleep until resume() is called.
-    void pause()  { paused_.store(true);  }
-    void resume() { paused_.store(false); }
+    // tui::select_option) has exclusive access to it.
+    // Blocks until the background thread has acknowledged the pause —
+    // i.e. is confirmed to be in its sleep loop and not mid-read.
+    // Without this synchronisation the thread can race to consume
+    // arrow-key CSI bytes (ESC [ A/B) just after pause() sets the flag
+    // but before select_option() calls read(), causing ↑/↓ to do nothing.
+    void pause() {
+        paused_.store(true);
+        // Spin until the thread has set paused_ack_, confirming it has
+        // exited any in-progress poll/read and is in the idle sleep loop.
+        // Upper bound: the poll() timeout is 100 ms, so we wait at most
+        // ~110 ms in the worst case (poll just started when we set the flag).
+        for (int i = 0; i < 120 && !paused_ack_.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    void resume() {
+        paused_ack_.store(false);
+        paused_.store(false);
+    }
 
     EscInterruptGuard(const EscInterruptGuard&) = delete;
     EscInterruptGuard& operator=(const EscInterruptGuard&) = delete;
 
 private:
-    std::atomic<bool> running_ { false };
-    std::atomic<bool> paused_  { false };
+    std::atomic<bool> running_    { false };
+    std::atomic<bool> paused_     { false };
+    std::atomic<bool> paused_ack_ { false }; // set by thread when it enters pause sleep
     std::thread       thread_;
     termios           saved_ {};
     bool              saved_valid_ = false;
@@ -1033,13 +1053,21 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
 
     g_interrupted = 0;
     // ESC guard covers just the curl transfer. When called from
-    // send_with_tools an outer EscInterruptGuard already holds stdin
-    // in cbreak; this inner one is a harmless nested save/restore of
-    // the same state. When called standalone (e.g. direct one-shot),
-    // it puts stdin into cbreak for the stream duration only.
+    // send_with_tools, g_active_esc_guard is already set and the outer
+    // guard's thread is handling ESC detection for the whole turn —
+    // creating a second concurrent reader on the same stdin fd causes a
+    // race where both threads see POLLIN, one reads the ESC byte, and
+    // the other silently discards unrelated bytes. Skip the inner guard
+    // entirely when an outer one is live. When called standalone (e.g.
+    // direct one-shot), no outer guard exists so we create one here.
     CURLcode res;
     {
-        EscInterruptGuard esc_guard;
+        // Conditionally-constructed guard: only active when there is no
+        // outer EscInterruptGuard (standalone / one-shot path).
+        std::unique_ptr<EscInterruptGuard> inner_esc_guard;
+        if (!g_active_esc_guard) {
+            inner_esc_guard = std::make_unique<EscInterruptGuard>();
+        }
         res = curl_easy_perform(curl);
         spinner.stop();
     }
@@ -1362,6 +1390,22 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
     SendResult aggregate;
     aggregate.exit_code = 0;
 
+    // Clear any stale interrupt and flush the tty input queue BEFORE
+    // starting the EscInterruptGuard thread. This eliminates the race
+    // where:
+    //   (a) A stale ESC byte left in the kernel tty buffer (e.g. the
+    //       user pressed ESC twice in the previous turn) is read by the
+    //       new guard thread and sets g_interrupted=1 AFTER the main
+    //       thread's g_interrupted=0 clear.
+    //   (b) g_interrupted still equals 1 from the previous turn when
+    //       the guard thread starts and the thread somehow re-triggers
+    //       before the clear.
+    // Clearing + flushing first, then constructing the guard, means the
+    // thread starts with a clean state: no stale bytes in the buffer and
+    // g_interrupted already 0.
+    g_interrupted = 0;
+    if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+
     // Keep stdin in cbreak mode for the entire multi-turn tool loop so
     // Esc is detected not just during HTTP streaming but also while tools
     // are executing (Bash, WebFetch, etc.). EscInterruptGuard already
@@ -1373,13 +1417,6 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
     struct EscGuardScope {
         ~EscGuardScope() { g_active_esc_guard = nullptr; }
     } esc_guard_scope;
-
-    // Clear any stale interrupt from a previous turn. The user
-    // deliberately submitted a new message so the old ESC is irrelevant.
-    // send_conversation also clears this before each curl perform, but
-    // the check below happens *before* send_conversation is called, so
-    // without this reset every subsequent turn would exit immediately.
-    g_interrupted = 0;
 
     while (true) {
         // Honour any interrupt that arrived between turns (e.g. Esc pressed
