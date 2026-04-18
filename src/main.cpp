@@ -44,9 +44,14 @@
 
 using json = nlohmann::json;
 
+// Shared cancellation flag — declared extern in tools.cpp so the tool
+// runner can react to Esc/Ctrl+C without a cross-TU function call.
+// Must be at global (non-anonymous-namespace) scope for external linkage.
+volatile sig_atomic_t g_interrupted = 0;
+
 namespace {
 
-constexpr const char* kVersion      = "1.4.3";
+constexpr const char* kVersion      = "1.4.4";
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
 constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
@@ -393,8 +398,6 @@ size_t header_callback(char* buffer, size_t size, size_t nitems, void* /*userp*/
     g_last_rate_headers[name] = value;
     return total;
 }
-
-volatile sig_atomic_t g_interrupted = 0;
 
 extern "C" void handle_sigint(int) {
     g_interrupted = 1;
@@ -1009,11 +1012,11 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
 
     g_interrupted = 0;
-    // ESC guard lives only for the duration of the HTTP stream so
-    // stdin goes back to cooked mode the moment we return and the
-    // REPL's libedit prompt reads the next line normally. The cursor
-    // is hidden/shown by the Spinner itself (in Spinner::run()), so
-    // no explicit hide_cursor()/show_cursor() pair is needed here.
+    // ESC guard covers just the curl transfer. When called from
+    // send_with_tools an outer EscInterruptGuard already holds stdin
+    // in cbreak; this inner one is a harmless nested save/restore of
+    // the same state. When called standalone (e.g. direct one-shot),
+    // it puts stdin into cbreak for the stream duration only.
     CURLcode res;
     {
         EscInterruptGuard esc_guard;
@@ -1053,7 +1056,11 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
                       << "\n";
             log_line("retry attempt=" + std::to_string(attempt)
                      + " curl=" + std::to_string(res));
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            // Interruptible sleep: poll in 100 ms ticks so Esc/Ctrl+C
+            // is noticed promptly rather than waiting out the full delay.
+            for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    std::min(100, delay - slept)));
             continue; // retry
         }
         std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
@@ -1086,7 +1093,9 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
                       << "\n";
             log_line("retry attempt=" + std::to_string(attempt)
                      + " http=" + std::to_string(http_status));
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    std::min(100, delay - slept)));
             continue; // retry
         }
 
@@ -1255,14 +1264,45 @@ Permission prompt_permission(const std::string& tool_name, const json& input,
     tui::position_cursor_for_input();
     std::cout << tui::user_prompt() << std::flush;
 
+    // The outer EscInterruptGuard (active during tool turns) holds stdin
+    // in cbreak/non-canonical mode. Restore cooked mode briefly so that
+    // getline works normally (echoes chars, waits for Enter). We'll
+    // re-arm cbreak after reading the answer.
+    struct termios cooked {};
+    bool restored_cooked = false;
+    if (isatty(STDIN_FILENO)) {
+        struct termios cur {};
+        if (tcgetattr(STDIN_FILENO, &cur) == 0) {
+            cooked = cur;
+            cur.c_lflag |= (ICANON | ECHO);
+            cur.c_cc[VMIN]  = 1;
+            cur.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &cur);
+            restored_cooked = true;
+        }
+    }
+
     std::string line;
     const bool got = static_cast<bool>(std::getline(std::cin, line));
+
+    // Put stdin back into cbreak so the outer EscInterruptGuard can
+    // keep detecting Esc between tool calls.
+    if (restored_cooked) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &cooked);
+    }
 
     // After getline the cursor has advanced one row below the
     // input (because the enter key echoed a newline), which is
     // the rule row. Pull it back into the scroll region so the
     // next streamed output lands in the right place.
     tui::position_cursor_for_chat();
+
+    // Esc pressed while waiting for permission → treat as "no".
+    if (g_interrupted) {
+        std::cout << tui::dim("  -> no (interrupted)") << "\n";
+        if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
+        return Permission::Deny;
+    }
 
     if (!got) {
         if (denial_reason) {
@@ -1299,7 +1339,21 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
     SendResult aggregate;
     aggregate.exit_code = 0;
 
+    // Keep stdin in cbreak mode for the entire multi-turn tool loop so
+    // Esc is detected not just during HTTP streaming but also while tools
+    // are executing (Bash, WebFetch, etc.). EscInterruptGuard already
+    // handles the non-TTY / isatty check internally and is a no-op there.
+    EscInterruptGuard esc_guard;
+
     while (true) {
+        // Honour any interrupt that arrived between turns (e.g. Esc pressed
+        // while a tool was running but before the next API call started).
+        if (g_interrupted) {
+            std::cout << tui::meta("[interrupted]") << "\n";
+            aggregate.exit_code = 1;
+            return aggregate;
+        }
+
         SendResult result = send_conversation(auth, model, max_tokens, messages,
                                               custom_system, /*include_tools=*/true);
         aggregate.input_tokens                 += result.input_tokens;

@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-04-18
+
+### Fixed
+- **Grep/exec_capture hang on large trees** — `run_grep` and
+  `exec_capture` (used by the `Grep`, `Query`, `ReadAttr`, and
+  `WriteAttr` tools) previously used a raw blocking `read()` loop
+  with no cancellation path. A slow `grep -r` over a large directory
+  tree would hang indefinitely even after Esc or Ctrl+C. Both now use
+  a `poll(100 ms)` tick loop that checks `g_interrupted` on every
+  tick, with a `setsid()` + `SIGTERM`/`SIGKILL` kill-group on
+  interrupt — matching the pattern already used by `run_bash`.
+- **`g_interrupted` linkage UB** — the flag was defined inside an
+  anonymous namespace in `main.cpp`, giving it translation-unit-local
+  linkage. The `extern` declaration in `tools.cpp` was therefore
+  undefined behaviour (and a potential linker error on stricter
+  toolchains). Moved to file scope before the anonymous namespace so
+  it has true external linkage.
+- **Interruptible retry sleep** — the exponential-backoff retry delay
+  in `send_conversation` previously called `sleep_for` for the full
+  delay duration, ignoring Esc/Ctrl+C until it expired. Replaced with
+  a 100 ms tick loop so cancellation is noticed promptly.
+
 ## [1.4.3] - 2026-04-18
 
 ### Fixed
