@@ -16,6 +16,7 @@ env:
   HAIKU_HOST: taurus.microgeni.synology.me
   HAIKU_USER: user
   HAIKU_PROJECT_PATH: /Data/Code/Projects/haiku-claude-cli
+  GITEA_REPO_URL: ssh://git@gitea.microgeni.synology.me:2222/daniel/haiku-claude-cli.git
 
 jobs:
   build-and-test:
