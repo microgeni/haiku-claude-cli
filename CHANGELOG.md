@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-04-19
+
+### Added
+- **`/ludicrous` mode** — session-scoped toggle that auto-approves all
+  destructive tool permissions with no prompts. Type `/ludicrous` to
+  engage (prints `⚡ LUDICROUS MODE ENGAGED`), type it again to
+  disengage. Status bar shows a yellow `⚡ LUDICROUS` label while
+  active. Designed for hands-free runs driven from `CLAUDE.md` or
+  `ROADMAP.md` context. Available in both the REPL and the Telegram
+  bridge local prompt; tab-completes like all slash commands.
+
+### Changed
+- **Arrow-key permission prompts** — destructive tool permission
+  requests now render as a vertical numbered list with arrow-key
+  navigation instead of a `(y)es/(a)lways/(n)o` getline prompt.
+  Up/Down arrows move the highlight; number keys `1`/`2`/`3` jump
+  directly and confirm; Enter confirms the current selection; Esc
+  denies. Falls back to a plain numbered prompt on non-TTY stdout.
+- **Telegram permission buttons** — when a destructive tool fires
+  during a Telegram turn the bridge sends an inline-keyboard message
+  with three buttons (`1. Yes, allow once` / `2. Always allow this
+  session` / `3. No, deny`) and blocks until the user taps one,
+  instead of silently denying. The local terminal shows
+  `[awaiting Telegram response]` and echoes the answer when it
+  arrives.
+- **`/model` interactive picker** — bare `/model` now fetches the
+  model list from the API and presents it as an arrow-key menu with
+  the currently active model pre-selected at the top. `/model <name>`
+  still sets directly without a menu.
+- **`/memory` interactive picker** — bare `/memory` now shows a
+  two-option menu (`Project (./CLAUDE.md)` / `User (~/.../CLAUDE.md)`)
+  instead of always defaulting to the project file. `/memory user`
+  still goes straight to the user file.
+- **`/compact` confirmation prompt** — `/compact` now shows a
+  `Yes, summarize / No, keep history` menu before firing the
+  summarisation call, preventing accidental history wipes.
+- **Input row clears on Enter** — the text typed at the fixed-bottom
+  input row is now erased immediately when Enter is pressed, so it
+  does not linger for the duration of the turn. The `you> message`
+  replay into scroll history is unchanged.
+
 ## [1.4.4] - 2026-04-18
 
 ### Fixed

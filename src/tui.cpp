@@ -262,6 +262,21 @@ void position_cursor_for_input() {
               << std::flush;
 }
 
+void clear_input_row() {
+    if (!g_status_bar_active) return;
+    if (g_term_dirty) refresh_dims();
+    if (g_cached_term_rows < kStatusBarRows + 1) return;
+    // Erase the input row so the submitted text doesn't linger
+    // for the duration of the turn, then park the cursor at the
+    // bottom of the chat scroll region ready for spinner/output.
+    const int input_row = g_cached_term_rows - 2;
+    const int chat_row  = g_cached_term_rows - kStatusBarRows;
+    std::cout << "\x1b[" << input_row << ";1H"  // move to input row
+              << "\x1b[2K"                        // erase entire line
+              << "\x1b[" << chat_row  << ";1H"   // park in chat area
+              << std::flush;
+}
+
 void position_cursor_for_chat() {
     if (!g_status_bar_active) return;
     if (g_term_dirty) refresh_dims();
@@ -280,6 +295,118 @@ void show_cursor() {
     if (!g_color_enabled) return;
     if (!isatty(fileno(stdout))) return;
     std::cout << "\x1b[?25h" << std::flush;
+}
+
+int select_option(const std::vector<std::string>& options) {
+    if (options.empty()) return 0;
+    const int n = static_cast<int>(options.size());
+
+    // Non-TTY fallback: print numbered list and read a line.
+    if (!g_color_enabled || !isatty(fileno(stdout)) || !isatty(fileno(stdin))) {
+        for (int i = 0; i < n; ++i) {
+            std::cout << "  " << (i + 1) << ". " << options[i] << "\n";
+        }
+        std::cout << "choice [1-" << n << "]: " << std::flush;
+        std::string line;
+        if (!std::getline(std::cin, line) || line.empty()) return n - 1;
+        char* end = nullptr;
+        const long choice = std::strtol(line.c_str(), &end, 10);
+        if (choice >= 1 && choice <= n) return static_cast<int>(choice) - 1;
+        return n - 1;
+    }
+
+    // Put stdin into raw mode for single-keypress reads.
+    struct termios orig {}, raw {};
+    tcgetattr(fileno(stdin), &orig);
+    raw = orig;
+    raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+    raw.c_cc[VMIN]  = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(fileno(stdin), TCSANOW, &raw);
+
+    int sel = 0; // 0-based selected index
+
+    // Render the menu. Each option takes one line. We'll use ANSI
+    // cursor-up to redraw in-place on each keystroke.
+    auto render = [&]() {
+        // On first call we're already positioned in the scroll region.
+        // Erase and reprint each option line.
+        for (int i = 0; i < n; ++i) {
+            std::cout << "\x1b[2K"; // erase line
+            const std::string num = std::to_string(i + 1) + ". ";
+            if (i == sel) {
+                // Highlighted: bold + cyan number, bold label, then reset.
+                std::cout << "  " << bold(cyan(num)) << bold(options[i]);
+            } else {
+                std::cout << "  " << dim(num) << dim(options[i]);
+            }
+            if (i < n - 1) std::cout << "\n"; // no trailing newline after last
+        }
+        // Move cursor back to the first option line so the next
+        // render overwrites from the same position.
+        if (n > 1) std::cout << "\x1b[" << (n - 1) << "A";
+        std::cout << std::flush;
+    };
+
+    render();
+
+    int chosen = n - 1; // default: last option (deny)
+    bool done  = false;
+    while (!done) {
+        unsigned char c = 0;
+        if (read(fileno(stdin), &c, 1) != 1) break;
+
+        if (c == 0x1b) {
+            // Escape sequence or bare Esc.
+            unsigned char seq[2] = {};
+            // Try to read [ and then the final byte (non-blocking).
+            // If nothing follows within a short window it's a bare Esc.
+            struct termios nb = raw;
+            nb.c_cc[VMIN]  = 0;
+            nb.c_cc[VTIME] = 1; // 100 ms
+            tcsetattr(fileno(stdin), TCSANOW, &nb);
+            const int r1 = read(fileno(stdin), &seq[0], 1);
+            const int r2 = (r1 == 1 && seq[0] == '[')
+                         ? read(fileno(stdin), &seq[1], 1) : 0;
+            tcsetattr(fileno(stdin), TCSANOW, &raw);
+
+            if (r1 <= 0) {
+                // Bare Esc → deny (last option).
+                chosen = n - 1;
+                done   = true;
+            } else if (r1 == 1 && seq[0] == '[' && r2 == 1) {
+                if (seq[1] == 'A') { // Up arrow
+                    if (sel > 0) --sel;
+                    render();
+                } else if (seq[1] == 'B') { // Down arrow
+                    if (sel < n - 1) ++sel;
+                    render();
+                }
+            }
+        } else if (c == '\r' || c == '\n') {
+            chosen = sel;
+            done   = true;
+        } else if (c >= '1' && c <= '9') {
+            const int idx = static_cast<int>(c - '1');
+            if (idx < n) {
+                sel    = idx;
+                chosen = idx;
+                render();
+                done   = true;
+            }
+        } else if (c == 3) { // Ctrl+C
+            chosen = n - 1;
+            done   = true;
+        }
+    }
+
+    // Advance past the menu lines so subsequent output flows below them.
+    std::cout << "\x1b[" << (n - 1) << "B" // move down to last option
+              << "\n"                         // newline past it
+              << std::flush;
+
+    tcsetattr(fileno(stdin), TCSANOW, &orig);
+    return chosen;
 }
 
 bool color_enabled() { return g_color_enabled; }

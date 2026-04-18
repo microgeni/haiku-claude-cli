@@ -90,6 +90,15 @@ void emit_chat_rule();
 // lets libedit draw wherever the cursor currently is.
 void position_cursor_for_input();
 
+// Immediately clear the fixed input row after the user presses
+// Enter. Moves to the input row, erases it, then returns the
+// cursor to the chat scroll region so subsequent output (spinner,
+// streamed reply) lands in the right place. Call this right after
+// read_message() returns so the submitted text doesn't linger on
+// the input row for the duration of the turn. No-op when the
+// status frame isn't active.
+void clear_input_row();
+
 // Position the cursor at the bottom of the scroll region
 // (row N-4 when the 4-row frame is active) so subsequent stdout
 // writes flow into the chat history area instead of bleeding
@@ -102,6 +111,26 @@ void position_cursor_for_chat();
 // prompt. No-op on non-TTY / non-color.
 void hide_cursor();
 void show_cursor();
+
+// Interactive vertical menu. Renders `options` as a numbered list:
+//
+//     1. Yes, allow once
+//     2. Always allow this session
+//     3. No, deny
+//
+// The currently selected option is highlighted in bold+cyan; others
+// are dim. The user navigates with Up/Down arrows and confirms with
+// Enter, or jumps directly to an option with its number key (1..N).
+// Pressing Esc or 'n' (if present) selects the last option (deny).
+//
+// Returns the 0-based index of the chosen option, or `options.size()-1`
+// on Esc / interrupt.
+//
+// Temporarily puts stdin into raw mode for single-keypress reads,
+// restoring it on return. Works inside the fixed-bottom status frame
+// (renders in the scroll region, reads at the input row) or standalone.
+// Falls back to a plain numbered prompt on non-TTY stdout.
+int select_option(const std::vector<std::string>& options);
 
 std::string bold(const std::string& s);
 std::string dim(const std::string& s);
