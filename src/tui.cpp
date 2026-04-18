@@ -431,7 +431,14 @@ std::string user_prompt() {
 }
 
 std::string claude_prompt() {
-    return wrap("\x1b[1;35m", "claude> ");
+    // Prepend DECTCEM show-cursor (\e[?25h) so that printing the
+    // prompt always restores cursor visibility — no matter which
+    // code path arrives here after a Spinner or streaming output
+    // may have hidden it with \e[?25l.  The escape is only emitted
+    // when color/TTY mode is active (same guard as hide_cursor /
+    // show_cursor), so non-TTY / pipe output is unaffected.
+    const std::string show = g_color_enabled ? "\x1b[?25h" : "";
+    return show + wrap("\x1b[1;35m", "claude> ");
 }
 
 std::string continuation_prompt() {
