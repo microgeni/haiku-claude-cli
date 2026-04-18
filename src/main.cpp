@@ -1374,6 +1374,13 @@ SendResult send_with_tools(const Auth& auth, const std::string& model, int max_t
         ~EscGuardScope() { g_active_esc_guard = nullptr; }
     } esc_guard_scope;
 
+    // Clear any stale interrupt from a previous turn. The user
+    // deliberately submitted a new message so the old ESC is irrelevant.
+    // send_conversation also clears this before each curl perform, but
+    // the check below happens *before* send_conversation is called, so
+    // without this reset every subsequent turn would exit immediately.
+    g_interrupted = 0;
+
     while (true) {
         // Honour any interrupt that arrived between turns (e.g. Esc pressed
         // while a tool was running but before the next API call started).

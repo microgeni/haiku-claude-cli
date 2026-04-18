@@ -368,11 +368,15 @@ int select_option(const std::vector<std::string>& options) {
         if (c == 0x1b) {
             // Escape sequence or bare Esc.
             unsigned char seq[2] = {};
-            // Try to read [ and then the final byte (non-blocking).
-            // If nothing follows within a short window it's a bare Esc.
+            // Use VMIN=1 VTIME=1: block until a byte arrives or 100 ms
+            // elapses.  VMIN=0 VTIME=1 is a polling read — on a real
+            // terminal it can return 0 immediately even when the rest of
+            // the CSI sequence ([ A/B) is already in the kernel buffer,
+            // because tcsetattr flushes the old settings before the bytes
+            // land.  VMIN=1 guarantees we wait for the byte.
             struct termios nb = raw;
-            nb.c_cc[VMIN]  = 0;
-            nb.c_cc[VTIME] = 1; // 100 ms
+            nb.c_cc[VMIN]  = 1;
+            nb.c_cc[VTIME] = 1; // 100 ms inter-byte timeout
             tcsetattr(fileno(stdin), TCSANOW, &nb);
             const int r1 = read(fileno(stdin), &seq[0], 1);
             const int r2 = (r1 == 1 && seq[0] == '[')
