@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <editline/readline.h>
+#include "tui.h"
 
 // Soft-newline: accept the current line with a trailing backslash so
 // that read_message()'s backslash-continuation logic re-prompts for the
@@ -173,6 +174,10 @@ bool read_message(const std::string& prompt,
         const std::string fence = first;
         while (true) {
             std::string next;
+            // Park the cursor at the bottom of the scroll region so
+            // libedit draws the continuation prompt inside the
+            // scrolling chat area rather than below the fixed frame.
+            tui::position_cursor_for_chat();
             if (!read_line(continuation_prompt, next)) {
                 return !out.empty();
             }
@@ -189,6 +194,10 @@ bool read_message(const std::string& prompt,
         out.push_back('\n');
         while (true) {
             std::string next;
+            // Park the cursor at the bottom of the scroll region so
+            // libedit draws the continuation prompt inside the
+            // scrolling chat area rather than below the fixed frame.
+            tui::position_cursor_for_chat();
             if (!read_line(continuation_prompt, next)) {
                 return true;
             }
