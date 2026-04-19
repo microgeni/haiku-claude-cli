@@ -1745,6 +1745,17 @@ struct LoopCtx {
 	// session totals). Default is a no-op so non-REPL callers (the
 	// Telegram bridge) don't need to wire anything up.
 	std::function<void()>     redraw_status;
+	// When true, /compact was triggered automatically by the
+	// auto-compact threshold and must skip the confirmation
+	// prompt. Cleared after each DispatchSlash call.
+	bool                      auto_compact = false;
+	// Session name forwarded to SaveHistory after auto-compact so
+	// the right history file is updated. Empty = default session.
+	std::string               resume_name  = {};
+	// Thresholds forwarded from Config so the Telegram bridge can
+	// trigger auto-compact after each turn, mirroring the REPL.
+	double                    compact_auto_threshold  = 0.0;
+	int                       compact_window_override = 0;
 };
 
 
@@ -2216,8 +2227,9 @@ SlashAction DispatchSlash(const std::string& line, LoopCtx& ctx,
 			std::cout << tui::Meta("[nothing to compact]") << "\n";
 			return SlashAction::Continue;
 		}
-		// Confirmation prompt — compacting replaces the whole history.
-		{
+		// Confirmation prompt — skipped when auto-compact triggered
+		// this call automatically (ctx.auto_compact == true).
+		if (!ctx.auto_compact) {
 			const std::vector<std::string> options = {
 				"Yes, summarize and replace history",
 				"No, keep history as-is",
@@ -2273,6 +2285,11 @@ SlashAction DispatchSlash(const std::string& line, LoopCtx& ctx,
 			"[compacted: %d in / %d out tokens]",
 			result.input_tokens, result.output_tokens);
 		std::cout << tui::Meta(note) << "\n";
+		// Persist the compacted history so the next --resume or
+		// crash-recovery loads the pruned state instead of the
+		// original oversized session.
+		SaveHistory(ctx.messages, ctx.model, ctx.resume_name);
+		if (ctx.redraw_status) ctx.redraw_status();
 		return SlashAction::Continue;
 	}
 	// Fall back to user-defined commands loaded from
@@ -3374,6 +3391,9 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 						turn_count, session_input, session_output, messages,
 						session_urls, notify_enabled, notify_min_duration,
 						[&]() { tui::SetStatusBar(compose_status()); }};
+			ctx.resume_name            = resume_name;
+			ctx.compact_auto_threshold  = compact_auto_threshold;
+			ctx.compact_window_override = compact_window_override;
 			std::string expanded;
 			const SlashAction action = DispatchSlash(line, ctx, expanded);
 			repl::Record(line);
@@ -3497,22 +3517,34 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 		}
 
 		// Auto-compact: if this turn's input-token count crosses
-		// the threshold share of the model's context window, queue
-		// a `/compact` for the next iteration. Setting `pending`
-		// routes through the slash-command path so the existing
-		// compact handler runs (no code duplication). Announced
-		// with a meta line so the user sees why it fired.
+		// the threshold share of the model's context window, fire
+		// /compact immediately (no confirmation prompt) and save the
+		// pruned history so the next --resume or crash-recovery
+		// loads the compacted state.
 		if (compact_auto_threshold > 0.0) {
 			const int window = DetectContextWindow(model, compact_window_override);
 			const int trigger = static_cast<int>(window * compact_auto_threshold);
 			if (result.input_tokens >= trigger) {
 				char note[160];
 				std::snprintf(note, sizeof(note),
-					"[auto-compact: context at %d%% (%d / %d tokens)]",
+					"[auto-compact: context at %d%% (%d / %d tokens) — compacting now]",
 					(result.input_tokens * 100) / window,
 					result.input_tokens, window);
 				std::cout << tui::Meta(note) << "\n";
-				pending = "/compact";
+				// Build a LoopCtx with auto_compact=true so the
+				// /compact handler skips the SelectOption dialog.
+				// Pass resume_name so SaveHistory writes the right
+				// file after compacting.
+				LoopCtx ac_ctx{auth, max_tokens, custom_system, prices, model,
+							   turn_count, session_input, session_output, messages,
+							   session_urls, notify_enabled, notify_min_duration,
+							   [&]() { tui::SetStatusBar(compose_status()); }};
+				ac_ctx.auto_compact          = true;
+				ac_ctx.resume_name           = resume_name;
+				ac_ctx.compact_auto_threshold  = compact_auto_threshold;
+				ac_ctx.compact_window_override = compact_window_override;
+				std::string dummy;
+				DispatchSlash("/compact", ac_ctx, dummy);
 			}
 		}
 
@@ -3956,6 +3988,36 @@ int RunTelegramBridge(const Config& cfg) {
 				 + (keyboard.empty()
 						? ""
 						: " buttons=" + std::to_string(keyboard.size())));
+
+		// Auto-compact: fire without a confirmation prompt when the
+		// context window fills up, keeping Telegram sessions healthy
+		// over many turns. Announce via both the local terminal and
+		// the Telegram chat.
+		if (cfg.compact_auto_threshold > 0.0) {
+			const int window  = DetectContextWindow(fActivemodel, cfg.compact_context_window);
+			const int trigger = static_cast<int>(window * cfg.compact_auto_threshold);
+			if (result.input_tokens >= trigger) {
+				char ac_note[160];
+				std::snprintf(ac_note, sizeof(ac_note),
+					"[auto-compact: context at %d%% (%d / %d) — compacting]",
+					(result.input_tokens * 100) / window,
+					result.input_tokens, window);
+				std::cout << tui::Meta(ac_note) << "\n";
+				if (chat_id != 0) tg_send(chat_id, std::string(ac_note));
+				std::vector<std::string> dummy_urls;
+				bool   dummy_notify  = false;
+				double dummy_thresh  = 60.0;
+				LoopCtx ac_ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,  // flawfinder: ignore
+							   fActivemodel, turn_count, session_input, session_output,
+							   messages, dummy_urls, dummy_notify, dummy_thresh,
+							   [&]() { tui::SetStatusBar(compose_bridge_status()); }};
+				ac_ctx.auto_compact           = true;
+				ac_ctx.compact_auto_threshold  = cfg.compact_auto_threshold;
+				ac_ctx.compact_window_override = cfg.compact_context_window;
+				std::string dummy;
+				DispatchSlash("/compact", ac_ctx, dummy);
+			}
+		}
 	};
 
 	// Process one Telegram update — called from the poller thread
@@ -4268,6 +4330,36 @@ int RunTelegramBridge(const Config& cfg) {
 		}
 		LogLine("telegram tx user=" + std::to_string(u.user_id)
 				 + " out=" + std::to_string(result.output_tokens));
+
+		// Auto-compact: mirror the REPL's threshold check so long
+		// Telegram sessions don't fill the context window and start
+		// failing. Fire immediately (no confirmation — the user is
+		// on their phone), announce via the chat, and save history.
+		if (cfg.compact_auto_threshold > 0.0) {
+			const int window  = DetectContextWindow(fActivemodel, cfg.compact_context_window);
+			const int trigger = static_cast<int>(window * cfg.compact_auto_threshold);
+			if (result.input_tokens >= trigger) {
+				char ac_note[160];
+				std::snprintf(ac_note, sizeof(ac_note),
+					"[auto-compact: context at %d%% (%d / %d) — compacting]",
+					(result.input_tokens * 100) / window,
+					result.input_tokens, window);
+				std::cout << tui::Meta(ac_note) << "\n";
+				tg_send(chat_id, std::string(ac_note));
+				std::vector<std::string> dummy_urls;
+				bool   dummy_notify  = false;
+				double dummy_thresh  = 60.0;
+				LoopCtx ac_ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,  // flawfinder: ignore
+							   fActivemodel, turn_count, session_input, session_output,
+							   messages, dummy_urls, dummy_notify, dummy_thresh,
+							   [&]() { tui::SetStatusBar(compose_bridge_status()); }};
+				ac_ctx.auto_compact           = true;
+				ac_ctx.compact_auto_threshold  = cfg.compact_auto_threshold;
+				ac_ctx.compact_window_override = cfg.compact_context_window;
+				std::string dummy;
+				DispatchSlash("/compact", ac_ctx, dummy);
+			}
+		}
 	};
 
 	// Work queue for Telegram-origin turns. The poller pushes
@@ -4718,6 +4810,11 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (interactive) {
+		// If a telegram block is present and valid, run the full
+		// bridge loop automatically — no need for a separate
+		// `claude telegram` subcommand.
+		if (RemoteControl::config_is_valid(cfg, nullptr))
+			return RunTelegramBridge(cfg);
 		return InteractiveLoop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, resume_name, message, std::move(resolved_attachments));
 	}
 
