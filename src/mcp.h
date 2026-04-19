@@ -19,7 +19,7 @@
 // when advertised to Claude, so they can't collide with built-ins.
 //
 // MVP scope: stdio only, synchronous request/response, process
-// teardown on cli shutdown. No resources/, prompts/, or HTTP/SSE
+// teardown on cli Shutdown. No resources/, prompts/, or HTTP/SSE
 // transport yet.
 namespace mcp {
 
@@ -29,23 +29,23 @@ using json = nlohmann::json;
 // run the initialize handshake, and query tools/list. Servers that
 // fail to spawn or initialize are logged to stderr and skipped.
 // Safe to call more than once (clears state).
-void init(const json& config_mcp_servers);
+void Init(const json& config_mcp_servers);
 
 // Tear down every live MCP client: close pipes, wait for the child
 // process. Called from an atexit hook installed by init().
-void shutdown();
+void Shutdown();
 
-// Tool definitions to merge into the Messages API `tools` array,
+// Tool Definitions to merge into the Messages API `tools` array,
 // one entry per namespaced MCP tool.
-json tool_definitions();
+json ToolDefinitions();
 
 // True when `name` is an MCP tool (prefix `mcp__`).
-bool is_mcp_tool(const std::string& name);
+bool IsMcpTool(const std::string& name);
 
 // Dispatch `name` (mcp__server__tool) to the owning client. Returns
 // std::nullopt if the name isn't an MCP tool or the server isn't
 // live; otherwise returns the tool's ToolResult.
-std::optional<tools::ToolResult> run(const std::string& name, const json& input);
+std::optional<tools::ToolResult> Run(const std::string& name, const json& input);
 
 } // namespace mcp
 

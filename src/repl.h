@@ -11,17 +11,25 @@ namespace repl {
 
 // Load previously saved history from `history_file`. Missing or
 // unreadable files are silently ignored. Safe to call more than once.
-void init(const std::string& history_file);
+void Init(const std::string& history_file);
 
-// Register the full list of slash-command names (with the leading
+// Restore terminal state changed by init() (currently: disable
+// bracketed paste mode). Safe to call even if init() was never called
+// or if stdin is not a TTY. Called automatically via atexit when
+// main() uses repl::Init(), but callers that install their own signal
+// handlers should call this before re-raising so the terminal is left
+// clean even on SIGINT/SIGTERM.
+void Deinit();
+
+// Register the full list of slash-command Names (with the leading
 // slash — "/help", "/clear", etc.) that tab completion should offer
 // when the current word starts with `/`. Replaces any previous list.
-void set_slash_commands(const std::vector<std::string>& names);
+void SetSlashCommands(const std::vector<std::string>& names);
 
 // Read one line from stdin with editing. `prompt` may contain ANSI
 // escape sequences — they're wrapped in \001/\002 internally so libedit
 // counts columns correctly. Returns false on EOF (Ctrl+D).
-bool read_line(const std::string& prompt, std::string& out);
+bool ReadLine(const std::string& prompt, std::string& out);
 
 // Read a logical message from stdin. Supports two continuation modes:
 //   1. A bare `"""` line starts a fenced block that ends on another
@@ -30,12 +38,12 @@ bool read_line(const std::string& prompt, std::string& out);
 //      concatenated with a newline.
 // The continuation prompt is shown for subsequent lines. Returns false
 // on EOF; partial input collected so far is returned in `out`.
-bool read_message(const std::string& prompt,
-                  const std::string& continuation_prompt,
-                  std::string&       out);
+bool ReadMessage(const std::string& prompt,
+				  const std::string& ContinuationPrompt,
+				  std::string&       out);
 
 // Append `line` to history and flush to disk. No-op on empty lines.
-void record(const std::string& line);
+void Record(const std::string& line);
 
 } // namespace repl
 

@@ -5,22 +5,22 @@
 #include <string>
 
 struct OAuthTokens {
-    std::string access_token;
-    std::string refresh_token;
-    long        expires_at = 0;
+	std::string access_token;
+	std::string refresh_token;
+	long        expires_at = 0;
 
-    bool is_expired() const;
+	bool IsExpired() const;
 };
 
-std::string credentials_path();
+std::string CredentialsPath();
 
-std::optional<OAuthTokens> load_tokens();
-bool                       save_tokens(const OAuthTokens& tokens);
-bool                       delete_tokens();
+std::optional<OAuthTokens> LoadTokens();
+bool                       SaveTokens(const OAuthTokens& tokens);
+bool                       DeleteTokens();
 
-std::optional<OAuthTokens> refresh_tokens(const OAuthTokens& existing);
+std::optional<OAuthTokens> RefreshTokens(const OAuthTokens& existing);
 
-int do_login();
-int do_logout();
+int DoLogin();
+int DoLogout();
 
 #endif

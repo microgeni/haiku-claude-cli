@@ -12,28 +12,28 @@ namespace tui {
 
 // Called once at startup to snapshot whether stdout supports ANSI colors,
 // honoring NO_COLOR, CLICOLOR=0, and isatty(stdout). User flags
-// (--plain / --color) then override the snapshot via set_color_enabled.
-void init();
+// (--plain / --color) then override the snapshot via SetColorEnabled.
+void Init();
 
-bool color_enabled();
-void set_color_enabled(bool on);
+bool ColorEnabled();
+void SetColorEnabled(bool on);
 
 // Current terminal width in columns (TIOCGWINSZ). Returns 0 when
 // stdout isn't a TTY. Re-reads TIOCGWINSZ on every call after a
 // SIGWINCH has been delivered (cheap — a single ioctl) and caches
 // the result in between. Safe to call concurrently with any
 // streaming output.
-int terminal_width();
+int TerminalWidth();
 
 // Current terminal height in rows (TIOCGWINSZ). Same cache and
-// refresh behavior as terminal_width().
-int terminal_rows();
+// refresh behavior as TerminalWidth().
+int TerminalRows();
 
 // Installs a SIGWINCH handler that marks the cached terminal
-// dimensions dirty so the next terminal_width()/terminal_rows()
+// dimensions dirty so the next TerminalWidth()/TerminalRows()
 // call re-reads TIOCGWINSZ. Call once at startup after init();
 // no-op when stdout isn't a TTY.
-void install_sigwinch_handler();
+void InstallSigwinchHandler();
 
 // Fixed-bottom status frame. Carves off the bottom two rows of
 // the terminal via DECSTBM scroll region:
@@ -48,29 +48,29 @@ void install_sigwinch_handler();
 //
 // init_status_bar is idempotent; calling it a second time
 // re-reads dimensions and redraws. No-op on non-TTY.
-void install_status_bar(const std::string& initial_status = {});
+void InstallStatusBar(const std::string& initial_status = {});
 
 // Update the status bar content and redraw immediately. Empty
 // string clears the row but leaves the frame installed.
-void set_status_bar(const std::string& status);
+void SetStatusBar(const std::string& status);
 
 // Re-read terminal dimensions, re-set the DECSTBM scroll
 // region, and redraw the fixed rows. Called from the main REPL
-// loop when consume_resize_pending() returns true, and also
+// loop when ConsumeResizePending() returns true, and also
 // directly by the SIGWINCH handler path.
-void redraw_status_bar();
+void RedrawStatusBar();
 
 // Non-zero if the SIGWINCH handler has fired since the last
 // call. Resets to zero on read. Used by the REPL loop to
 // trigger a redraw between prompts without touching signal
 // handlers directly.
-int consume_resize_pending();
+int ConsumeResizePending();
 
 // Tear down the status frame: restore the full scroll region,
 // clear the fixed rows, and move the cursor below them so the
 // shell's next output doesn't overwrite a stale footer.
 // Safe to call even when the frame was never installed.
-void teardown_status_bar();
+void TeardownStatusBar();
 
 // Emit an in-chat dim horizontal rule the full width of the
 // current terminal followed by a newline. Meant to be called
@@ -82,35 +82,35 @@ void teardown_status_bar();
 // since the frame provides fixed rules above and below the
 // input row — duplicating them in-chat would clutter the
 // scroll history.
-void emit_chat_rule();
+void EmitChatRule();
 
 // Position the cursor on the fixed input row of the status
 // frame (row N-2) and clear it so libedit starts with a clean
 // line. No-op when the frame isn't active — the caller just
 // lets libedit draw wherever the cursor currently is.
-void position_cursor_for_input();
+void PositionCursorForInput();
 
 // Immediately clear the fixed input row after the user presses
 // Enter. Moves to the input row, erases it, then returns the
 // cursor to the chat scroll region so subsequent output (spinner,
 // streamed reply) lands in the right place. Call this right after
-// read_message() returns so the submitted text doesn't linger on
+// ReadMessage() returns so the submitted text doesn't linger on
 // the input row for the duration of the turn. No-op when the
 // status frame isn't active.
-void clear_input_row();
+void ClearInputRow();
 
 // Position the cursor at the bottom of the scroll region
 // (row N-4 when the 4-row frame is active) so subsequent stdout
 // writes flow into the chat history area instead of bleeding
 // into the fixed rows. No-op when the frame isn't active.
-void position_cursor_for_chat();
+void PositionCursorForChat();
 
 // Show / hide the terminal cursor via DECTCEM (\e[?25h / \e[?25l).
 // Used to suppress cursor-bouncing during streaming output
 // so the cursor appears steady and only reappears at the
 // prompt. No-op on non-TTY / non-color.
-void hide_cursor();
-void show_cursor();
+void HideCursor();
+void ShowCursor();
 
 // Interactive vertical menu. Renders `options` as a numbered list:
 //
@@ -126,36 +126,43 @@ void show_cursor();
 // Returns the 0-based index of the chosen option, or `options.size()-1`
 // on Esc / interrupt.
 //
+// When `heading` is non-empty it is rendered as the first line of the
+// owned block (bold on TTY). On selection the entire block — heading
+// plus all option rows — is erased and replaced with a single compact
+// summary line:  "<heading> → <chosen label>"  so scroll history stays
+// informative without the full menu cluttering it.
+//
 // Temporarily puts stdin into raw mode for single-keypress reads,
 // restoring it on return. Works inside the fixed-bottom status frame
 // (renders in the scroll region, reads at the input row) or standalone.
 // Falls back to a plain numbered prompt on non-TTY stdout.
-int select_option(const std::vector<std::string>& options);
+int SelectOption(const std::vector<std::string>& options,
+				  const std::string& heading = {});
 
-std::string bold(const std::string& s);
-std::string dim(const std::string& s);
-std::string italic(const std::string& s);
+std::string Bold(const std::string& s);
+std::string Dim(const std::string& s);
+std::string Italic(const std::string& s);
 
-std::string red(const std::string& s);
-std::string green(const std::string& s);
-std::string yellow(const std::string& s);
-std::string blue(const std::string& s);
-std::string magenta(const std::string& s);
-std::string cyan(const std::string& s);
-std::string gray(const std::string& s);
-// muted() = dim + bright-black, the consistent "darker gray" used
+std::string Red(const std::string& s);
+std::string Green(const std::string& s);
+std::string Yellow(const std::string& s);
+std::string Blue(const std::string& s);
+std::string Magenta(const std::string& s);
+std::string Cyan(const std::string& s);
+std::string Gray(const std::string& s);
+// Muted() = dim + bright-black, the consistent "darker gray" used
 // on the rule lines framing the input row and on the status-row
 // fields (except the model name and the Remote-Control label,
 // which get their own color so they stand out).
-std::string muted(const std::string& s);
+std::string Muted(const std::string& s);
 
 // Semantic wrappers. These return the full string to print (including
 // trailing reset), or a plain equivalent when color is off.
-std::string user_prompt();              // "you> "
-std::string claude_prompt();            // "claude> "
-std::string continuation_prompt();      // "... " for multi-line input
-std::string meta(const std::string& s); // dim bracketed note
-std::string error_label();              // bold red "error:"
+std::string UserPrompt();              // "you> "
+std::string ClaudePrompt();            // "claude> "
+std::string ContinuationPrompt();      // "... " for multi-line input
+std::string Meta(const std::string& s); // dim bracketed note
+std::string ErrorLabel();              // bold red "error:"
 
 // Forward declaration so MarkdownRenderer can reference Spinner.
 class Spinner;
@@ -175,61 +182,61 @@ enum class TableAlign { Left, Right, Center };
 
 class MarkdownRenderer {
 public:
-    MarkdownRenderer();
-    void set_spinner(Spinner* s) { spinner_ = s; }
-    void write(const std::string& chunk);
-    void flush();
+	MarkdownRenderer();
+	void SetSpinner(Spinner* s) { fSpinner = s; }
+	void Write(const std::string& chunk);
+	void Flush();
 private:
-    void emit(const std::string& s);
-    void render_line(const std::string& line);
-    void render_inline(const std::string& text);
-    std::string render_inline_to_string(const std::string& text);
+	void Emit(const std::string& s);
+	void RenderLine(const std::string& line);
+	void RenderInline(const std::string& text);
+	std::string RenderInlineToString(const std::string& text);
 
-    // Markdown table buffering. Tables span multiple lines and
-    // need per-column width computation, so we accumulate rows
-    // here and emit the aligned output on the first non-table
-    // line (or on flush()).
-    void flush_table();
+	// Markdown table buffering. Tables span multiple lines and
+	// need per-column width computation, so we accumulate rows
+	// here and emit the aligned output on the first non-table
+	// line (or on flush()).
+	void FlushTable();
 
-    std::string line_buffer_;
-    std::string code_block_lang_;
-    bool        in_code_block_     = false;
-    bool        first_output_done_ = false;
-    Spinner*    spinner_           = nullptr;
+	std::string fLineBuffer;
+	std::string fCodeBlockLang;
+	bool        fInCodeBlock     = false;
+	bool        fFirstOutputDone = false;
+	Spinner*    fSpinner           = nullptr;
 
-    std::vector<std::vector<std::string>> table_rows_;
-    std::vector<TableAlign>               table_aligns_;
-    bool                                  table_active_ = false;
+	std::vector<std::vector<std::string>> fTableRows;
+	std::vector<TableAlign>               fTableAligns;
+	bool                                  fTableActive = false;
 };
 
 // Animated "thinking..." indicator. Spawns a background thread that
-// writes dimmed spinner frames to stdout until stop() (or destruction).
+// writes dimmed spinner frames to stdout until Stop() (or destruction).
 // No-op when color is disabled or stdout is not a TTY.
 class Spinner {
 public:
-    explicit Spinner(std::string label);
-    ~Spinner();
-    Spinner(const Spinner&) = delete;
-    Spinner& operator=(const Spinner&) = delete;
-    void stop();
+	explicit Spinner(std::string label);
+	~Spinner();
+	Spinner(const Spinner&) = delete;
+	Spinner& operator=(const Spinner&) = delete;
+	void Stop();
 
-    // Optional non-owning pointer to a live input-token counter that
-    // the spinner reads on each frame. When the counter is > 0, the
-    // spinner appends `↑ <N> tokens` to its rendered line, matching
-    // Claude Code's `(44s · ↑ 652 tokens)` style. Pointer must remain
-    // valid for the spinner's lifetime. Safe to leave null.
-    void set_live_input_tokens(const std::atomic<int>* p) {
-        live_input_tokens_ = p;
-    }
+	// Optional non-owning pointer to a live input-token counter that
+	// the spinner reads on each frame. When the counter is > 0, the
+	// spinner appends `↑ <N> tokens` to its rendered line, matching
+	// Claude Code's `(44s · ↑ 652 tokens)` style. Pointer must remain
+	// valid for the spinner's lifetime. Safe to leave null.
+	void SetLiveInputTokens(const std::atomic<int>* p) {
+		fLiveInputTokens = p;
+	}
 private:
-    void run();
-    std::string                   label_;
-    std::atomic<bool>             stopping_{false};
-    std::mutex                    mutex_;
-    std::condition_variable       cv_;
-    std::thread                   thread_;
-    bool                          active_ = false;
-    const std::atomic<int>*       live_input_tokens_ = nullptr;
+	void Run();
+	std::string                   fLabel;
+	std::atomic<bool>             fStopping{false};
+	std::mutex                    fMutex;
+	std::condition_variable       fCv;
+	std::thread                   fThread;
+	bool                          fActive = false;
+	const std::atomic<int>*       fLiveInputTokens = nullptr;
 };
 
 } // namespace tui

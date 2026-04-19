@@ -62,37 +62,37 @@ constexpr int         kMaxTokens    = 8192;
 
 std::ofstream g_log;
 
-void init_logging(bool enabled) {
-    if (!enabled) return;
-    const std::string dir = paths::log_dir();
-    if (!paths::mkdir_p(dir)) return;
+void InitLogging(bool enabled) {
+	if (!enabled) return;
+	const std::string dir = paths::LogDir();
+	if (!paths::MkdirP(dir)) return;
 
-    const std::time_t t = std::time(nullptr);
-    std::tm            tm {};
-    localtime_r(&t, &tm);
-    char date[32];
-    std::strftime(date, sizeof(date), "%Y-%m-%d", &tm);
+	const std::time_t t = std::time(nullptr);
+	std::tm            tm {};
+	localtime_r(&t, &tm);
+	char date[32];
+	std::strftime(date, sizeof(date), "%Y-%m-%d", &tm);
 
-    g_log.open(dir + "/claude-" + date + ".log", std::ios::app);
+	g_log.open(dir + "/claude-" + date + ".log", std::ios::app);
 }
 
-void log_line(const std::string& msg) {
-    if (!g_log.is_open()) return;
-    const std::time_t t = std::time(nullptr);
-    std::tm            tm {};
-    localtime_r(&t, &tm);
-    char ts[32];
-    std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm);
-    g_log << "[" << ts << "] " << msg << "\n";
-    g_log.flush();
+void LogLine(const std::string& msg) {
+	if (!g_log.is_open()) return;
+	const std::time_t t = std::time(nullptr);
+	std::tm            tm {};
+	localtime_r(&t, &tm);
+	char ts[32];
+	std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm);
+	g_log << "[" << ts << "] " << msg << "\n";
+	g_log.flush();
 }
 
-std::string load_optional_file(const std::string& path) {
-    std::ifstream f(path);
-    if (!f.is_open()) return {};
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
+std::string LoadOptionalFile(const std::string& path) {
+	std::ifstream f(path);
+	if (!f.is_open()) return {};
+	std::stringstream ss;
+	ss << f.rdbuf();
+	return ss.str();
 }
 
 // Compose the effective system prompt from (in order):
@@ -100,10 +100,10 @@ std::string load_optional_file(const std::string& path) {
 //   2. Project memory at <cwd>/CLAUDE.md
 //   3. The --system flag value (or config's "system")
 // The required Claude Code preamble for OAuth is prepended inside
-// send_conversation, so we don't repeat it here. Called per-turn so
+// SendConversation, so we don't repeat it here. Called per-turn so
 // edits to the CLAUDE.md files take effect immediately.
 // Snapshot of claude:summary attributes across the project
-// cwd. Taken once per session (first compose_system call) so
+// cwd. Taken once per session (first ComposeSystem call) so
 // later turns use the cached result instead of re-walking the
 // filesystem. Claude sees the list as part of its system
 // prompt and prefers ReadAttr over Read for files that appear
@@ -118,24 +118,24 @@ std::string g_bfs_snapshot;
 // contain 0xFF / 0xFE bytes that nlohmann::json refuses to
 // serialize, so lines that fail this check get dropped from
 // the preload snapshot to keep the system prompt clean.
-bool is_valid_utf8(const char* data, size_t len) {
-    size_t i = 0;
-    while (i < len) {
-        unsigned char c = static_cast<unsigned char>(data[i]);
-        int need = 0;
-        if (c < 0x80) { ++i; continue; }
-        else if ((c & 0xE0) == 0xC0) need = 1;
-        else if ((c & 0xF0) == 0xE0) need = 2;
-        else if ((c & 0xF8) == 0xF0) need = 3;
-        else                         return false;
-        if (i + need >= len) return false;
-        for (int k = 1; k <= need; ++k) {
-            unsigned char cc = static_cast<unsigned char>(data[i + k]);
-            if ((cc & 0xC0) != 0x80) return false;
-        }
-        i += need + 1;
-    }
-    return true;
+bool IsValidUtf8(const char* data, size_t len) {
+	size_t i = 0;
+	while (i < len) {
+		unsigned char c = static_cast<unsigned char>(data[i]);
+		int need = 0;
+		if (c < 0x80) { ++i; continue; }
+		else if ((c & 0xE0) == 0xC0) need = 1;
+		else if ((c & 0xF0) == 0xE0) need = 2;
+		else if ((c & 0xF8) == 0xF0) need = 3;
+		else                         return false;
+		if (i + need >= len) return false;
+		for (int k = 1; k <= need; ++k) {
+			unsigned char cc = static_cast<unsigned char>(data[i + k]);
+			if ((cc & 0xC0) != 0x80) return false;
+		}
+		i += need + 1;
+	}
+	return true;
 }
 
 // Replace every invalid UTF-8 byte (or truncated sequence) with the
@@ -143,116 +143,116 @@ bool is_valid_utf8(const char* data, size_t len) {
 // nlohmann::json never sees a byte that would trigger type_error.316.
 // Tool output from Bash commands that cat binary files (driver blobs,
 // /dev entries, etc.) can easily contain raw 0x80-0xFF bytes.
-std::string sanitize_utf8(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    const unsigned char* p   = reinterpret_cast<const unsigned char*>(s.data());
-    const unsigned char* end = p + s.size();
-    while (p < end) {
-        unsigned char c = *p;
-        int need = 0;
-        if      (c < 0x80)             { out += static_cast<char>(c); ++p; continue; }
-        else if ((c & 0xE0) == 0xC0)   need = 1;
-        else if ((c & 0xF0) == 0xE0)   need = 2;
-        else if ((c & 0xF8) == 0xF0)   need = 3;
-        else { out += "\xEF\xBF\xBD"; ++p; continue; }   // bad lead byte
+std::string SanitizeUtf8(const std::string& s) {
+	std::string out;
+	out.reserve(s.size());
+	const unsigned char* p   = reinterpret_cast<const unsigned char*>(s.data());
+	const unsigned char* end = p + s.size();
+	while (p < end) {
+		unsigned char c = *p;
+		int need = 0;
+		if      (c < 0x80)             { out += static_cast<char>(c); ++p; continue; }
+		else if ((c & 0xE0) == 0xC0)   need = 1;
+		else if ((c & 0xF0) == 0xE0)   need = 2;
+		else if ((c & 0xF8) == 0xF0)   need = 3;
+		else { out += "\xEF\xBF\xBD"; ++p; continue; }   // bad lead byte
 
-        if (p + need >= end) {                             // truncated sequence
-            out += "\xEF\xBF\xBD"; p = end; continue;
-        }
-        bool ok = true;
-        for (int k = 1; k <= need; ++k) {
-            if ((p[k] & 0xC0) != 0x80) { ok = false; break; }
-        }
-        if (!ok) { out += "\xEF\xBF\xBD"; ++p; continue; }
+		if (p + need >= end) {                             // truncated sequence
+			out += "\xEF\xBF\xBD"; p = end; continue;
+		}
+		bool ok = true;
+		for (int k = 1; k <= need; ++k) {
+			if ((p[k] & 0xC0) != 0x80) { ok = false; break; }
+		}
+		if (!ok) { out += "\xEF\xBF\xBD"; ++p; continue; }
 
-        // valid sequence — copy it verbatim
-        for (int k = 0; k <= need; ++k) out += static_cast<char>(p[k]);
-        p += need + 1;
-    }
-    return out;
+		// valid sequence — copy it verbatim
+		for (int k = 0; k <= need; ++k) out += static_cast<char>(p[k]);
+		p += need + 1;
+	}
+	return out;
 }
 }
 
 #ifdef __HAIKU__
-void preload_bfs_summaries() {
-    if (g_bfs_loaded) return;
-    g_bfs_loaded = true;
+void PreloadBfsSummaries() {
+	if (g_bfs_loaded) return;
+	g_bfs_loaded = true;
 
-    // Walk the project cwd, collect claude:summary values via
-    // catattr. `find | while read` is simple and handles
-    // non-ASCII paths adequately for this use. Excludes the
-    // usual noise directories so we don't spend time on
-    // node_modules/.git/build.
-    const char* cmd =
-        "find . -type f "
-        "  -not -path './.git/*' "
-        "  -not -path './build/*' "
-        "  -not -path './node_modules/*' "
-        "  -not -path '*/\\.*' 2>/dev/null | while read f; do "
-        "    s=$(catattr -d claude:summary \"$f\" 2>/dev/null) || continue; "
-        "    [ -n \"$s\" ] && printf '%s :: %s\\n' \"$f\" \"$s\"; "
-        "done";
-    FILE* p = popen(cmd, "r");
-    if (!p) return;
-    char buf[4096];
-    while (std::fgets(buf, sizeof(buf), p)) {
-        const size_t n = std::strlen(buf);
-        // Drop the whole line if it contains non-UTF-8 bytes
-        // — catattr's raw-typed attribute values will crash
-        // nlohmann::json on serialization otherwise.
-        if (!is_valid_utf8(buf, n)) continue;
-        g_bfs_snapshot.append(buf, n);
-    }
-    pclose(p);
+	// Walk the project cwd, collect claude:summary values via
+	// catattr. `find | while read` is simple and handles
+	// non-ASCII paths adequately for this use. Excludes the
+	// usual noise directories so we don't spend time on
+	// node_modules/.git/build.
+	const char* cmd =
+		"find . -type f "
+		"  -not -path './.git/*' "
+		"  -not -path './build/*' "
+		"  -not -path './node_modules/*' "
+		"  -not -path '*/\\.*' 2>/dev/null | while read f; do "
+		"    s=$(catattr -d claude:summary \"$f\" 2>/dev/null) || continue; "
+		"    [ -n \"$s\" ] && printf '%s :: %s\\n' \"$f\" \"$s\"; "
+		"done";
+	FILE* p = popen(cmd, "r");
+	if (!p) return;
+	char buf[4096];
+	while (std::fgets(buf, sizeof(buf), p)) {
+		const size_t n = std::strlen(buf);
+		// Drop the whole line if it contains non-UTF-8 bytes
+		// — catattr's raw-typed attribute values will crash
+		// nlohmann::json on serialization otherwise.
+		if (!IsValidUtf8(buf, n)) continue;
+		g_bfs_snapshot.append(buf, n);
+	}
+	pclose(p);
 }
 #else
-void preload_bfs_summaries() { g_bfs_loaded = true; }
+void PreloadBfsSummaries() { g_bfs_loaded = true; }
 #endif
 
-std::string bfs_system_block() {
+std::string BfsSystemBlock() {
 #ifdef __HAIKU__
-    if (!g_bfs_loaded) preload_bfs_summaries();
+	if (!g_bfs_loaded) PreloadBfsSummaries();
 
-    std::string s =
-        "Haiku BFS attribute tools — prefer these on this project:\n"
-        "- ReadAttr: read `claude:summary` (or any named attribute) from a "
-          "file. Check this BEFORE calling Read on a source file — summaries "
-          "cost ~10-30 tokens vs. thousands for full reads.\n"
-        "- WriteAttr: write a one-line `claude:summary` after reading a file "
-          "for the first time. Later sessions will use ReadAttr and skip the "
-          "full read. Only use the `claude:*` namespace; never overwrite "
-          "BEOS:*/MAIL:*/Audio:* or other system attributes.\n"
-        "- Query: BFS query expression for filesystem searches. Fast when an "
-          "index exists; use for file-metadata lookups.\n";
+	std::string s =
+		"Haiku BFS attribute tools — prefer these on this project:\n"
+		"- ReadAttr: read `claude:summary` (or any named attribute) from a "
+		  "file. Check this BEFORE calling Read on a source file — summaries "
+		  "cost ~10-30 tokens vs. thousands for full reads.\n"
+		"- WriteAttr: write a one-line `claude:summary` after reading a file "
+		  "for the first time. Later sessions will use ReadAttr and skip the "
+		  "full read. Only use the `claude:*` namespace; never overwrite "
+		  "BEOS:*/MAIL:*/Audio:* or other system attributes.\n"
+		"- Query: BFS query expression for filesystem searches. Fast when an "
+		  "index exists; use for file-metadata lookups.\n";
 
-    if (!g_bfs_snapshot.empty()) {
-        s += "\nFiles in this project with existing claude:summary "
-             "(prefer ReadAttr over Read for these):\n";
-        s += g_bfs_snapshot;
-    } else {
-        s += "\n(No claude:summary attributes seeded yet — writing summaries "
-             "for source files you read this session will let later sessions "
-             "save tokens via ReadAttr.)\n";
-    }
-    return s;
+	if (!g_bfs_snapshot.empty()) {
+		s += "\nFiles in this project with existing claude:summary "
+			 "(prefer ReadAttr over Read for these):\n";
+		s += g_bfs_snapshot;
+	} else {
+		s += "\n(No claude:summary attributes seeded yet — writing summaries "
+			 "for source files you read this session will let later sessions "
+			 "save tokens via ReadAttr.)\n";
+	}
+	return s;
 #else
-    return {};
+	return {};
 #endif
 }
 
-std::string compose_system(const std::string& flag_system) {
-    std::string out;
-    auto append = [&](const std::string& chunk) {
-        if (chunk.empty()) return;
-        if (!out.empty()) out += "\n\n";
-        out += chunk;
-    };
-    append(load_optional_file(paths::user_memory_path()));
-    append(load_optional_file(paths::project_memory_path()));
-    append(bfs_system_block());
-    append(flag_system);
-    return out;
+std::string ComposeSystem(const std::string& flag_system) {
+	std::string out;
+	auto append = [&](const std::string& chunk) {
+		if (chunk.empty()) return;
+		if (!out.empty()) out += "\n\n";
+		out += chunk;
+	};
+	append(LoadOptionalFile(paths::UserMemoryPath()));
+	append(LoadOptionalFile(paths::ProjectMemoryPath()));
+	append(BfsSystemBlock());
+	append(flag_system);
+	return out;
 }
 
 // ── History persistence ───────────────────────────────────────
@@ -273,159 +273,159 @@ static constexpr size_t kHistoryMessageCap = 200;
 // individual result is at most kHistoryToolResultCap bytes. Returns
 // a new array; the in-memory messages vector is not mutated so the
 // live session context stays intact (only the saved file is capped).
-static json trim_tool_results(const json& messages) {
-    json out = json::array();
-    for (const auto& msg : messages) {
-        // tool_result blocks live in user turns whose "content" is
-        // an array of typed blocks.
-        if (msg.value("role", "") == "user" && msg["content"].is_array()) {
-            json trimmed_content = json::array();
-            for (const auto& block : msg["content"]) {
-                if (block.value("type", "") == "tool_result") {
-                    std::string content = block.value("content", "");
-                    if (content.size() > kHistoryToolResultCap) {
-                        content = content.substr(0, kHistoryToolResultCap)
-                                  + "\n[... truncated for history storage ...]";
-                    }
-                    json b = block;
-                    b["content"] = content;
-                    trimmed_content.push_back(std::move(b));
-                } else {
-                    trimmed_content.push_back(block);
-                }
-            }
-            json m = msg;
-            m["content"] = trimmed_content;
-            out.push_back(std::move(m));
-        } else {
-            out.push_back(msg);
-        }
-    }
-    return out;
+static json TrimToolResults(const json& messages) {
+	json out = json::array();
+	for (const auto& msg : messages) {
+		// tool_result blocks live in user turns whose "content" is
+		// an array of typed blocks.
+		if (msg.value("role", "") == "user" && msg["content"].is_array()) {
+			json trimmed_content = json::array();
+			for (const auto& block : msg["content"]) {
+				if (block.value("type", "") == "tool_result") {
+					std::string content = block.value("content", "");
+					if (content.size() > kHistoryToolResultCap) {
+						content = content.substr(0, kHistoryToolResultCap)
+								  + "\n[... truncated for history storage ...]";
+					}
+					json b = block;
+					b["content"] = content;
+					trimmed_content.push_back(std::move(b));
+				} else {
+					trimmed_content.push_back(block);
+				}
+			}
+			json m = msg;
+			m["content"] = trimmed_content;
+			out.push_back(std::move(m));
+		} else {
+			out.push_back(msg);
+		}
+	}
+	return out;
 }
 
 std::optional<json> load_history(const std::string& name = "") {
-    const std::string path = name.empty()
-        ? paths::history_path()
-        : paths::named_history_path(name);
-    std::ifstream f(path);
-    if (!f.is_open()) return std::nullopt;
-    try {
-        json j = json::parse(f);
-        if (!j.contains("messages") || !j["messages"].is_array())
-            return std::nullopt;
-        json msgs = j["messages"];
-        // Apply turn cap: keep only the last kHistoryMessageCap messages.
-        if (msgs.size() > kHistoryMessageCap) {
-            json capped = json::array();
-            const size_t start = msgs.size() - kHistoryMessageCap;
-            for (size_t i = start; i < msgs.size(); ++i)
-                capped.push_back(msgs[i]);
-            msgs = std::move(capped);
-        }
-        return msgs;
-    } catch (...) {
-        // fall through
-    }
-    return std::nullopt;
+	const std::string path = name.empty()
+		? paths::HistoryPath()
+		: paths::NamedHistoryPath(name);
+	std::ifstream f(path);
+	if (!f.is_open()) return std::nullopt;
+	try {
+		json j = json::parse(f);
+		if (!j.contains("messages") || !j["messages"].is_array())
+			return std::nullopt;
+		json msgs = j["messages"];
+		// Apply turn cap: keep only the last kHistoryMessageCap messages.
+		if (msgs.size() > kHistoryMessageCap) {
+			json capped = json::array();
+			const size_t start = msgs.size() - kHistoryMessageCap;
+			for (size_t i = start; i < msgs.size(); ++i)
+				capped.push_back(msgs[i]);
+			msgs = std::move(capped);
+		}
+		return msgs;
+	} catch (...) {
+		// fall through
+	}
+	return std::nullopt;
 }
 
-bool save_history(const json& messages, const std::string& model,
-                  const std::string& name = "") {
-    const std::string path = name.empty()
-        ? paths::history_path()
-        : paths::named_history_path(name);
-    const auto slash = path.rfind('/');
-    if (slash == std::string::npos) return false;
-    if (!paths::mkdir_p(path.substr(0, slash))) return false;
+bool SaveHistory(const json& messages, const std::string& model,
+				  const std::string& name = "") {
+	const std::string path = name.empty()
+		? paths::HistoryPath()
+		: paths::NamedHistoryPath(name);
+	const auto slash = path.rfind('/');
+	if (slash == std::string::npos) return false;
+	if (!paths::MkdirP(path.substr(0, slash))) return false;
 
-    const json j = {
-        {"messages", trim_tool_results(messages)},
-        {"model",    model},
-        {"saved_at", static_cast<long>(std::time(nullptr))},
-    };
+	const json j = {
+		{"messages", TrimToolResults(messages)},
+		{"model",    model},
+		{"fSavedat", static_cast<long>(std::time(nullptr))},
+	};
 
-    // Atomic write: serialize to a tmp file alongside the real path,
-    // then rename(2) into place. A crash or power loss mid-write
-    // leaves the previous good file intact.
-    const std::string tmp_path = path + ".tmp";
-    {
-        std::ofstream f(tmp_path);
-        if (!f.is_open()) return false;
-        f << j.dump(2) << "\n";
-        if (!f.good()) {
-            std::remove(tmp_path.c_str());
-            return false;
-        }
-    }
-    chmod(tmp_path.c_str(), 0600);
-    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
-        std::remove(tmp_path.c_str());
-        return false;
-    }
-    return true;
+	// Atomic write: serialize to a tmp file alongside the real path,
+	// then rename(2) into place. A crash or power loss mid-write
+	// leaves the previous good file intact.
+	const std::string tmp_path = path + ".tmp";
+	{
+		std::ofstream f(tmp_path);
+		if (!f.is_open()) return false;
+		f << j.dump(2) << "\n";
+		if (!f.good()) {
+			std::remove(tmp_path.c_str());
+			return false;
+		}
+	}
+	chmod(tmp_path.c_str(), 0600);
+	if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+		std::remove(tmp_path.c_str());
+		return false;
+	}
+	return true;
 }
 
 // Cross-thread progress handle used by the Telegram bridge to watch a
 // streaming response and push incremental edits to the chat. Written
-// by process_sse_event's text_delta branch; read by the bridge's
+// by ProcessSseEvent's text_delta branch; read by the bridge's
 // updater thread. Nulled out when no remote consumer is attached.
 struct StreamProgress {
-    std::mutex        mu;
-    std::string       text;
-    std::atomic<int>  version {0};
+	std::mutex        mu;
+	std::string       text;
+	std::atomic<int>  version {0};
 };
 StreamProgress* g_stream_progress = nullptr;
 
 std::map<std::string, std::string> g_last_rate_headers;
 
-size_t header_callback(char* buffer, size_t size, size_t nitems, void* /*userp*/) {
-    const size_t total = size * nitems;
-    std::string  line(buffer, total);
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
-        line.pop_back();
-    }
-    const auto colon = line.find(':');
-    if (colon == std::string::npos) return total;
+size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* /*userp*/) {
+	const size_t total = size * nitems;
+	std::string  line(buffer, total);
+	while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+		line.pop_back();
+	}
+	const auto colon = line.find(':');
+	if (colon == std::string::npos) return total;
 
-    std::string name = line.substr(0, colon);
-    for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (name.compare(0, 10, "anthropic-") != 0) return total;
+	std::string name = line.substr(0, colon);
+	for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	if (name.compare(0, 10, "anthropic-") != 0) return total;
 
-    std::string value = line.substr(colon + 1);
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-        value.erase(0, 1);
-    }
-    g_last_rate_headers[name] = value;
-    return total;
+	std::string value = line.substr(colon + 1);
+	while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+		value.erase(0, 1);
+	}
+	g_last_rate_headers[name] = value;
+	return total;
 }
 
 extern "C" void handle_sigint(int) {
-    g_interrupted = 1;
+	g_interrupted = 1;
 }
 
 struct InterruptGuard {
-    InterruptGuard() {
-        g_interrupted = 0;
-        struct sigaction sa {};
-        sa.sa_handler = handle_sigint;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(SIGINT, &sa, &prev_);
-    }
-    ~InterruptGuard() {
-        sigaction(SIGINT, &prev_, nullptr);
-    }
-    InterruptGuard(const InterruptGuard&) = delete;
-    InterruptGuard& operator=(const InterruptGuard&) = delete;
+	InterruptGuard() {
+		g_interrupted = 0;
+		struct sigaction sa {};
+		sa.sa_handler = handle_sigint;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sigaction(SIGINT, &sa, &fPrev);
+	}
+	~InterruptGuard() {
+		sigaction(SIGINT, &fPrev, nullptr);
+	}
+	InterruptGuard(const InterruptGuard&) = delete;
+	InterruptGuard& operator=(const InterruptGuard&) = delete;
   private:
-    struct sigaction prev_ {};
+	struct sigaction fPrev {};
 };
 
 int xfer_callback(void* /*clientp*/,
-                  curl_off_t /*dltotal*/, curl_off_t /*dlnow*/,
-                  curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
-    return g_interrupted ? 1 : 0;
+				  curl_off_t /*dltotal*/, curl_off_t /*dlnow*/,
+				  curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
+	return g_interrupted ? 1 : 0;
 }
 
 // RAII helper that temporarily puts stdin into cbreak mode while an
@@ -440,417 +440,417 @@ int xfer_callback(void* /*clientp*/,
 // scripted invocations keep behaving normally.
 class EscInterruptGuard {
 public:
-    EscInterruptGuard() {
-        if (!isatty(STDIN_FILENO)) return;
-        if (tcgetattr(STDIN_FILENO, &saved_) != 0) return;
-        saved_valid_ = true;
+	EscInterruptGuard() {
+		if (!isatty(STDIN_FILENO)) return;
+		if (tcgetattr(STDIN_FILENO, &fSaved) != 0) return;
+		fSavedValid = true;
 
-        termios raw = saved_;
-        raw.c_lflag &= ~(ICANON | ECHO);
-        raw.c_cc[VMIN]  = 0;
-        raw.c_cc[VTIME] = 0;
-        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
-            saved_valid_ = false;
-            return;
-        }
+		termios raw = fSaved;
+		raw.c_lflag &= ~(ICANON | ECHO);
+		raw.c_cc[VMIN]  = 0;
+		raw.c_cc[VTIME] = 0;
+		if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+			fSavedValid = false;
+			return;
+		}
 
-        running_.store(true);
-        thread_ = std::thread([this]() {
-            while (running_.load()) {
-                // When paused, spin on a short sleep without touching stdin
-                // so that tui::select_option() has exclusive access to it.
-                // Set paused_ack_ while inside this sleep so pause() can
-                // confirm the thread has stopped reading before returning.
-                if (paused_.load()) {
-                    paused_ack_.store(true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    continue;
-                }
-                paused_ack_.store(false);
+		fRunning.store(true);
+		fThread = std::thread([this]() {
+			while (fRunning.load()) {
+				// When paused, spin on a short sleep without touching stdin
+				// so that tui::SelectOption() has exclusive access to it.
+				// Set fPausedAck while inside this sleep so pause() can
+				// confirm the thread has stopped reading before returning.
+				if (fPaused.load()) {
+					fPausedAck.store(true);
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+					continue;
+				}
+				fPausedAck.store(false);
 
-                struct pollfd pfd {};
-                pfd.fd     = STDIN_FILENO;
-                pfd.events = POLLIN;
-                const int r = ::poll(&pfd, 1, 100);
-                if (!running_.load() || paused_.load()) continue;
-                if (r <= 0) continue;
-                if (!(pfd.revents & POLLIN)) continue;
+				struct pollfd pfd {};
+				pfd.fd     = STDIN_FILENO;
+				pfd.events = POLLIN;
+				const int r = ::poll(&pfd, 1, 100);
+				if (!fRunning.load() || fPaused.load()) continue;
+				if (r <= 0) continue;
+				if (!(pfd.revents & POLLIN)) continue;
 
-                char buf[16];
-                const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
-                if (n <= 0) continue;
+				char buf[16];
+				const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+				if (n <= 0) continue;
 
-                // A bare ESC keypress arrives as a single 0x1B byte.
-                // Arrow keys, Home/End, etc. arrive as multi-byte
-                // CSI sequences starting with 0x1B (usually
-                // 0x1B '[' <rest>). We only treat the lone-byte case
-                // as cancel so a twitchy arrow-key press during
-                // streaming doesn't kill the turn. If 0x1B appears
-                // mid-sequence it's almost certainly a CSI prefix.
-                if (n == 1 && buf[0] == '\x1b') {
-                    g_interrupted = 1;
-                    return;
-                }
-            }
-        });
-    }
+				// A bare ESC keypress arrives as a single 0x1B byte.
+				// Arrow keys, Home/End, etc. arrive as multi-byte
+				// CSI sequences starting with 0x1B (usually
+				// 0x1B '[' <rest>). We only treat the lone-byte case
+				// as cancel so a twitchy arrow-key press during
+				// streaming doesn't kill the turn. If 0x1B appears
+				// mid-sequence it's almost certainly a CSI prefix.
+				if (n == 1 && buf[0] == '\x1b') {
+					g_interrupted = 1;
+					return;
+				}
+			}
+		});
+	}
 
-    ~EscInterruptGuard() {
-        running_.store(false);
-        if (thread_.joinable()) thread_.join();
-        if (saved_valid_) {
-            tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
-        }
-    }
+	~EscInterruptGuard() {
+		fRunning.store(false);
+		if (fThread.joinable()) fThread.join();
+		if (fSavedValid) {
+			tcsetattr(STDIN_FILENO, TCSANOW, &fSaved);
+		}
+	}
 
-    // Temporarily stop reading stdin so another component (e.g.
-    // tui::select_option) has exclusive access to it.
-    // Blocks until the background thread has acknowledged the pause —
-    // i.e. is confirmed to be in its sleep loop and not mid-read.
-    // Without this synchronisation the thread can race to consume
-    // arrow-key CSI bytes (ESC [ A/B) just after pause() sets the flag
-    // but before select_option() calls read(), causing ↑/↓ to do nothing.
-    void pause() {
-        paused_.store(true);
-        // Spin until the thread has set paused_ack_, confirming it has
-        // exited any in-progress poll/read and is in the idle sleep loop.
-        // Upper bound: the poll() timeout is 100 ms, so we wait at most
-        // ~110 ms in the worst case (poll just started when we set the flag).
-        for (int i = 0; i < 120 && !paused_ack_.load(); ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    void resume() {
-        paused_ack_.store(false);
-        paused_.store(false);
-    }
+	// Temporarily stop reading stdin so another component (e.g.
+	// tui::SelectOption) has exclusive access to it.
+	// Blocks until the background thread has acknowledged the pause —
+	// i.e. is confirmed to be in its sleep loop and not mid-read.
+	// Without this synchronisation the thread can race to consume
+	// arrow-key CSI bytes (ESC [ A/B) just after pause() sets the flag
+	// but before SelectOption() calls read(), causing ↑/↓ to do nothing.
+	void pause() {
+		fPaused.store(true);
+		// Spin until the thread has set fPausedAck, confirming it has
+		// exited any in-progress poll/read and is in the idle sleep loop.
+		// Upper bound: the poll() timeout is 100 ms, so we wait at most
+		// ~110 ms in the worst case (poll just started when we set the flag).
+		for (int i = 0; i < 120 && !fPausedAck.load(); ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	void resume() {
+		fPausedAck.store(false);
+		fPaused.store(false);
+	}
 
-    EscInterruptGuard(const EscInterruptGuard&) = delete;
-    EscInterruptGuard& operator=(const EscInterruptGuard&) = delete;
+	EscInterruptGuard(const EscInterruptGuard&) = delete;
+	EscInterruptGuard& operator=(const EscInterruptGuard&) = delete;
 
 private:
-    std::atomic<bool> running_    { false };
-    std::atomic<bool> paused_     { false };
-    std::atomic<bool> paused_ack_ { false }; // set by thread when it enters pause sleep
-    std::thread       thread_;
-    termios           saved_ {};
-    bool              saved_valid_ = false;
+	std::atomic<bool> fRunning    { false };
+	std::atomic<bool> fPaused     { false };
+	std::atomic<bool> fPausedAck { false }; // set by thread when it enters pause sleep
+	std::thread       fThread;
+	termios           fSaved {};
+	bool              fSavedValid = false;
 };
 
 // Pointer to the currently active EscInterruptGuard (if any).
-// Set in send_with_tools so that prompt_permission can pause/resume
-// it around tui::select_option() calls.
+// Set in SendWithTools so that PromptPermission can pause/resume
+// it around tui::SelectOption() calls.
 static EscInterruptGuard* g_active_esc_guard = nullptr;
 
 struct Config {
-    std::string model;
-    int         max_tokens = kMaxTokens;
-    std::string system;
-    bool        show_usage              = false;
-    bool        logging_enabled         = false;
-    bool        allow_destructive_tools = false;
-    bool        notify_enabled          = true;
-    double      notify_min_duration_sec = 60.0;
-    // Auto-compact fires `/compact` when a turn's input token
-    // count crosses `compact_auto_threshold` * context_window.
-    // 0.0 disables. context_window=0 auto-detects from the
-    // model name (1M for "[1m]" variants, 200k otherwise).
-    double      compact_auto_threshold  = 0.8;
-    int         compact_context_window  = 0;
-    json        prices;
-    json        hooks;
-    json        mcp_servers;
-    json        telegram;
+	std::string model;
+	int         max_tokens = kMaxTokens;
+	std::string system;
+	bool        show_usage              = false;
+	bool        logging_enabled         = false;
+	bool        fAllowDestructivetools = false;
+	bool        notify_enabled          = true;
+	double      notify_min_duration_sec = 60.0;
+	// Auto-compact fires `/compact` when a turn's input token
+	// count crosses `compact_auto_threshold` * context_window.
+	// 0.0 disables. context_window=0 auto-detects from the
+	// model name (1M for "[1m]" variants, 200k otherwise).
+	double      compact_auto_threshold  = 0.8;
+	int         compact_context_window  = 0;
+	json        prices;
+	json        hooks;
+	json        mcp_servers;
+	json        telegram;
 };
 
 Config load_config() {
-    Config cfg;
-    cfg.model = kDefaultModel;
+	Config cfg;
+	cfg.model = kDefaultModel;
 
-    std::ifstream f(paths::config_path());
-    if (!f.is_open()) return cfg;
+	std::ifstream f(paths::ConfigPath());
+	if (!f.is_open()) return cfg;
 
-    try {
-        const json j = json::parse(f);
-        if (j.contains("model"))      cfg.model      = j["model"].get<std::string>();
-        if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
-        if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
-        if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
-        if (j.contains("prices"))       cfg.prices      = j["prices"];
-        if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
-        if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
-        if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
-        if (j.contains("allow_destructive_tools"))
-            cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
-        if (j.contains("logging") && j["logging"].is_object()) {
-            cfg.logging_enabled = j["logging"].value("enabled", false);
-        }
-        if (j.contains("notify") && j["notify"].is_object()) {
-            cfg.notify_enabled          = j["notify"].value("enabled", true);
-            cfg.notify_min_duration_sec = j["notify"].value("min_duration_seconds", 60.0);
-        }
-        if (j.contains("compact") && j["compact"].is_object()) {
-            cfg.compact_auto_threshold = j["compact"].value("auto_threshold", 0.8);
-            cfg.compact_context_window = j["compact"].value("context_window", 0);
-        }
-    } catch (const json::exception& e) {
-        std::cerr << "warning: failed to parse " << paths::config_path() << ": " << e.what() << "\n";
-    }
-    return cfg;
+	try {
+		const json j = json::parse(f);
+		if (j.contains("model"))      cfg.model      = j["model"].get<std::string>();
+		if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
+		if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
+		if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
+		if (j.contains("prices"))       cfg.prices      = j["prices"];
+		if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
+		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
+		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
+		if (j.contains("fAllowDestructivetools"))
+			cfg.fAllowDestructivetools = j["fAllowDestructivetools"].get<bool>();
+		if (j.contains("logging") && j["logging"].is_object()) {
+			cfg.logging_enabled = j["logging"].value("enabled", false);
+		}
+		if (j.contains("notify") && j["notify"].is_object()) {
+			cfg.notify_enabled          = j["notify"].value("enabled", true);
+			cfg.notify_min_duration_sec = j["notify"].value("min_duration_seconds", 60.0);
+		}
+		if (j.contains("compact") && j["compact"].is_object()) {
+			cfg.compact_auto_threshold = j["compact"].value("auto_threshold", 0.8);
+			cfg.compact_context_window = j["compact"].value("context_window", 0);
+		}
+	} catch (const json::exception& e) {
+		std::cerr << "warning: failed to parse " << paths::ConfigPath() << ": " << e.what() << "\n";
+	}
+	return cfg;
 }
 
 enum class AuthKind { None, OAuth, ApiKey };
 
 struct Auth {
-    AuthKind    kind = AuthKind::None;
-    std::string credential;
+	AuthKind    kind = AuthKind::None;
+	std::string credential;
 };
 
 struct StreamState {
-    std::string          sse_buffer;
-    std::string          raw_buffer;
-    std::string          text;
-    // Atomics so the spinner thread can read them concurrently
-    // with the main thread's SSE parser. The spinner reads
-    // input_tokens via a non-owning pointer passed to
-    // set_live_input_tokens() so the "(44s · ↑ 652 tokens)" tail
-    // picks up the prompt size the moment `message_start` arrives.
-    std::atomic<int>     input_tokens        { 0 };
-    std::atomic<int>     output_tokens       { 0 };
-    // Prompt-cache telemetry from the Messages API usage block.
-    // cache_creation = tokens written to cache (1.25× cost, first
-    // hit); cache_read = tokens served from cache (~0.1× cost,
-    // subsequent hits). When caching works, cache_read dominates.
-    std::atomic<int>     cache_creation_input_tokens { 0 };
-    std::atomic<int>     cache_read_input_tokens     { 0 };
-    bool                 saw_text            = false;
-    bool                 stream_error        = false;
-    std::string          stream_error_message;
-    tui::Spinner*        spinner             = nullptr;
-    tui::MarkdownRenderer renderer;
+	std::string          sse_buffer;
+	std::string          raw_buffer;
+	std::string          text;
+	// Atomics so the spinner thread can read them concurrently
+	// with the main thread's SSE parser. The spinner reads
+	// input_tokens via a non-owning pointer passed to
+	// SetLiveInputTokens() so the "(44s · ↑ 652 tokens)" tail
+	// picks up the prompt size the moment `message_start` arrives.
+	std::atomic<int>     input_tokens        { 0 };
+	std::atomic<int>     output_tokens       { 0 };
+	// Prompt-cache telemetry from the Messages API usage block.
+	// cache_creation = tokens written to cache (1.25× cost, first
+	// hit); cache_read = tokens served from cache (~0.1× cost,
+	// subsequent hits). When caching works, cache_read dominates.
+	std::atomic<int>     cache_creation_input_tokens { 0 };
+	std::atomic<int>     cache_read_input_tokens     { 0 };
+	bool                 saw_text            = false;
+	bool                 stream_error        = false;
+	std::string          stream_error_message;
+	tui::Spinner*        spinner             = nullptr;
+	tui::MarkdownRenderer renderer;
 
-    // Structured content accumulation for tool-use support.
-    std::vector<json>    content_blocks;           // finalized text + tool_use blocks
-    std::string          current_type;             // "text" / "tool_use" while streaming a block
-    std::string          current_text;
-    std::string          current_tool_id;
-    std::string          current_tool_name;
-    std::string          current_tool_input_raw;   // partial JSON being accumulated
-    std::string          stop_reason;              // set via message_delta
+	// Structured content accumulation for tool-use support.
+	std::vector<json>    content_blocks;           // finalized text + tool_use blocks
+	std::string          current_type;             // "text" / "tool_use" while streaming a block
+	std::string          current_text;
+	std::string          current_tool_id;
+	std::string          current_tool_name;
+	std::string          current_tool_input_raw;   // partial JSON being accumulated
+	std::string          stop_reason;              // set via message_delta
 };
 
 struct SendResult {
-    int                exit_code = 0;
-    std::string        assistant_text;
-    int                input_tokens  = 0;
-    int                output_tokens = 0;
-    std::vector<json>  content_blocks;
-    std::string        stop_reason;
-    // Anthropic prompt-cache usage for this call. cache_read > 0
-    // on repeat turns means the system+tools prefix is reused from
-    // Anthropic's server-side cache — faster TTFT, 10% of normal
-    // input-token cost on that portion. Kept at the end so existing
-    // positional {...} constructions continue to compile with these
-    // as zero-defaulted trailing fields.
-    int                cache_creation_input_tokens = 0;
-    int                cache_read_input_tokens     = 0;
+	int                exit_code = 0;
+	std::string        assistant_text;
+	int                input_tokens  = 0;
+	int                output_tokens = 0;
+	std::vector<json>  content_blocks;
+	std::string        stop_reason;
+	// Anthropic prompt-cache usage for this call. cache_read > 0
+	// on repeat turns means the system+tools prefix is reused from
+	// Anthropic's server-side cache — faster TTFT, 10% of normal
+	// input-token cost on that portion. Kept at the end so existing
+	// positional {...} constructions continue to compile with these
+	// as zero-defaulted trailing fields.
+	int                cache_creation_input_tokens = 0;
+	int                cache_read_input_tokens     = 0;
 };
 
-void process_sse_event(const std::string& event, StreamState* state) {
-    std::string data;
-    std::istringstream iss(event);
-    std::string line;
-    while (std::getline(iss, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.rfind("data:", 0) != 0) continue;
-        std::string payload = line.substr(5);
-        if (!payload.empty() && payload.front() == ' ') payload.erase(0, 1);
-        if (!data.empty()) data += '\n';
-        data += payload;
-    }
-    if (data.empty()) return;
+void ProcessSseEvent(const std::string& event, StreamState* state) {
+	std::string data;
+	std::istringstream iss(event);
+	std::string line;
+	while (std::getline(iss, line)) {
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		if (line.rfind("data:", 0) != 0) continue;
+		std::string payload = line.substr(5);
+		if (!payload.empty() && payload.front() == ' ') payload.erase(0, 1);
+		if (!data.empty()) data += '\n';
+		data += payload;
+	}
+	if (data.empty()) return;
 
-    try {
-        const json j = json::parse(data);
-        const std::string type = j.value("type", "");
+	try {
+		const json j = json::parse(data);
+		const std::string type = j.value("type", "");
 
-        if (type == "content_block_start") {
-            const auto& cb = j.value("content_block", json::object());
-            state->current_type = cb.value("type", std::string{});
-            state->current_text.clear();
-            state->current_tool_id.clear();
-            state->current_tool_name.clear();
-            state->current_tool_input_raw.clear();
-            if (state->current_type == "tool_use") {
-                state->current_tool_id   = cb.value("id",   std::string{});
-                state->current_tool_name = cb.value("name", std::string{});
-            }
-        } else if (type == "content_block_delta") {
-            const auto& delta = j.value("delta", json::object());
-            const std::string dtype = delta.value("type", std::string{});
-            if (dtype == "text_delta") {
-                const std::string chunk = delta.value("text", "");
-                state->renderer.write(chunk);
-                state->current_text += chunk;
-                state->text += chunk;
-                state->saw_text = true;
-                if (g_stream_progress) {
-                    std::lock_guard<std::mutex> lk(g_stream_progress->mu);
-                    g_stream_progress->text += chunk;
-                    g_stream_progress->version.fetch_add(1, std::memory_order_relaxed);
-                }
-            } else if (dtype == "input_json_delta") {
-                state->current_tool_input_raw += delta.value("partial_json", "");
-            }
-        } else if (type == "content_block_stop") {
-            if (state->current_type == "text") {
-                state->content_blocks.push_back({
-                    {"type", "text"},
-                    {"text", state->current_text},
-                });
-            } else if (state->current_type == "tool_use") {
-                json parsed_input = json::object();
-                try {
-                    if (!state->current_tool_input_raw.empty()) {
-                        parsed_input = json::parse(state->current_tool_input_raw);
-                    }
-                } catch (const json::exception&) {
-                    parsed_input = json::object();
-                }
-                state->content_blocks.push_back({
-                    {"type",  "tool_use"},
-                    {"id",    state->current_tool_id},
-                    {"name",  state->current_tool_name},
-                    {"input", parsed_input},
-                });
-            }
-            state->current_type.clear();
-        } else if (type == "message_start") {
-            // Intentionally leave the spinner running here — we
-            // want the "(elapsed · ↑ N tokens)" tail to render
-            // during the window between prompt ingestion and the
-            // first text_delta. MarkdownRenderer::write() still
-            // stops the spinner on first real output.
-            if (j.contains("message") && j["message"].contains("usage")) {
-                const auto& u = j["message"]["usage"];
-                state->input_tokens.store(u.value("input_tokens",  0),
-                                          std::memory_order_relaxed);
-                state->output_tokens.store(u.value("output_tokens", 0),
-                                           std::memory_order_relaxed);
-                state->cache_creation_input_tokens.store(
-                    u.value("cache_creation_input_tokens", 0),
-                    std::memory_order_relaxed);
-                state->cache_read_input_tokens.store(
-                    u.value("cache_read_input_tokens", 0),
-                    std::memory_order_relaxed);
-            }
-        } else if (type == "message_delta") {
-            if (j.contains("delta") && j["delta"].contains("stop_reason")
-                && j["delta"]["stop_reason"].is_string()) {
-                state->stop_reason = j["delta"]["stop_reason"].get<std::string>();
-            }
-            if (j.contains("usage")) {
-                const auto& u = j["usage"];
-                state->output_tokens.store(
-                    u.value("output_tokens",
-                            state->output_tokens.load(std::memory_order_relaxed)),
-                    std::memory_order_relaxed);
-            }
-        } else if (type == "error") {
-            state->stream_error = true;
-            if (j.contains("error") && j["error"].contains("message")) {
-                state->stream_error_message = j["error"]["message"].get<std::string>();
-            }
-        }
-    } catch (const json::exception&) {
-        // Ignore partial/invalid payloads (e.g. ping events).
-    }
+		if (type == "content_block_start") {
+			const auto& cb = j.value("content_block", json::object());
+			state->current_type = cb.value("type", std::string{});
+			state->current_text.clear();
+			state->current_tool_id.clear();
+			state->current_tool_name.clear();
+			state->current_tool_input_raw.clear();
+			if (state->current_type == "tool_use") {
+				state->current_tool_id   = cb.value("id",   std::string{});
+				state->current_tool_name = cb.value("name", std::string{});
+			}
+		} else if (type == "content_block_delta") {
+			const auto& delta = j.value("delta", json::object());
+			const std::string dtype = delta.value("type", std::string{});
+			if (dtype == "text_delta") {
+				const std::string chunk = delta.value("text", "");
+				state->renderer.Write(chunk);
+				state->current_text += chunk;
+				state->text += chunk;
+				state->saw_text = true;
+				if (g_stream_progress) {
+					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
+					g_stream_progress->text += chunk;
+					g_stream_progress->version.fetch_add(1, std::memory_order_relaxed);
+				}
+			} else if (dtype == "input_json_delta") {
+				state->current_tool_input_raw += delta.value("partial_json", "");
+			}
+		} else if (type == "content_block_stop") {
+			if (state->current_type == "text") {
+				state->content_blocks.push_back({
+					{"type", "text"},
+					{"text", state->current_text},
+				});
+			} else if (state->current_type == "tool_use") {
+				json parsed_input = json::object();
+				try {
+					if (!state->current_tool_input_raw.empty()) {
+						parsed_input = json::parse(state->current_tool_input_raw);
+					}
+				} catch (const json::exception&) {
+					parsed_input = json::object();
+				}
+				state->content_blocks.push_back({
+					{"type",  "tool_use"},
+					{"id",    state->current_tool_id},
+					{"name",  state->current_tool_name},
+					{"input", parsed_input},
+				});
+			}
+			state->current_type.clear();
+		} else if (type == "message_start") {
+			// Intentionally leave the spinner running here — we
+			// want the "(elapsed · ↑ N tokens)" tail to render
+			// during the window between prompt ingestion and the
+			// first text_delta. MarkdownRenderer::Write() still
+			// stops the spinner on first real output.
+			if (j.contains("message") && j["message"].contains("usage")) {
+				const auto& u = j["message"]["usage"];
+				state->input_tokens.store(u.value("input_tokens",  0),
+										  std::memory_order_relaxed);
+				state->output_tokens.store(u.value("output_tokens", 0),
+										   std::memory_order_relaxed);
+				state->cache_creation_input_tokens.store(
+					u.value("cache_creation_input_tokens", 0),
+					std::memory_order_relaxed);
+				state->cache_read_input_tokens.store(
+					u.value("cache_read_input_tokens", 0),
+					std::memory_order_relaxed);
+			}
+		} else if (type == "message_delta") {
+			if (j.contains("delta") && j["delta"].contains("stop_reason")
+				&& j["delta"]["stop_reason"].is_string()) {
+				state->stop_reason = j["delta"]["stop_reason"].get<std::string>();
+			}
+			if (j.contains("usage")) {
+				const auto& u = j["usage"];
+				state->output_tokens.store(
+					u.value("output_tokens",
+							state->output_tokens.load(std::memory_order_relaxed)),
+					std::memory_order_relaxed);
+			}
+		} else if (type == "error") {
+			state->stream_error = true;
+			if (j.contains("error") && j["error"].contains("message")) {
+				state->stream_error_message = j["error"]["message"].get<std::string>();
+			}
+		}
+	} catch (const json::exception&) {
+		// Ignore partial/invalid payloads (e.g. ping events).
+	}
 }
 
-size_t stream_write_callback(char* data, size_t size, size_t nmemb, void* userp) {
-    const size_t total = size * nmemb;
-    auto* state = static_cast<StreamState*>(userp);
-    state->raw_buffer.append(data, total);
-    state->sse_buffer.append(data, total);
+size_t StreamWriteCallback(char* data, size_t size, size_t nmemb, void* userp) {
+	const size_t total = size * nmemb;
+	auto* state = static_cast<StreamState*>(userp);
+	state->raw_buffer.append(data, total);
+	state->sse_buffer.append(data, total);
 
-    size_t pos;
-    while ((pos = state->sse_buffer.find("\n\n")) != std::string::npos) {
-        const std::string event = state->sse_buffer.substr(0, pos);
-        state->sse_buffer.erase(0, pos + 2);
-        process_sse_event(event, state);
-    }
-    return total;
+	size_t pos;
+	while ((pos = state->sse_buffer.find("\n\n")) != std::string::npos) {
+		const std::string event = state->sse_buffer.substr(0, pos);
+		state->sse_buffer.erase(0, pos + 2);
+		ProcessSseEvent(event, state);
+	}
+	return total;
 }
 
-void print_usage(const char* prog, const std::string& default_model, int default_max_tokens) {
-    std::cerr << "Usage: " << prog << " [OPTIONS] [MESSAGE...]\n"
-              << "\n"
-              << "Sends a one-shot message to the Claude API and streams the reply.\n"
-              << "If stdin is not a terminal (piped input), its contents are appended\n"
-              << "to the message so `cat file.txt | " << prog << " \"summarize\"` works.\n"
-              << "\n"
-              << "Commands:\n"
-              << "  login                Authenticate via Claude.ai (OAuth + PKCE).\n"
-              << "  logout               Delete stored credentials.\n"
-              << "\n"
-              << "Options:\n"
-              << "  -i, --interactive    Start a multi-turn REPL session.\n"
-              << "  -m, --model MODEL    Model to use (default: " << default_model << ").\n"
-              << "  -t, --max-tokens N   Max tokens in response (default: " << default_max_tokens << ").\n"
-              << "  -s, --system TEXT    Custom system prompt (appended after the\n"
-              << "                       required Claude Code prefix when OAuth is used).\n"
-              << "  -u, --usage          After the response, print input/output token\n"
-              << "                       usage to stderr.\n"
-              << "  -r, --resume [NAME]  Start the REPL pre-loaded with the last saved\n"
-              << "                       session (implies -i). Without NAME loads the\n"
-              << "                       default session (history.json). With NAME loads\n"
-              << "                       (or creates) a named session stored as\n"
-              << "                       history-<NAME>.json alongside it.\n"
-              << "  -y, --yes            Auto-approve destructive tools (Bash/Write/Edit)\n"
-              << "                       for this run. Needed for one-shot invocations\n"
-              << "                       without a TTY to answer the y/a/n prompt.\n"
-              << "  -a, --attach PATH    Attach a file path to this session. Repeatable.\n"
-              << "                       Announced to Claude on the next user turn so\n"
-              << "                       tools like Read can pull them in. In interactive\n"
-              << "                       mode you can also drag files from Tracker onto\n"
-              << "                       the Terminal window — the REPL auto-detects paths.\n"
-              << "      --plain          Disable ANSI color output.\n"
-              << "      --color          Force ANSI color output, even when piped.\n"
-              << "  -V, --version        Print version and exit.\n"
-              << "  -h, --help           Show this help and exit.\n"
-              << "\n"
-              << "Config file: " << paths::config_path() << "\n"
-              << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
-              << "  allow_destructive_tools, prices. CLI flags override config values.\n"
-              << "\n"
-              << "Memory files (prepended to the system prompt, user before project):\n"
-              << "  " << paths::user_memory_path() << "\n"
-              << "  ./CLAUDE.md (per-project, loaded from the current working directory)\n"
-              << "\n"
-              << "Authentication (in priority order):\n"
-              << "  1. OAuth tokens from 'claude login' (uses Pro/Max quota).\n"
-              << "  2. ANTHROPIC_API_KEY environment variable (billed per token).\n";
+void PrintUsage(const char* prog, const std::string& default_model, int default_max_tokens) {
+	std::cerr << "Usage: " << prog << " [OPTIONS] [MESSAGE...]\n"
+			  << "\n"
+			  << "Sends a one-shot message to the Claude API and streams the reply.\n"
+			  << "If stdin is not a terminal (piped input), its contents are appended\n"
+			  << "to the message so `cat file.txt | " << prog << " \"summarize\"` works.\n"
+			  << "\n"
+			  << "Commands:\n"
+			  << "  login                Authenticate via Claude.ai (OAuth + PKCE).\n"
+			  << "  logout               Delete stored credentials.\n"
+			  << "\n"
+			  << "Options:\n"
+			  << "  -i, --interactive    Start a multi-turn REPL session.\n"
+			  << "  -m, --model MODEL    Model to use (default: " << default_model << ").\n"
+			  << "  -t, --max-tokens N   Max tokens in response (default: " << default_max_tokens << ").\n"
+			  << "  -s, --system TEXT    Custom system prompt (appended after the\n"
+			  << "                       required Claude Code prefix when OAuth is used).\n"
+			  << "  -u, --usage          After the response, print input/output token\n"
+			  << "                       usage to stderr.\n"
+			  << "  -r, --resume [NAME]  Start the REPL pre-loaded with the last saved\n"
+			  << "                       session (implies -i). Without NAME loads the\n"
+			  << "                       default session (history.json). With NAME loads\n"
+			  << "                       (or creates) a named session stored as\n"
+			  << "                       history-<NAME>.json alongside it.\n"
+			  << "  -y, --yes            Auto-approve destructive tools (Bash/Write/Edit)\n"
+			  << "                       for this run. Needed for one-shot invocations\n"
+			  << "                       without a TTY to answer the y/a/n prompt.\n"
+			  << "  -a, --attach PATH    Attach a file path to this session. Repeatable.\n"
+			  << "                       Announced to Claude on the next user turn so\n"
+			  << "                       tools like Read can pull them in. In interactive\n"
+			  << "                       mode you can also drag files from Tracker onto\n"
+			  << "                       the Terminal window — the REPL auto-detects paths.\n"
+			  << "      --plain          Disable ANSI color output.\n"
+			  << "      --color          Force ANSI color output, even when piped.\n"
+			  << "  -V, --version        Print version and exit.\n"
+			  << "  -h, --help           Show this help and exit.\n"
+			  << "\n"
+			  << "Config file: " << paths::ConfigPath() << "\n"
+			  << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
+			  << "  fAllowDestructivetools, prices. CLI flags override config values.\n"
+			  << "\n"
+			  << "Memory files (prepended to the system prompt, user before project):\n"
+			  << "  " << paths::UserMemoryPath() << "\n"
+			  << "  ./CLAUDE.md (per-project, loaded from the current working directory)\n"
+			  << "\n"
+			  << "Authentication (in priority order):\n"
+			  << "  1. OAuth tokens from 'claude login' (uses Pro/Max quota).\n"
+			  << "  2. ANTHROPIC_API_KEY environment variable (billed per token).\n";
 }
 
-Auth resolve_auth() {
-    if (auto stored = load_tokens(); stored) {
-        if (stored->is_expired()) {
-            if (auto refreshed = refresh_tokens(*stored); refreshed) {
-                save_tokens(*refreshed);
-                return {AuthKind::OAuth, refreshed->access_token};
-            }
-            std::cerr << "warning: OAuth refresh failed, falling back to API key\n";
-        } else {
-            return {AuthKind::OAuth, stored->access_token};
-        }
-    }
+Auth ResolveAuth() {
+	if (auto stored = LoadTokens(); stored) {
+		if (stored->IsExpired()) {
+			if (auto refreshed = RefreshTokens(*stored); refreshed) {
+				SaveTokens(*refreshed);
+				return {AuthKind::OAuth, refreshed->access_token};
+			}
+			std::cerr << "warning: OAuth refresh failed, falling back to API key\n";
+		} else {
+			return {AuthKind::OAuth, stored->access_token};
+		}
+	}
 
-    if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k) {
-        return {AuthKind::ApiKey, k};
-    }
-    return {};
+	if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k) {
+		return {AuthKind::ApiKey, k};
+	}
+	return {};
 }
 
-// Session-scoped curl handle. Reused across all send_conversation
+// Session-scoped curl handle. Reused across all SendConversation
 // calls so DNS cache, TLS session, and TCP connections persist
 // between turns instead of being rebuilt on every request.
 // Created lazily on first use; cleaned up via atexit.
@@ -858,13 +858,13 @@ namespace {
 CURL* g_curl = nullptr;
 
 CURL* get_curl() {
-    if (!g_curl) {
-        g_curl = curl_easy_init();
-        std::atexit([]() {
-            if (g_curl) { curl_easy_cleanup(g_curl); g_curl = nullptr; }
-        });
-    }
-    return g_curl;
+	if (!g_curl) {
+		g_curl = curl_easy_init();
+		std::atexit([]() {
+			if (g_curl) { curl_easy_cleanup(g_curl); g_curl = nullptr; }
+		});
+	}
+	return g_curl;
 }
 } // namespace
 
@@ -875,378 +875,378 @@ CURL* get_curl() {
 struct ModelEntry { std::string id; std::string display_name; };
 
 std::vector<ModelEntry> fetch_models(const Auth& auth) {
-    CURL* curl = curl_easy_init();
-    if (!curl) return {};
+	CURL* curl = curl_easy_init();
+	if (!curl) return {};
 
-    // Accumulate the response body.
-    std::string body;
-    auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-        auto* s = static_cast<std::string*>(userdata);
-        s->append(ptr, size * nmemb);
-        return size * nmemb;
-    };
+	// Accumulate the response body.
+	std::string body;
+	auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+		auto* s = static_cast<std::string*>(userdata);
+		s->append(ptr, size * nmemb);
+		return size * nmemb;
+	};
 
-    curl_slist* headers = nullptr;
-    if (auth.kind == AuthKind::OAuth) {
-        headers = curl_slist_append(headers, ("authorization: Bearer " + auth.credential).c_str());
-        headers = curl_slist_append(headers, (std::string("anthropic-beta: ") + kOAuthBeta).c_str());
-    } else {
-        headers = curl_slist_append(headers, ("x-api-key: " + auth.credential).c_str());
-    }
-    headers = curl_slist_append(headers, (std::string("anthropic-version: ") + kApiVersion).c_str());
+	curl_slist* headers = nullptr;
+	if (auth.kind == AuthKind::OAuth) {
+		headers = curl_slist_append(headers, ("authorization: Bearer " + auth.credential).c_str());
+		headers = curl_slist_append(headers, (std::string("anthropic-beta: ") + kOAuthBeta).c_str());
+	} else {
+		headers = curl_slist_append(headers, ("x-api-key: " + auth.credential).c_str());
+	}
+	headers = curl_slist_append(headers, (std::string("anthropic-version: ") + kApiVersion).c_str());
 
-    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/models?limit=100");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<size_t(*)(char*,size_t,size_t,void*)>(write_cb));
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+	curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/models?limit=100");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<size_t(*)(char*,size_t,size_t,void*)>(write_cb));
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 
-    const CURLcode res = curl_easy_perform(curl);
-    long http_status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+	const CURLcode res = curl_easy_perform(curl);
+	long http_status = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_status != 200) return {};
+	if (res != CURLE_OK || http_status != 200) return {};
 
-    std::vector<ModelEntry> out;
-    try {
-        const auto j = json::parse(body);
-        if (!j.contains("data") || !j["data"].is_array()) return {};
-        for (const auto& m : j["data"]) {
-            ModelEntry e;
-            e.id           = m.value("id", "");
-            e.display_name = m.value("display_name", e.id);
-            if (!e.id.empty()) out.push_back(std::move(e));
-        }
-    } catch (...) {}
-    return out;
+	std::vector<ModelEntry> out;
+	try {
+		const auto j = json::parse(body);
+		if (!j.contains("data") || !j["data"].is_array()) return {};
+		for (const auto& m : j["data"]) {
+			ModelEntry e;
+			e.id           = m.value("id", "");
+			e.display_name = m.value("display_name", e.id);
+			if (!e.id.empty()) out.push_back(std::move(e));
+		}
+	} catch (...) {}
+	return out;
 }
 
-SendResult send_conversation(const Auth& auth, const std::string& model, int max_tokens,
-                             const json& messages, const std::string& custom_system,
-                             bool include_tools) {
-    constexpr int kMaxRetries = 3;
-    constexpr int kBaseDelay  = 1000; // ms; doubles on each retry
+SendResult SendConversation(const Auth& auth, const std::string& model, int max_tokens,
+							 const json& messages, const std::string& custom_system,
+							 bool include_tools) {
+	constexpr int kMaxRetries = 3;
+	constexpr int kBaseDelay  = 1000; // ms; doubles on each retry
 
-    CURL* curl = get_curl();
-    if (!curl) {
-        std::cerr << "error: curl_easy_init failed\n";
-        return {1, {}, 0, 0, {}, {}};
-    }
+	CURL* curl = get_curl();
+	if (!curl) {
+		std::cerr << "error: curl_easy_init failed\n";
+		return {1, {}, 0, 0, {}, {}};
+	}
 
-    // Sanitize the system prompt once before entering the retry loop.
-    // CLAUDE.md files and the BFS snapshot are read as raw bytes and may
-    // contain non-UTF-8 sequences (e.g. a file with a Latin-1 em-dash, a
-    // BFS attribute written by an older tool, etc.). nlohmann::json::dump()
-    // throws type_error.316 on any invalid byte, terminating the process if
-    // uncaught. sanitize_utf8 replaces bad bytes with U+FFFD so the string
-    // is always safe to serialize.
-    const std::string safe_system = sanitize_utf8(custom_system);
+	// Sanitize the system prompt once before entering the retry loop.
+	// CLAUDE.md files and the BFS snapshot are read as raw bytes and may
+	// contain non-UTF-8 sequences (e.g. a file with a Latin-1 em-dash, a
+	// BFS attribute written by an older tool, etc.). nlohmann::json::dump()
+	// throws type_error.316 on any invalid byte, terminating the process if
+	// uncaught. SanitizeUtf8 replaces bad bytes with U+FFFD so the string
+	// is always safe to serialize.
+	const std::string safe_system = SanitizeUtf8(custom_system);
 
-    for (int attempt = 1; /* break/return inside */; ++attempt) {
-    // Reset per-request state on the reused handle so stale
-    // headers / callbacks from the previous call don't leak.
-    curl_easy_reset(curl);
+	for (int attempt = 1; /* break/return inside */; ++attempt) {
+	// Reset per-request state on the reused handle so stale
+	// headers / callbacks from the previous call don't leak.
+	curl_easy_reset(curl);
 
-    // Mutable copy of messages so we can stamp cache_control on
-    // the most recent user turn without disturbing the caller's
-    // conversation history.
-    json cached_messages = messages;
-    if (!cached_messages.empty()) {
-        auto& last = cached_messages.back();
-        if (last.contains("content")) {
-            auto& content = last["content"];
-            if (content.is_string()) {
-                // Upgrade string content into an array with a single
-                // text block so we have somewhere to attach
-                // cache_control.
-                const std::string text = content.get<std::string>();
-                content = json::array({
-                    {
-                        {"type", "text"},
-                        {"text", text},
-                        {"cache_control", {{"type", "ephemeral"}}},
-                    },
-                });
-            } else if (content.is_array() && !content.empty()) {
-                content.back()["cache_control"] = {{"type", "ephemeral"}};
-            }
-        }
-    }
+	// Mutable copy of messages so we can stamp cache_control on
+	// the most recent user turn without disturbing the caller's
+	// conversation history.
+	json cached_messages = messages;
+	if (!cached_messages.empty()) {
+		auto& last = cached_messages.back();
+		if (last.contains("content")) {
+			auto& content = last["content"];
+			if (content.is_string()) {
+				// Upgrade string content into an array with a single
+				// text block so we have somewhere to attach
+				// cache_control.
+				const std::string text = content.get<std::string>();
+				content = json::array({
+					{
+						{"type", "text"},
+						{"text", text},
+						{"cache_control", {{"type", "ephemeral"}}},
+					},
+				});
+			} else if (content.is_array() && !content.empty()) {
+				content.back()["cache_control"] = {{"type", "ephemeral"}};
+			}
+		}
+	}
 
-    json body = {
-        {"model",      model},
-        {"max_tokens", max_tokens},
-        {"stream",     true},
-        {"messages",   cached_messages},
-    };
-    if (include_tools) {
-        body["tools"] = tools::definitions();
-    }
+	json body = {
+		{"model",      model},
+		{"max_tokens", max_tokens},
+		{"stream",     true},
+		{"messages",   cached_messages},
+	};
+	if (include_tools) {
+		body["tools"] = tools::Definitions();
+	}
 
-    // When OAuth is active, Anthropic gates the request unless the
-    // system field's first entry is the Claude Code preamble. Earlier
-    // versions concatenated extra content into a single string which
-    // worked for small flag-only system prompts, but started failing
-    // once CLAUDE.md memory files were appended. Sending `system` as
-    // an array with the preamble as element 0 and any extra content
-    // as element 1 passes the check.
-    //
-    // Prompt caching: mark the LAST system block with
-    // cache_control: ephemeral. Render order is tools → system →
-    // messages, so one marker here caches both the tools array and
-    // the system prompt together. Subsequent turns in the same
-    // session (stable tools + stable system) hit the cache and
-    // process input ~5-10× faster at ~10% of the normal input
-    // token cost.
-    if (auth.kind == AuthKind::OAuth) {
-        json system_array = json::array();
-        system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
-        if (!safe_system.empty()) {
-            system_array.push_back({{"type", "text"}, {"text", safe_system}});
-        }
-        system_array.back()["cache_control"] = {{"type", "ephemeral"}};
-        body["system"] = system_array;
-    } else if (!safe_system.empty()) {
-        body["system"] = json::array({
-            {
-                {"type", "text"},
-                {"text", safe_system},
-                {"cache_control", {{"type", "ephemeral"}}},
-            },
-        });
-    }
-    std::string body_str;
-    try {
-        body_str = body.dump();
-    } catch (const json::exception& e) {
-        std::cerr << "\nerror: failed to serialize request body: " << e.what() << "\n"
-                  << "  (hint: a system prompt or message may contain invalid UTF-8)\n";
-        return {1, {}, 0, 0, {}, {}};
-    }
+	// When OAuth is active, Anthropic gates the request unless the
+	// system field's first entry is the Claude Code preamble. Earlier
+	// versions concatenated extra content into a single string which
+	// worked for small flag-only system prompts, but started failing
+	// once CLAUDE.md memory files were appended. Sending `system` as
+	// an array with the preamble as element 0 and any extra content
+	// as element 1 passes the check.
+	//
+	// Prompt caching: mark the LAST system block with
+	// cache_control: ephemeral. Render order is tools → system →
+	// messages, so one marker here caches both the tools array and
+	// the system prompt together. Subsequent turns in the same
+	// session (stable tools + stable system) hit the cache and
+	// process input ~5-10× faster at ~10% of the normal input
+	// token cost.
+	if (auth.kind == AuthKind::OAuth) {
+		json system_array = json::array();
+		system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
+		if (!safe_system.empty()) {
+			system_array.push_back({{"type", "text"}, {"text", safe_system}});
+		}
+		system_array.back()["cache_control"] = {{"type", "ephemeral"}};
+		body["system"] = system_array;
+	} else if (!safe_system.empty()) {
+		body["system"] = json::array({
+			{
+				{"type", "text"},
+				{"text", safe_system},
+				{"cache_control", {{"type", "ephemeral"}}},
+			},
+		});
+	}
+	std::string body_str;
+	try {
+		body_str = body.dump();
+	} catch (const json::exception& e) {
+		std::cerr << "\nerror: failed to serialize request body: " << e.what() << "\n"
+				  << "  (hint: a system prompt or message may contain invalid UTF-8)\n";
+		return {1, {}, 0, 0, {}, {}};
+	}
 
-    curl_slist* headers = nullptr;
-    if (auth.kind == AuthKind::OAuth) {
-        headers = curl_slist_append(headers, ("authorization: Bearer " + auth.credential).c_str());
-        headers = curl_slist_append(headers, (std::string("anthropic-beta: ") + kOAuthBeta).c_str());
-    } else {
-        headers = curl_slist_append(headers, ("x-api-key: " + auth.credential).c_str());
-    }
-    headers = curl_slist_append(headers, (std::string("anthropic-version: ") + kApiVersion).c_str());
-    headers = curl_slist_append(headers, "content-type: application/json");
-    headers = curl_slist_append(headers, "accept: text/event-stream");
+	curl_slist* headers = nullptr;
+	if (auth.kind == AuthKind::OAuth) {
+		headers = curl_slist_append(headers, ("authorization: Bearer " + auth.credential).c_str());
+		headers = curl_slist_append(headers, (std::string("anthropic-beta: ") + kOAuthBeta).c_str());
+	} else {
+		headers = curl_slist_append(headers, ("x-api-key: " + auth.credential).c_str());
+	}
+	headers = curl_slist_append(headers, (std::string("anthropic-version: ") + kApiVersion).c_str());
+	headers = curl_slist_append(headers, "content-type: application/json");
+	headers = curl_slist_append(headers, "accept: text/event-stream");
 
-    StreamState state;
-    // The Spinner now picks a gerund verb ("Forming", "Pondering",
-    // ...) internally and renders a Claude Code-style
-    // "(elapsed · ↑ N tokens · esc:cancel)" tail. We hand it a
-    // pointer to the live input_tokens atomic so the prompt size
-    // appears as soon as `message_start` arrives over SSE, a few
-    // hundred ms after curl_easy_perform begins.
-    tui::Spinner spinner("thinking");
-    spinner.set_live_input_tokens(&state.input_tokens);
-    state.spinner = &spinner;
-    state.renderer.set_spinner(&spinner);
+	StreamState state;
+	// The Spinner now picks a gerund verb ("Forming", "Pondering",
+	// ...) internally and renders a Claude Code-style
+	// "(elapsed · ↑ N tokens · esc:cancel)" tail. We hand it a
+	// pointer to the live input_tokens atomic so the prompt size
+	// appears as soon as `message_start` arrives over SSE, a few
+	// hundred ms after curl_easy_perform begins.
+	tui::Spinner spinner("thinking");
+	spinner.SetLiveInputTokens(&state.input_tokens);
+	state.spinner = &spinner;
+	state.renderer.SetSpinner(&spinner);
 
-    curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
-    const std::string ua = std::string("haiku-claude-cli/") + kVersion;
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, ua.c_str());
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
+	curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+	const std::string ua = std::string("haiku-claude-cli/") + kVersion;
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, ua.c_str());
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+	curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
 
-    g_interrupted = 0;
-    // ESC guard covers just the curl transfer. When called from
-    // send_with_tools, g_active_esc_guard is already set and the outer
-    // guard's thread is handling ESC detection for the whole turn —
-    // creating a second concurrent reader on the same stdin fd causes a
-    // race where both threads see POLLIN, one reads the ESC byte, and
-    // the other silently discards unrelated bytes. Skip the inner guard
-    // entirely when an outer one is live. When called standalone (e.g.
-    // direct one-shot), no outer guard exists so we create one here.
-    CURLcode res;
-    {
-        // Conditionally-constructed guard: only active when there is no
-        // outer EscInterruptGuard (standalone / one-shot path).
-        std::unique_ptr<EscInterruptGuard> inner_esc_guard;
-        if (!g_active_esc_guard) {
-            inner_esc_guard = std::make_unique<EscInterruptGuard>();
-        }
-        res = curl_easy_perform(curl);
-        spinner.stop();
-    }
-    long http_status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-    curl_slist_free_all(headers);
+	g_interrupted = 0;
+	// ESC guard covers just the curl transfer. When called from
+	// SendWithTools, g_active_esc_guard is already set and the outer
+	// guard's thread is handling ESC detection for the whole turn —
+	// creating a second concurrent reader on the same stdin fd causes a
+	// race where both threads see POLLIN, one reads the ESC byte, and
+	// the other silently discards unrelated bytes. Skip the inner guard
+	// entirely when an outer one is live. When called standalone (e.g.
+	// direct one-shot), no outer guard exists so we create one here.
+	CURLcode res;
+	{
+		// Conditionally-constructed guard: only active when there is no
+		// outer EscInterruptGuard (standalone / one-shot path).
+		std::unique_ptr<EscInterruptGuard> inner_esc_guard;
+		if (!g_active_esc_guard) {
+			inner_esc_guard = std::make_unique<EscInterruptGuard>();
+		}
+		res = curl_easy_perform(curl);
+		spinner.Stop();
+	}
+	long http_status = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+	curl_slist_free_all(headers);
 
-    if (g_interrupted) {
-        state.renderer.flush();
-        std::cout << "\n" << tui::meta("[interrupted]") << "\n";
-        return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
-                state.content_blocks, state.stop_reason,
-                state.cache_creation_input_tokens.load(),
-                state.cache_read_input_tokens.load()};
-    }
+	if (g_interrupted) {
+		state.renderer.Flush();
+		std::cout << "\n" << tui::Meta("[interrupted]") << "\n";
+		return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
+				state.content_blocks, state.stop_reason,
+				state.cache_creation_input_tokens.load(),
+				state.cache_read_input_tokens.load()};
+	}
 
-    if (res != CURLE_OK) {
-        // Curl-level transient errors (timeout, connection reset,
-        // partial transfer) are retryable. Abort-by-callback is
-        // intentional and should NOT be retried.
-        const bool curl_retryable =
-            res == CURLE_OPERATION_TIMEDOUT ||
-            res == CURLE_COULDNT_CONNECT ||
-            res == CURLE_PARTIAL_FILE ||
-            res == CURLE_GOT_NOTHING ||
-            res == CURLE_RECV_ERROR ||
-            res == CURLE_SEND_ERROR;
-        if (curl_retryable && !g_interrupted && attempt < kMaxRetries) {
-            const int delay = kBaseDelay << (attempt - 1);
-            std::cerr << tui::dim("[retry " + std::to_string(attempt)
-                                  + "/" + std::to_string(kMaxRetries)
-                                  + " in " + std::to_string(delay) + "ms: "
-                                  + curl_easy_strerror(res) + "]")
-                      << "\n";
-            log_line("retry attempt=" + std::to_string(attempt)
-                     + " curl=" + std::to_string(res));
-            // Interruptible sleep: poll in 100 ms ticks so Esc/Ctrl+C
-            // is noticed promptly rather than waiting out the full delay.
-            for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
-                std::this_thread::sleep_for(std::chrono::milliseconds(
-                    std::min(100, delay - slept)));
-            continue; // retry
-        }
-        std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
-        return {1, {}, 0, 0, {}, {}};
-    }
+	if (res != CURLE_OK) {
+		// Curl-level transient errors (timeout, connection reset,
+		// partial transfer) are retryable. Abort-by-callback is
+		// intentional and should NOT be retried.
+		const bool curl_retryable =
+			res == CURLE_OPERATION_TIMEDOUT ||
+			res == CURLE_COULDNT_CONNECT ||
+			res == CURLE_PARTIAL_FILE ||
+			res == CURLE_GOT_NOTHING ||
+			res == CURLE_RECV_ERROR ||
+			res == CURLE_SEND_ERROR;
+		if (curl_retryable && !g_interrupted && attempt < kMaxRetries) {
+			const int delay = kBaseDelay << (attempt - 1);
+			std::cerr << tui::Dim("[retry " + std::to_string(attempt)
+								  + "/" + std::to_string(kMaxRetries)
+								  + " in " + std::to_string(delay) + "ms: "
+								  + curl_easy_strerror(res) + "]")
+					  << "\n";
+			LogLine("retry attempt=" + std::to_string(attempt)
+					 + " curl=" + std::to_string(res));
+			// Interruptible sleep: poll in 100 ms ticks so Esc/Ctrl+C
+			// is noticed promptly rather than waiting out the full delay.
+			for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
+				std::this_thread::sleep_for(std::chrono::milliseconds(
+					std::min(100, delay - slept)));
+			continue; // retry
+		}
+		std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
+		return {1, {}, 0, 0, {}, {}};
+	}
 
-    if (http_status < 200 || http_status >= 300) {
-        // Parse Anthropic's error envelope for a user-friendly message,
-        // then map the HTTP code to a plain-language explanation.
-        std::string api_msg;
-        try {
-            const json err = json::parse(state.raw_buffer);
-            if (err.contains("error") && err["error"].is_object()
-                && err["error"].contains("message")
-                && err["error"]["message"].is_string()) {
-                api_msg = err["error"]["message"].get<std::string>();
-            }
-        } catch (const json::exception&) {}
+	if (http_status < 200 || http_status >= 300) {
+		// Parse Anthropic's error envelope for a user-friendly message,
+		// then map the HTTP code to a plain-language explanation.
+		std::string api_msg;
+		try {
+			const json err = json::parse(state.raw_buffer);
+			if (err.contains("error") && err["error"].is_object()
+				&& err["error"].contains("message")
+				&& err["error"]["message"].is_string()) {
+				api_msg = err["error"]["message"].get<std::string>();
+			}
+		} catch (const json::exception&) {}
 
-        // 429 (rate limit) and 5xx (server errors) are transient —
-        // retry with exponential backoff before giving up.
-        const bool http_retryable =
-            (http_status == 429 || http_status >= 500) && !g_interrupted;
-        if (http_retryable && attempt < kMaxRetries) {
-            const int delay = kBaseDelay << (attempt - 1);
-            std::cerr << tui::dim("[retry " + std::to_string(attempt)
-                                  + "/" + std::to_string(kMaxRetries)
-                                  + " in " + std::to_string(delay) + "ms: HTTP "
-                                  + std::to_string(http_status) + "]")
-                      << "\n";
-            log_line("retry attempt=" + std::to_string(attempt)
-                     + " http=" + std::to_string(http_status));
-            for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
-                std::this_thread::sleep_for(std::chrono::milliseconds(
-                    std::min(100, delay - slept)));
-            continue; // retry
-        }
+		// 429 (rate limit) and 5xx (server errors) are transient —
+		// retry with exponential backoff before giving up.
+		const bool http_retryable =
+			(http_status == 429 || http_status >= 500) && !g_interrupted;
+		if (http_retryable && attempt < kMaxRetries) {
+			const int delay = kBaseDelay << (attempt - 1);
+			std::cerr << tui::Dim("[retry " + std::to_string(attempt)
+								  + "/" + std::to_string(kMaxRetries)
+								  + " in " + std::to_string(delay) + "ms: HTTP "
+								  + std::to_string(http_status) + "]")
+					  << "\n";
+			LogLine("retry attempt=" + std::to_string(attempt)
+					 + " http=" + std::to_string(http_status));
+			for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
+				std::this_thread::sleep_for(std::chrono::milliseconds(
+					std::min(100, delay - slept)));
+			continue; // retry
+		}
 
-        std::cerr << "\n" << tui::error_label() << " ";
-        switch (http_status) {
-            case 401:
-                std::cerr << "unauthorized (HTTP 401) — your OAuth token may be "
-                             "expired. Run `claude logout` and then `claude login`.";
-                break;
-            case 403:
-                std::cerr << "forbidden (HTTP 403) — this client or account is not "
-                             "permitted to use the endpoint.";
-                break;
-            case 429:
-                if (api_msg == "Error") {
-                    std::cerr << "gated (HTTP 429) — Anthropic's OAuth-client check "
-                                 "rejected the request shape; see project notes.";
-                } else {
-                    std::cerr << "rate limited (HTTP 429)";
-                    if (!api_msg.empty()) std::cerr << ": " << api_msg;
-                }
-                break;
-            case 500: case 502: case 503: case 504:
-                std::cerr << "server error (HTTP " << http_status << ")";
-                if (!api_msg.empty()) std::cerr << ": " << api_msg;
-                break;
-            default:
-                std::cerr << "HTTP " << http_status;
-                if (!api_msg.empty()) std::cerr << ": " << api_msg;
-                break;
-        }
-        std::cerr << "\n";
-        log_line("error http=" + std::to_string(http_status)
-                 + (api_msg.empty() ? "" : " msg=" + api_msg));
-        return {1, {}, 0, 0, {}, {}};
-    }
+		std::cerr << "\n" << tui::ErrorLabel() << " ";
+		switch (http_status) {
+			case 401:
+				std::cerr << "unauthorized (HTTP 401) — your OAuth token may be "
+							 "expired. Run `claude logout` and then `claude login`.";
+				break;
+			case 403:
+				std::cerr << "forbidden (HTTP 403) — this client or account is not "
+							 "permitted to use the endpoint.";
+				break;
+			case 429:
+				if (api_msg == "Error") {
+					std::cerr << "gated (HTTP 429) — Anthropic's OAuth-client check "
+								 "rejected the request shape; see project notes.";
+				} else {
+					std::cerr << "rate limited (HTTP 429)";
+					if (!api_msg.empty()) std::cerr << ": " << api_msg;
+				}
+				break;
+			case 500: case 502: case 503: case 504:
+				std::cerr << "server error (HTTP " << http_status << ")";
+				if (!api_msg.empty()) std::cerr << ": " << api_msg;
+				break;
+			default:
+				std::cerr << "HTTP " << http_status;
+				if (!api_msg.empty()) std::cerr << ": " << api_msg;
+				break;
+		}
+		std::cerr << "\n";
+		LogLine("error http=" + std::to_string(http_status)
+				 + (api_msg.empty() ? "" : " msg=" + api_msg));
+		return {1, {}, 0, 0, {}, {}};
+	}
 
-    if (state.stream_error) {
-        std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
-        return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
-                state.content_blocks, state.stop_reason,
-                state.cache_creation_input_tokens.load(),
-                state.cache_read_input_tokens.load()};
-    }
+	if (state.stream_error) {
+		std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
+		return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
+				state.content_blocks, state.stop_reason,
+				state.cache_creation_input_tokens.load(),
+				state.cache_read_input_tokens.load()};
+	}
 
-    if (state.content_blocks.empty()) {
-        // Empty is fine if the turn ended cleanly — but attribute
-        // the cause. The most common reason in practice is a
-        // max_tokens cap so tight that the first tool_use block
-        // never got a content_block_stop event, leaving it stuck
-        // in the accumulator. Surface stop_reason so the caller
-        // (and the user) can react, rather than emitting a generic
-        // "no content" error that hides the real cause.
-        if (state.stop_reason == "max_tokens") {
-            return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
-                    state.content_blocks, state.stop_reason,
-                    state.cache_creation_input_tokens.load(),
-                    state.cache_read_input_tokens.load()};
-        }
-        std::cerr << "error: no content received in stream\n";
-        std::cerr << "response body: " << state.raw_buffer << "\n";
-        return {1, {}, 0, 0, {}, {}};
-    }
+	if (state.content_blocks.empty()) {
+		// Empty is fine if the turn ended cleanly — but attribute
+		// the cause. The most common reason in practice is a
+		// max_tokens cap so tight that the first tool_use block
+		// never got a content_block_stop event, leaving it stuck
+		// in the accumulator. Surface stop_reason so the caller
+		// (and the user) can react, rather than emitting a generic
+		// "no content" error that hides the real cause.
+		if (state.stop_reason == "max_tokens") {
+			return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
+					state.content_blocks, state.stop_reason,
+					state.cache_creation_input_tokens.load(),
+					state.cache_read_input_tokens.load()};
+		}
+		std::cerr << "error: no content received in stream\n";
+		std::cerr << "response body: " << state.raw_buffer << "\n";
+		return {1, {}, 0, 0, {}, {}};
+	}
 
-    state.renderer.flush();
-    std::cout << "\n";
-    return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
-            state.content_blocks, state.stop_reason,
-            state.cache_creation_input_tokens.load(),
-            state.cache_read_input_tokens.load()};
+	state.renderer.Flush();
+	std::cout << "\n";
+	return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
+			state.content_blocks, state.stop_reason,
+			state.cache_creation_input_tokens.load(),
+			state.cache_read_input_tokens.load()};
 
-    } // end retry loop — only reached via continue; all exits are return
+	} // end retry loop — only reached via continue; all exits are return
 }
 
-std::string short_input_summary(const json& input) {
-    const std::string dumped = input.dump();
-    if (dumped.size() <= 80) return dumped;
-    return dumped.substr(0, 77) + "...";
+std::string ShortInputSummary(const json& input) {
+	const std::string dumped = input.dump();
+	if (dumped.size() <= 80) return dumped;
+	return dumped.substr(0, 77) + "...";
 }
 
 enum class Permission { Allow, Deny };
 
-// Session-scoped allowlist of tool names the user has explicitly
+// Session-scoped allowlist of tool Names the user has explicitly
 // approved with "(a)lways".
 std::unordered_set<std::string>& always_allowed() {
-    static std::unordered_set<std::string> s;
-    return s;
+	static std::unordered_set<std::string> s;
+	return s;
 }
 
 // Non-interactive mode is set by the Telegram bridge: there's no
@@ -1258,15 +1258,15 @@ bool g_non_interactive_allow_destructive = false;
 // Telegram bridge mute toggle. When true, every outbound call to the
 // bot API (sendMessage / editMessageText / sendChatAction / the
 // message_id-returning variant) is suppressed by the tg_* wrapper
-// lambdas in run_telegram_bridge. Incoming messages still get
+// lambdas in RunTelegramBridge. Incoming messages still get
 // processed locally — tools run, the operator's terminal still shows
 // everything — but nothing leaves the machine until /unmute. The
 // /mute and /unmute acks themselves bypass the wrapper (they go out
-// via client.send_message directly) so the state transition is
+// via client.SendMessage directly) so the state transition is
 // always visible on the Telegram side.
 std::atomic<bool> g_telegram_muted { false };
 
-// Set at startup from Config::allow_destructive_tools or the -y/--yes
+// Set at startup from Config::fAllowDestructivetools or the -y/--yes
 // flag. Grants destructive-tool permission without prompting whenever
 // stdin isn't usable for a y/a/n dialog (piped stdin, closed stdin,
 // etc.). Interactive TTY sessions still prompt normally.
@@ -1278,421 +1278,415 @@ bool g_allow_destructive_tools = false;
 std::atomic<bool> g_ludicrous_mode { false };
 
 // Telegram permission hook. When the bridge is handling a turn it
-// installs a callback here so that prompt_permission can send an
+// installs a callback here so that PromptPermission can send an
 // inline-keyboard message and block until the user taps a button,
 // instead of falling through to the blanket allow/deny logic.
 // Signature: (tool_name, preview_text) → Permission.
 // Cleared to nullptr after each turn.
 std::function<Permission(const std::string&, const std::string&)> g_telegram_permission_hook;
 
-Permission prompt_permission(const std::string& tool_name, const json& input,
-                             std::string* denial_reason = nullptr) {
-    if (always_allowed().count(tool_name)) return Permission::Allow;
-    if (!tools::requires_permission(tool_name)) return Permission::Allow;
+Permission PromptPermission(const std::string& tool_name, const json& input,
+							 std::string* denial_reason = nullptr) {
+	if (always_allowed().count(tool_name)) return Permission::Allow;
+	if (!tools::RequiresPermission(tool_name)) return Permission::Allow;
 
-    // Ludicrous mode: all permissions auto-approved, no prompts.
-    if (g_ludicrous_mode.load()) {
-        std::cout << tui::dim("  \xE2\x9A\xA1 ludicrous: auto-approved " + tool_name) << "\n";
-        return Permission::Allow;
-    }
+	// Ludicrous mode: all permissions auto-approved, no prompts.
+	if (g_ludicrous_mode.load()) {
+		std::cout << tui::Dim("  \xE2\x9A\xA1 ludicrous: auto-approved " + tool_name) << "\n";
+		return Permission::Allow;
+	}
 
-    if (g_non_interactive_tools) {
-        // If the Telegram bridge has installed a permission hook,
-        // use it: send a message with inline buttons and block until
-        // the user taps one, rather than silently allowing/denying.
-        if (g_telegram_permission_hook) {
-            const std::string extra = tools::preview(tool_name, input);
-            const std::string preview = extra.empty()
-                ? (tool_name + " " + short_input_summary(input))
-                : extra;
-            // Also show on local terminal so operator sees the prompt.
-            if (!extra.empty()) std::cout << tui::dim(extra) << "\n";
-            else std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n";
-            std::cout << tui::bold("allow " + tool_name + "? ") << tui::dim("[awaiting Telegram response]") << "\n" << std::flush;
-            const Permission p = g_telegram_permission_hook(tool_name, preview);
-            const char* lbl = (p == Permission::Allow) ? "yes" : "no";
-            std::cout << tui::dim(std::string("  -> ") + lbl) << "\n";
-            return p;
-        }
-        if (g_non_interactive_allow_destructive) return Permission::Allow;
-        if (denial_reason) {
-            *denial_reason =
-                "destructive tool " + tool_name + " is blocked in non-interactive "
-                "mode. Set \"allow_destructive_tools\": true in config.json "
-                "(or telegram.allow_destructive_tools for the bridge) to allow it.";
-        }
-        return Permission::Deny;
-    }
+	if (g_non_interactive_tools) {
+		// If the Telegram bridge has installed a permission hook,
+		// use it: send a message with inline buttons and block until
+		// the user taps one, rather than silently allowing/denying.
+		if (g_telegram_permission_hook) {
+			const std::string extra = tools::Preview(tool_name, input);
+			const std::string preview = extra.empty()
+				? (tool_name + " " + ShortInputSummary(input))
+				: extra;
+			// Also show on local terminal so operator sees the prompt.
+			if (!extra.empty()) std::cout << tui::Dim(extra) << "\n";
+			else std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
+			std::cout << tui::Bold("allow " + tool_name + "? ") << tui::Dim("[awaiting Telegram response]") << "\n" << std::flush;
+			const Permission p = g_telegram_permission_hook(tool_name, preview);
+			const char* lbl = (p == Permission::Allow) ? "yes" : "no";
+			std::cout << tui::Dim(std::string("  -> ") + lbl) << "\n";
+			return p;
+		}
+		if (g_non_interactive_allow_destructive) return Permission::Allow;
+		if (denial_reason) {
+			*denial_reason =
+				"destructive tool " + tool_name + " is blocked in non-interactive "
+				"mode. Set \"fAllowDestructivetools\": true in config.json "
+				"(or telegram.fAllowDestructivetools for the bridge) to allow it.";
+		}
+		return Permission::Deny;
+	}
 
-    // One-shot runs with no usable stdin (piped, closed, redirected)
-    // cannot show a y/a/n dialog. Either auto-approve from config / -y,
-    // or fail loudly with a clear reason so the model sees why the call
-    // was denied instead of silently narrating fake success.
-    if (!isatty(fileno(stdin))) {
-        if (g_allow_destructive_tools) {
-            always_allowed().insert(tool_name);
-            return Permission::Allow;
-        }
-        const std::string msg =
-            "cannot prompt for " + tool_name + " permission: stdin is not a "
-            "terminal. Re-run with -y/--yes to auto-approve destructive tools "
-            "for this invocation, set \"allow_destructive_tools\": true in "
-            + paths::config_path() + ", or use -i/--interactive from a real terminal.";
-        std::cerr << tui::meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
-                  << tui::dim("  " + msg) << "\n";
-        if (denial_reason) *denial_reason = msg;
-        return Permission::Deny;
-    }
+	// One-shot runs with no usable stdin (piped, closed, redirected)
+	// cannot show a y/a/n dialog. Either auto-approve from config / -y,
+	// or fail loudly with a clear reason so the model sees why the call
+	// was denied instead of silently narrating fake success.
+	if (!isatty(fileno(stdin))) {
+		if (g_allow_destructive_tools) {
+			always_allowed().insert(tool_name);
+			return Permission::Allow;
+		}
+		const std::string msg =
+			"cannot prompt for " + tool_name + " permission: stdin is not a "
+			"terminal. Re-run with -y/--yes to auto-approve destructive tools "
+			"for this invocation, set \"fAllowDestructivetools\": true in "
+			+ paths::ConfigPath() + ", or use -i/--interactive from a real terminal.";
+		std::cerr << tui::Meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
+				  << tui::Dim("  " + msg) << "\n";
+		if (denial_reason) *denial_reason = msg;
+		return Permission::Deny;
+	}
 
-    // Print the preview + question text into the scroll region so
-    // the history shows what was asked. Each piece ends with a
-    // newline so the cursor advances cleanly.
-    const std::string extra = tools::preview(tool_name, input);
-    if (!extra.empty()) {
-        std::cout << tui::dim(extra) << "\n";
-    } else {
-        std::cout << tui::meta("  -> " + tool_name + " " + short_input_summary(input)) << "\n";
-    }
-    std::cout << tui::bold("allow " + tool_name + "?") << "\n" << std::flush;
+	// Print the Preview + question text into the scroll region so
+	// the history shows what was asked. Each piece ends with a
+	// newline so the cursor advances cleanly.
+	const std::string extra = tools::Preview(tool_name, input);
+	if (!extra.empty()) {
+		std::cout << tui::Dim(extra) << "\n";
+	} else {
+		std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
+	}
 
-    // Render the three choices as a vertical arrow-key menu.
-    // tui::select_option puts stdin into raw mode, draws the list,
-    // and returns a 0-based index. We don't touch termios ourselves.
-    tui::position_cursor_for_chat();
-    const std::vector<std::string> choices = {
-        "Yes, allow once",
-        "Always allow this session",
-        "No, deny",
-    };
-    // Pause the EscInterruptGuard background thread while select_option()
-    // has exclusive ownership of stdin in raw mode. Without this, the
-    // guard's thread races to read ESC bytes and arrow-key sequences
-    // (ESC [ A/B) are either consumed before select_option sees them or
-    // split across both readers — causing ↑/↓ to misbehave or register
-    // as a "no" answer.
-    if (g_active_esc_guard) g_active_esc_guard->pause();
-    const int picked = tui::select_option(choices);
-    if (g_active_esc_guard) g_active_esc_guard->resume();
-    tui::position_cursor_for_chat();
+	// Render the three choices as a vertical arrow-key menu.
+	// tui::SelectOption puts stdin into raw mode, draws the list,
+	// and returns a 0-based index.  Passing the heading lets it own
+	// the full block and replace it with a compact summary on selection.
+	tui::PositionCursorForChat();
+	const std::vector<std::string> choices = {
+		"Yes, allow once",
+		"Always allow this session",
+		"No, deny",
+	};
+	// Pause the EscInterruptGuard background thread while SelectOption()
+	// has exclusive ownership of stdin in raw mode. Without this, the
+	// guard's thread races to read ESC bytes and arrow-key sequences
+	// (ESC [ A/B) are either consumed before SelectOption sees them or
+	// split across both readers — causing ↑/↓ to misbehave or register
+	// as a "no" answer.
+	if (g_active_esc_guard) g_active_esc_guard->pause();
+	const int picked = tui::SelectOption(choices, "allow " + tool_name + "?");
+	if (g_active_esc_guard) g_active_esc_guard->resume();
+	tui::PositionCursorForChat();
 
-    // Echo the choice into scroll history so the record is clear.
-    const char* label = (picked == 0) ? "yes"
-                      : (picked == 1) ? "always"
-                      :                 "no";
-    std::cout << tui::dim(std::string("  -> ") + label) << "\n";
-
-    if (g_interrupted && picked >= static_cast<int>(choices.size()) - 1) {
-        if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
-        return Permission::Deny;
-    }
-    if (picked == 1) {
-        always_allowed().insert(tool_name);
-        return Permission::Allow;
-    }
-    if (picked == 0) return Permission::Allow;
-    if (denial_reason) {
-        *denial_reason = "user declined permission for " + tool_name;
-    }
-    return Permission::Deny;
+	if (g_interrupted && picked >= static_cast<int>(choices.size()) - 1) {
+		if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
+		return Permission::Deny;
+	}
+	if (picked == 1) {
+		always_allowed().insert(tool_name);
+		return Permission::Allow;
+	}
+	if (picked == 0) return Permission::Allow;
+	if (denial_reason) {
+		*denial_reason = "user declined permission for " + tool_name;
+	}
+	return Permission::Deny;
 }
 
 // Forward decl — definition lives further down with the other
 // BFS helpers so it can use shell_single_quote.
-static void auto_write_summary_if_missing(const std::string& path,
-                                          const std::string& content);
+static void AutoWriteSummaryIfMissing(const std::string& path,
+										  const std::string& content);
 
-SendResult send_with_tools(const Auth& auth, const std::string& model, int max_tokens,
-                           json& messages, const std::string& custom_system) {
-    SendResult aggregate;
-    aggregate.exit_code = 0;
+SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tokens,
+						   json& messages, const std::string& custom_system) {
+	SendResult aggregate;
+	aggregate.exit_code = 0;
 
-    // Clear any stale interrupt and flush the tty input queue BEFORE
-    // starting the EscInterruptGuard thread. This eliminates the race
-    // where:
-    //   (a) A stale ESC byte left in the kernel tty buffer (e.g. the
-    //       user pressed ESC twice in the previous turn) is read by the
-    //       new guard thread and sets g_interrupted=1 AFTER the main
-    //       thread's g_interrupted=0 clear.
-    //   (b) g_interrupted still equals 1 from the previous turn when
-    //       the guard thread starts and the thread somehow re-triggers
-    //       before the clear.
-    // Clearing + flushing first, then constructing the guard, means the
-    // thread starts with a clean state: no stale bytes in the buffer and
-    // g_interrupted already 0.
-    g_interrupted = 0;
-    if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+	// Clear any stale interrupt and flush the tty input queue BEFORE
+	// starting the EscInterruptGuard thread. This eliminates the race
+	// where:
+	//   (a) A stale ESC byte left in the kernel tty buffer (e.g. the
+	//       user pressed ESC twice in the previous turn) is read by the
+	//       new guard thread and sets g_interrupted=1 AFTER the main
+	//       thread's g_interrupted=0 clear.
+	//   (b) g_interrupted still equals 1 from the previous turn when
+	//       the guard thread starts and the thread somehow re-triggers
+	//       before the clear.
+	// Clearing + flushing first, then constructing the guard, means the
+	// thread starts with a clean state: no stale bytes in the buffer and
+	// g_interrupted already 0.
+	g_interrupted = 0;
+	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
 
-    // Keep stdin in cbreak mode for the entire multi-turn tool loop so
-    // Esc is detected not just during HTTP streaming but also while tools
-    // are executing (Bash, WebFetch, etc.). EscInterruptGuard already
-    // handles the non-TTY / isatty check internally and is a no-op there.
-    EscInterruptGuard esc_guard;
-    g_active_esc_guard = &esc_guard;
-    // Clear the global pointer when send_with_tools returns so nobody
-    // holds a dangling reference to esc_guard after it is destroyed.
-    struct EscGuardScope {
-        ~EscGuardScope() { g_active_esc_guard = nullptr; }
-    } esc_guard_scope;
+	// Keep stdin in cbreak mode for the entire multi-turn tool loop so
+	// Esc is detected not just during HTTP streaming but also while tools
+	// are executing (Bash, WebFetch, etc.). EscInterruptGuard already
+	// handles the non-TTY / isatty check internally and is a no-op there.
+	EscInterruptGuard esc_guard;
+	g_active_esc_guard = &esc_guard;
+	// Clear the global pointer when SendWithTools returns so nobody
+	// holds a dangling reference to esc_guard after it is destroyed.
+	struct EscGuardScope {
+		~EscGuardScope() { g_active_esc_guard = nullptr; }
+	} esc_guard_scope;
 
-    while (true) {
-        // Honour any interrupt that arrived between turns (e.g. Esc pressed
-        // while a tool was running but before the next API call started).
-        if (g_interrupted) {
-            std::cout << tui::meta("[interrupted]") << "\n";
-            aggregate.exit_code = 1;
-            return aggregate;
-        }
+	while (true) {
+		// Honour any interrupt that arrived between turns (e.g. Esc pressed
+		// while a tool was running but before the next API call started).
+		if (g_interrupted) {
+			std::cout << tui::Meta("[interrupted]") << "\n";
+			aggregate.exit_code = 1;
+			return aggregate;
+		}
 
-        SendResult result = send_conversation(auth, model, max_tokens, messages,
-                                              custom_system, /*include_tools=*/true);
-        aggregate.input_tokens                 += result.input_tokens;
-        aggregate.output_tokens                += result.output_tokens;
-        aggregate.cache_creation_input_tokens  += result.cache_creation_input_tokens;
-        aggregate.cache_read_input_tokens      += result.cache_read_input_tokens;
-        aggregate.assistant_text = result.assistant_text;
-        aggregate.stop_reason    = result.stop_reason;
+		SendResult result = SendConversation(auth, model, max_tokens, messages,
+											  custom_system, /*include_tools=*/true);
+		aggregate.input_tokens                 += result.input_tokens;
+		aggregate.output_tokens                += result.output_tokens;
+		aggregate.cache_creation_input_tokens  += result.cache_creation_input_tokens;
+		aggregate.cache_read_input_tokens      += result.cache_read_input_tokens;
+		aggregate.assistant_text = result.assistant_text;
+		aggregate.stop_reason    = result.stop_reason;
 
-        if (result.exit_code != 0) {
-            aggregate.exit_code = result.exit_code;
-            return aggregate;
-        }
+		if (result.exit_code != 0) {
+			aggregate.exit_code = result.exit_code;
+			return aggregate;
+		}
 
-        // If the response was cut off at the max_tokens cap, any
-        // tool_use block in the round is almost certainly incomplete
-        // (partial JSON input) and never got executed. Drop those
-        // orphan blocks from the history so a REPL continuation
-        // doesn't send an assistant turn with tool_use_ids that have
-        // no matching tool_result — the API rejects that with 400.
-        // We keep plain text blocks since they're still valid.
-        const bool truncated = (result.stop_reason == "max_tokens");
-        if (truncated) {
-            std::vector<json> safe_blocks;
-            for (const auto& block : result.content_blocks) {
-                if (block.value("type", "") != "tool_use") {
-                    safe_blocks.push_back(block);
-                }
-            }
-            if (safe_blocks.empty()) {
-                // Nothing salvageable — don't push an empty assistant turn.
-            } else {
-                messages.push_back({{"role", "assistant"}, {"content", safe_blocks}});
-            }
-        } else {
-            messages.push_back({{"role", "assistant"}, {"content", result.content_blocks}});
-        }
+		// If the response was cut off at the max_tokens cap, any
+		// tool_use block in the round is almost certainly incomplete
+		// (partial JSON input) and never got executed. Drop those
+		// orphan blocks from the history so a REPL continuation
+		// doesn't send an assistant turn with tool_use_ids that have
+		// no matching tool_result — the API rejects that with 400.
+		// We keep plain text blocks since they're still valid.
+		const bool truncated = (result.stop_reason == "max_tokens");
+		if (truncated) {
+			std::vector<json> safe_blocks;
+			for (const auto& block : result.content_blocks) {
+				if (block.value("type", "") != "tool_use") {
+					safe_blocks.push_back(block);
+				}
+			}
+			if (safe_blocks.empty()) {
+				// Nothing salvageable — don't push an empty assistant turn.
+			} else {
+				messages.push_back({{"role", "assistant"}, {"content", safe_blocks}});
+			}
+		} else {
+			messages.push_back({{"role", "assistant"}, {"content", result.content_blocks}});
+		}
 
-        if (result.stop_reason != "tool_use") {
-            // Surface non-normal terminations loudly instead of
-            // exiting silently. "end_turn" is the expected happy
-            // path; everything else (max_tokens, refusal, pause_turn,
-            // stop_sequence without an explicit one configured) is
-            // something the user should know about.
-            if (result.stop_reason == "max_tokens") {
-                const int used = result.output_tokens;
-                std::cerr << "\n" << tui::error_label()
-                          << " response truncated at the max_tokens cap"
-                          << " (output=" << used << " / max=" << max_tokens << ")."
-                          << "\n  Re-run with -t N (or set \"max_tokens\" in config.json)"
-                             " to raise the cap."
-                          << (truncated ? "\n  The in-flight tool call was"
-                                          " dropped from history; the file/command"
-                                          " it would have produced was NOT executed."
-                                        : "")
-                          << "\n";
-                log_line("truncated stop_reason=max_tokens output=" + std::to_string(used));
-            } else if (result.stop_reason == "refusal") {
-                std::cerr << "\n" << tui::error_label()
-                          << " the model declined to answer (stop_reason=refusal).\n";
-                log_line("stop_reason=refusal");
-            } else if (result.stop_reason == "pause_turn") {
-                std::cerr << "\n" << tui::error_label()
-                          << " the model paused its turn (stop_reason=pause_turn);"
-                             " re-send to continue.\n";
-                log_line("stop_reason=pause_turn");
-            } else if (result.stop_reason != "end_turn"
-                       && result.stop_reason != "stop_sequence"
-                       && !result.stop_reason.empty()) {
-                std::cerr << "\n" << tui::error_label()
-                          << " unexpected stop_reason=" << result.stop_reason << "\n";
-                log_line("stop_reason=" + result.stop_reason);
-            }
-            return aggregate;
-        }
+		if (result.stop_reason != "tool_use") {
+			// Surface non-normal terminations loudly instead of
+			// exiting silently. "end_turn" is the expected happy
+			// path; everything else (max_tokens, refusal, pause_turn,
+			// stop_sequence without an explicit one configured) is
+			// something the user should know about.
+			if (result.stop_reason == "max_tokens") {
+				const int used = result.output_tokens;
+				std::cerr << "\n" << tui::ErrorLabel()
+						  << " response truncated at the max_tokens cap"
+						  << " (output=" << used << " / max=" << max_tokens << ")."
+						  << "\n  Re-run with -t N (or set \"max_tokens\" in config.json)"
+							 " to raise the cap."
+						  << (truncated ? "\n  The in-flight tool call was"
+										  " dropped from history; the file/command"
+										  " it would have produced was NOT executed."
+										: "")
+						  << "\n";
+				LogLine("truncated stop_reason=max_tokens output=" + std::to_string(used));
+			} else if (result.stop_reason == "refusal") {
+				std::cerr << "\n" << tui::ErrorLabel()
+						  << " the model declined to answer (stop_reason=refusal).\n";
+				LogLine("stop_reason=refusal");
+			} else if (result.stop_reason == "pause_turn") {
+				std::cerr << "\n" << tui::ErrorLabel()
+						  << " the model paused its turn (stop_reason=pause_turn);"
+							 " re-send to continue.\n";
+				LogLine("stop_reason=pause_turn");
+			} else if (result.stop_reason != "end_turn"
+					   && result.stop_reason != "stop_sequence"
+					   && !result.stop_reason.empty()) {
+				std::cerr << "\n" << tui::ErrorLabel()
+						  << " unexpected stop_reason=" << result.stop_reason << "\n";
+				LogLine("stop_reason=" + result.stop_reason);
+			}
+			return aggregate;
+		}
 
-        json tool_results = json::array();
-        for (const auto& block : result.content_blocks) {
-            if (block.value("type", "") != "tool_use") continue;
-            const std::string tname = block.value("name", std::string{});
-            const std::string tid   = block.value("id",   std::string{});
-            const json        tinput = block.value("input", json::object());
+		json tool_results = json::array();
+		for (const auto& block : result.content_blocks) {
+			if (block.value("type", "") != "tool_use") continue;
+			const std::string tname = block.value("name", std::string{});
+			const std::string tid   = block.value("id",   std::string{});
+			const json        tinput = block.value("input", json::object());
 
-            std::cout << tui::meta("[tool: " + tname + " " + short_input_summary(tinput) + "]") << "\n";
-            log_line("tool " + tname + " input=" + short_input_summary(tinput));
+			std::cout << tui::Meta("[tool: " + tname + " " + ShortInputSummary(tinput) + "]") << "\n";
+			LogLine("tool " + tname + " input=" + ShortInputSummary(tinput));
 
-            tools::ToolResult tres;
-            const json pre_payload = { {"tool_input", tinput} };
-            if (hooks::fire(hooks::Event::PreToolUse, pre_payload, tname) == hooks::Outcome::Block) {
-                tres.content  = "hook blocked " + tname;
-                tres.is_error = true;
-                std::cout << tui::meta("[tool: " + tname + " -> blocked by hook]") << "\n";
-            } else if (std::string denial;
-                       prompt_permission(tname, tinput, &denial) == Permission::Deny) {
-                tres.content  = denial.empty()
-                                ? "user denied permission to run " + tname
-                                : denial;
-                tres.is_error = true;
-                std::cout << tui::meta("[tool: " + tname + " -> denied]") << "\n";
-            } else if (tname == "Task") {
-                // Spawn a no-tools sub-agent: fresh messages array,
-                // single round-trip via send_conversation. Streams to
-                // the terminal like a normal turn so the user can
-                // follow along. The final text becomes this tool's
-                // result.
-                const std::string sub_prompt = tinput.value("prompt", std::string{});
-                if (sub_prompt.empty()) {
-                    tres.content  = "error: Task requires a `prompt` argument";
-                    tres.is_error = true;
-                } else {
-                    const std::string sub_label = tinput.value("description", std::string{"sub-agent"});
-                    std::cout << tui::meta("  -> " + sub_label + ":") << "\n"
-                              << tui::claude_prompt();
-                    json sub_messages = json::array({{{"role", "user"}, {"content", sub_prompt}}});
-                    const auto sub = send_conversation(auth, model, max_tokens,
-                                                       sub_messages, custom_system,
-                                                       /*include_tools=*/false);
-                    std::cout << "\n";
-                    if (sub.exit_code != 0) {
-                        tres.content  = "error: sub-agent failed";
-                        tres.is_error = true;
-                    } else {
-                        tres.content  = sub.assistant_text;
-                        tres.is_error = false;
-                        aggregate.input_tokens  += sub.input_tokens;
-                        aggregate.output_tokens += sub.output_tokens;
-                    }
-                }
-                std::cout << tui::meta(tres.is_error
-                                       ? "[tool: Task -> error]"
-                                       : "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]")
-                          << "\n";
-                const json post_payload = {
-                    {"tool_input",  tinput},
-                    {"tool_result", tres.content},
-                    {"is_error",    tres.is_error},
-                };
-                hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
-            } else {
-                // Keep a spinner spinning for the duration of the
-                // tool run so the user sees continuous feedback
-                // instead of a frozen cursor during multi-step
-                // turns. Especially matters for Bash commands that
-                // can take many seconds.
-                {
-                    tui::Spinner tool_spinner("running " + tname);
-                    tres = tools::run(tname, tinput);
-                    tool_spinner.stop();
-                }
-                const std::string rsize = std::to_string(tres.content.size());
-                std::cout << tui::meta(tres.is_error
-                                       ? "[tool: " + tname + " -> error]"
-                                       : "[tool: " + tname + " -> " + rsize + " bytes]")
-                          << "\n";
-                const json post_payload = {
-                    {"tool_input",  tinput},
-                    {"tool_result", tres.content},
-                    {"is_error",    tres.is_error},
-                };
-                hooks::fire(hooks::Event::PostToolUse, post_payload, tname);
-            }
+			tools::ToolResult tres;
+			const json pre_payload = { {"tool_input", tinput} };
+			if (hooks::Fire(hooks::Event::PreToolUse, pre_payload, tname) == hooks::Outcome::Block) {
+				tres.content  = "hook blocked " + tname;
+				tres.is_error = true;
+				std::cout << tui::Meta("[tool: " + tname + " -> blocked by hook]") << "\n";
+			} else if (std::string denial;
+					   PromptPermission(tname, tinput, &denial) == Permission::Deny) {
+				tres.content  = denial.empty()
+								? "user denied permission to run " + tname
+								: denial;
+				tres.is_error = true;
+				std::cout << tui::Meta("[tool: " + tname + " -> denied]") << "\n";
+			} else if (tname == "Task") {
+				// Spawn a no-tools sub-agent: fresh messages array,
+				// single round-trip via SendConversation. Streams to
+				// the terminal like a normal turn so the user can
+				// follow along. The final text becomes this tool's
+				// result.
+				const std::string sub_prompt = tinput.value("prompt", std::string{});
+				if (sub_prompt.empty()) {
+					tres.content  = "error: Task requires a `prompt` argument";
+					tres.is_error = true;
+				} else {
+					const std::string sub_label = tinput.value("description", std::string{"sub-agent"});
+					std::cout << tui::Meta("  -> " + sub_label + ":") << "\n"
+							  << tui::ClaudePrompt();
+					json sub_messages = json::array({{{"role", "user"}, {"content", sub_prompt}}});
+					const auto sub = SendConversation(auth, model, max_tokens,
+													   sub_messages, custom_system,
+													   /*include_tools=*/false);
+					std::cout << "\n";
+					if (sub.exit_code != 0) {
+						tres.content  = "error: sub-agent failed";
+						tres.is_error = true;
+					} else {
+						tres.content  = sub.assistant_text;
+						tres.is_error = false;
+						aggregate.input_tokens  += sub.input_tokens;
+						aggregate.output_tokens += sub.output_tokens;
+					}
+				}
+				std::cout << tui::Meta(tres.is_error
+									   ? "[tool: Task -> error]"
+									   : "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]")
+						  << "\n";
+				const json post_payload = {
+					{"tool_input",  tinput},
+					{"tool_result", tres.content},
+					{"is_error",    tres.is_error},
+				};
+				hooks::Fire(hooks::Event::PostToolUse, post_payload, tname);
+			} else {
+				// Keep a spinner spinning for the duration of the
+				// tool run so the user sees continuous feedback
+				// instead of a frozen cursor during multi-step
+				// turns. Especially matters for Bash commands that
+				// can take many seconds.
+				{
+					tui::Spinner tool_spinner("running " + tname);
+					tres = tools::Run(tname, tinput);
+					tool_spinner.Stop();
+				}
+				const std::string rsize = std::to_string(tres.content.size());
+				std::cout << tui::Meta(tres.is_error
+									   ? "[tool: " + tname + " -> error]"
+									   : "[tool: " + tname + " -> " + rsize + " bytes]")
+						  << "\n";
+				const json post_payload = {
+					{"tool_input",  tinput},
+					{"tool_result", tres.content},
+					{"is_error",    tres.is_error},
+				};
+				hooks::Fire(hooks::Event::PostToolUse, post_payload, tname);
+			}
 
-            // Auto-seed BFS cache: if Claude just Read a file
-            // without a claude:summary attribute, write a
-            // heuristic summary derived from the content we
-            // already have in memory. Zero extra API calls —
-            // next session's ReadAttr gets a free starting
-            // point, which Claude can later overwrite with a
-            // richer summary via WriteAttr.
-            if (tname == "Read" && !tres.is_error) {
-                auto_write_summary_if_missing(
-                    tinput.value("path", std::string{}),
-                    tres.content);
-            }
+			// Auto-seed BFS cache: if Claude just Read a file
+			// without a claude:summary attribute, write a
+			// heuristic summary derived from the content we
+			// already have in memory. Zero extra API calls —
+			// next session's ReadAttr gets a free starting
+			// point, which Claude can later overwrite with a
+			// richer summary via WriteAttr.
+			if (tname == "Read" && !tres.is_error) {
+				AutoWriteSummaryIfMissing(
+					tinput.value("path", std::string{}),
+					tres.content);
+			}
 
-            // For BFS-native tools, measure actual bytes saved
-            // by stat-ing the target file(s) and subtracting the
-            // tool's own output size. ReadAttr compares against
-            // one file; Query sums every path returned.
-            long saved_bytes = 0;
-            if (tname == "ReadAttr") {
-                const std::string path = tinput.value("path", std::string{});
-                struct stat st;
-                if (!path.empty() && ::stat(path.c_str(), &st) == 0) {
-                    const long s = static_cast<long>(st.st_size)
-                                 - static_cast<long>(tres.content.size());
-                    if (s > 0) saved_bytes = s;
-                }
-            } else if (tname == "Query") {
-                long total = 0;
-                std::istringstream iss(tres.content);
-                std::string p;
-                while (std::getline(iss, p)) {
-                    if (p.empty()) continue;
-                    struct stat st;
-                    if (::stat(p.c_str(), &st) == 0) total += st.st_size;
-                }
-                const long s = total - static_cast<long>(tres.content.size());
-                if (s > 0) saved_bytes = s;
-            }
-            stats::record_tool(tname, static_cast<int>(tres.content.size()), saved_bytes);
+			// For BFS-native tools, measure actual bytes saved
+			// by stat-ing the target file(s) and subtracting the
+			// tool's own output size. ReadAttr compares against
+			// one file; Query sums every path returned.
+			long fSavedbytes = 0;
+			if (tname == "ReadAttr") {
+				const std::string path = tinput.value("path", std::string{});
+				struct stat st;
+				if (!path.empty() && ::stat(path.c_str(), &st) == 0) {
+					const long s = static_cast<long>(st.st_size)
+								 - static_cast<long>(tres.content.size());
+					if (s > 0) fSavedbytes = s;
+				}
+			} else if (tname == "Query") {
+				long total = 0;
+				std::istringstream iss(tres.content);
+				std::string p;
+				while (std::getline(iss, p)) {
+					if (p.empty()) continue;
+					struct stat st;
+					if (::stat(p.c_str(), &st) == 0) total += st.st_size;
+				}
+				const long s = total - static_cast<long>(tres.content.size());
+				if (s > 0) fSavedbytes = s;
+			}
+			stats::RecordTool(tname, static_cast<int>(tres.content.size()), fSavedbytes);
 
-            // Sanitize tool output before handing it to nlohmann::json.
-            // Binary tool output (e.g. `cat` on a driver blob, /dev node,
-            // or any file with non-UTF-8 bytes) will throw
-            // json::type_error.316 if passed raw. Replace invalid bytes
-            // with U+FFFD so the model still sees the content shape.
-            tres.content = sanitize_utf8(tres.content);
+			// Sanitize tool output before handing it to nlohmann::json.
+			// Binary tool output (e.g. `cat` on a driver blob, /dev node,
+			// or any file with non-UTF-8 bytes) will throw
+			// json::type_error.316 if passed raw. Replace invalid bytes
+			// with U+FFFD so the model still sees the content shape.
+			tres.content = SanitizeUtf8(tres.content);
 
-            tool_results.push_back({
-                {"type",        "tool_result"},
-                {"tool_use_id", tid},
-                {"content",     tres.content},
-                {"is_error",    tres.is_error},
-            });
-        }
+			tool_results.push_back({
+				{"type",        "tool_result"},
+				{"tool_use_id", tid},
+				{"content",     tres.content},
+				{"is_error",    tres.is_error},
+			});
+		}
 
-        if (tool_results.empty()) {
-            // stop_reason said tool_use but no tool_use blocks — bail to avoid a loop.
-            return aggregate;
-        }
-        messages.push_back({{"role", "user"}, {"content", tool_results}});
-    }
+		if (tool_results.empty()) {
+			// stop_reason said tool_use but no tool_use blocks — bail to avoid a loop.
+			return aggregate;
+		}
+		messages.push_back({{"role", "user"}, {"content", tool_results}});
+	}
 }
 
-void print_usage_line(const SendResult& result) {
-    std::cerr << "[usage] input: " << result.input_tokens
-              << " tokens  output: " << result.output_tokens << " tokens\n";
+void PrintUsageLine(const SendResult& result) {
+	std::cerr << "[usage] input: " << result.input_tokens
+			  << " tokens  output: " << result.output_tokens << " tokens\n";
 }
 
 enum class SlashAction { Continue, Quit, Passthrough };
 
 struct LoopCtx {
-    const Auth&               auth;
-    int                       max_tokens;
-    const std::string&        custom_system;
-    const json&               prices;
-    std::string&              model;
-    int&                      turn_count;
-    int&                      session_input;
-    int&                      session_output;
-    json&                     messages;
-    std::vector<std::string>& session_urls;
-    bool&                     notify_enabled;
-    double&                   notify_min_duration;
-    // Invoked by slash commands that mutate state which shows up
-    // in the fixed-bottom status frame (model name, turn counter,
-    // session totals). Default is a no-op so non-REPL callers (the
-    // Telegram bridge) don't need to wire anything up.
-    std::function<void()>     redraw_status;
+	const Auth&               auth;
+	int                       max_tokens;
+	const std::string&        custom_system;
+	const json&               prices;
+	std::string&              model;
+	int&                      turn_count;
+	int&                      session_input;
+	int&                      session_output;
+	json&                     messages;
+	std::vector<std::string>& session_urls;
+	bool&                     notify_enabled;
+	double&                   notify_min_duration;
+	// Invoked by slash commands that mutate state which shows up
+	// in the fixed-bottom status frame (model name, turn counter,
+	// session totals). Default is a no-op so non-REPL callers (the
+	// Telegram bridge) don't need to wire anything up.
+	std::function<void()>     redraw_status;
 };
 
 
@@ -1700,15 +1694,15 @@ struct LoopCtx {
 // embedded `'` is split out as `'\''`. Used by /open so a URL with
 // a `?q=foo'bar` query string can't break the command line.
 static std::string shell_single_quote(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out += '\'';
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else           out += c;
-    }
-    out += '\'';
-    return out;
+	std::string out;
+	out.reserve(s.size() + 2);
+	out += '\'';
+	for (char c : s) {
+		if (c == '\'') out += "'\\''";
+		else           out += c;
+	}
+	out += '\'';
+	return out;
 }
 
 #ifdef __HAIKU__
@@ -1719,50 +1713,50 @@ static std::string shell_single_quote(const std::string& s) {
 // about X" via ReadAttr before deciding to Read the whole
 // thing. Claude can later overwrite with a richer summary
 // via WriteAttr; this is the floor, not the ceiling.
-static std::string derive_heuristic_summary(const std::string& content) {
-    size_t pos = 0;
-    int    total_lines = 0;
-    std::string first_meaningful;
-    while (pos < content.size()) {
-        const size_t nl  = content.find('\n', pos);
-        const size_t len = (nl == std::string::npos ? content.size() : nl) - pos;
-        ++total_lines;
-        if (first_meaningful.empty() && total_lines <= 50) {
-            const std::string line = content.substr(pos, len);
-            const size_t ws = line.find_first_not_of(" \t");
-            if (ws != std::string::npos) {
-                const std::string trimmed = line.substr(ws);
-                if (trimmed.size() >= 2 &&
-                    trimmed.substr(0, 2) != "//" &&
-                    trimmed.substr(0, 2) != "/*" &&
-                    trimmed[0] != '#' && trimmed[0] != '*') {
-                    first_meaningful = trimmed.substr(0, 80);
-                }
-            }
-        }
-        if (nl == std::string::npos) break;
-        pos = nl + 1;
-    }
-    std::string out = std::to_string(total_lines) + "L";
-    if (!first_meaningful.empty()) out += " \xE2\x80\x94 " + first_meaningful;
-    return out;
+static std::string DeriveHeuristicSummary(const std::string& content) {
+	size_t pos = 0;
+	int    total_lines = 0;
+	std::string first_meaningful;
+	while (pos < content.size()) {
+		const size_t nl  = content.find('\n', pos);
+		const size_t len = (nl == std::string::npos ? content.size() : nl) - pos;
+		++total_lines;
+		if (first_meaningful.empty() && total_lines <= 50) {
+			const std::string line = content.substr(pos, len);
+			const size_t ws = line.find_first_not_of(" \t");
+			if (ws != std::string::npos) {
+				const std::string trimmed = line.substr(ws);
+				if (trimmed.size() >= 2 &&
+					trimmed.substr(0, 2) != "//" &&
+					trimmed.substr(0, 2) != "/*" &&
+					trimmed[0] != '#' && trimmed[0] != '*') {
+					first_meaningful = trimmed.substr(0, 80);
+				}
+			}
+		}
+		if (nl == std::string::npos) break;
+		pos = nl + 1;
+	}
+	std::string out = std::to_string(total_lines) + "L";
+	if (!first_meaningful.empty()) out += " \xE2\x80\x94 " + first_meaningful;
+	return out;
 }
 
 // Probe a file for an existing non-empty claude:summary
 // attribute. Best-effort — silent failures return false,
 // which is safe (we'll attempt to write, addattr will just
 // overwrite with ours or fail quietly).
-static bool has_claude_summary(const std::string& path) {
-    const std::string cmd =
-        "catattr -d claude:summary " + shell_single_quote(path) +
-        " 2>/dev/null";
-    FILE* p = popen(cmd.c_str(), "r");
-    if (!p) return false;
-    char buf[256];
-    size_t total = 0;
-    while (std::fgets(buf, sizeof(buf), p)) total += std::strlen(buf);
-    pclose(p);
-    return total > 1;  // >1 accounts for a trailing newline
+static bool HasClaudeSummary(const std::string& path) {
+	const std::string cmd =
+		"catattr -d claude:summary " + shell_single_quote(path) +
+		" 2>/dev/null";
+	FILE* p = popen(cmd.c_str(), "r");
+	if (!p) return false;
+	char buf[256];
+	size_t total = 0;
+	while (std::fgets(buf, sizeof(buf), p)) total += std::strlen(buf);
+	pclose(p);
+	return total > 1;  // >1 accounts for a trailing newline
 }
 
 // Auto-seed the BFS cache: if Claude just Read a file and
@@ -1770,474 +1764,471 @@ static bool has_claude_summary(const std::string& path) {
 // derived from the content already in memory. Fork+exec
 // addattr; the child fully detaches and redirects stdio so
 // it can't interfere with the REPL's TUI state.
-static void auto_write_summary_if_missing(const std::string& path,
-                                          const std::string& content) {
-    if (path.empty()) return;
-    if (has_claude_summary(path)) return;
-    const std::string summary = derive_heuristic_summary(content);
-    if (summary.empty()) return;
+static void AutoWriteSummaryIfMissing(const std::string& path,
+										  const std::string& content) {
+	if (path.empty()) return;
+	if (HasClaudeSummary(path)) return;
+	const std::string summary = DeriveHeuristicSummary(content);
+	if (summary.empty()) return;
 
-    pid_t pid = fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        setsid();
-        int devnull = ::open("/dev/null", O_RDWR);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            if (devnull > 2) close(devnull);
-        }
-        const char* argv[] = {
-            "addattr", "-t", "string",
-            "claude:summary", summary.c_str(), path.c_str(),
-            nullptr
-        };
-        execvp("addattr", const_cast<char* const*>(argv));
-        _exit(127);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
+	pid_t pid = fork();
+	if (pid < 0) return;
+	if (pid == 0) {
+		setsid();
+		int devnull = ::open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			dup2(devnull, STDOUT_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > 2) close(devnull);
+		}
+		const char* argv[] = {
+			"addattr", "-t", "string",
+			"claude:summary", summary.c_str(), path.c_str(),
+			nullptr
+		};
+		execvp("addattr", const_cast<char* const*>(argv));
+		_exit(127);
+	}
+	int status = 0;
+	waitpid(pid, &status, 0);
 }
 #else
-static void auto_write_summary_if_missing(const std::string&, const std::string&) {}
+static void AutoWriteSummaryIfMissing(const std::string&, const std::string&) {}
 #endif
 
 struct PriceEntry {
-    double input;
-    double output;
+	double input;
+	double output;
 };
 
 // Pick a reasonable context-window size for the given model.
 // Config-override wins; otherwise the "[1m]" suffix signals the
 // 1M-token Anthropic beta, and everything else gets the standard
 // 200k window.
-int detect_context_window(const std::string& model, int override_val) {
-    if (override_val > 0) return override_val;
-    if (model.find("[1m]") != std::string::npos) return 1'000'000;
-    return 200'000;
+int DetectContextWindow(const std::string& model, int override_val) {
+	if (override_val > 0) return override_val;
+	if (model.find("[1m]") != std::string::npos) return 1'000'000;
+	return 200'000;
 }
 
 PriceEntry get_price(const std::string& model, const json& config_prices) {
-    if (config_prices.is_object() && config_prices.contains(model)) {
-        const auto& p = config_prices[model];
-        return { p.value("input", 0.0), p.value("output", 0.0) };
-    }
-    // Per-million-token fallbacks based on publicly listed Claude pricing.
-    // Config file overrides these by adding an entry under "prices".
-    if (model.find("opus")   != std::string::npos) return { 15.0, 75.0 };
-    if (model.find("haiku")  != std::string::npos) return { 0.8,   4.0 };
-    if (model.find("sonnet") != std::string::npos) return { 3.0,  15.0 };
-    return { 3.0, 15.0 };
+	if (config_prices.is_object() && config_prices.contains(model)) {
+		const auto& p = config_prices[model];
+		return { p.value("input", 0.0), p.value("output", 0.0) };
+	}
+	// Per-million-token fallbacks based on publicly listed Claude pricing.
+	// Config file overrides these by adding an entry under "prices".
+	if (model.find("opus")   != std::string::npos) return { 15.0, 75.0 };
+	if (model.find("haiku")  != std::string::npos) return { 0.8,   4.0 };
+	if (model.find("sonnet") != std::string::npos) return { 3.0,  15.0 };
+	return { 3.0, 15.0 };
 }
 
-SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
-                           std::string& passthrough_out) {
-    std::string cmd = line;
-    std::string args;
-    if (const auto sp = line.find(' '); sp != std::string::npos) {
-        cmd  = line.substr(0, sp);
-        args = line.substr(sp + 1);
-        while (!args.empty() && args.front() == ' ') args.erase(args.begin());
-    }
+SlashAction DispatchSlash(const std::string& line, LoopCtx& ctx,
+						   std::string& passthrough_out) {
+	std::string cmd = line;
+	std::string args;
+	if (const auto sp = line.find(' '); sp != std::string::npos) {
+		cmd  = line.substr(0, sp);
+		args = line.substr(sp + 1);
+		while (!args.empty() && args.front() == ' ') args.erase(args.begin());
+	}
 
-    if (cmd == "/help" || cmd == "/?") {
-        std::cout << tui::meta(
-            "multi-line input:\n"
-            "  \\ + Enter          new line (works everywhere, including SSH)\n"
-            "  Ctrl+J             new line (local terminal)\n"
-            "  Alt+Enter          new line (local terminal)\n"
-            "\n"
-            "slash commands:\n"
-            "  /help              this list\n"
-            "  /clear             reset the running conversation\n"
-            "  /model [name]      list all available models, or swap to <name>\n"
-            "  /compact           summarize and replace the running history\n"
-            "  /usage             session tokens, cost estimate, subscription windows\n"
-            "  /todos             show the current in-session todo list\n"
-            "  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
-            "  /stats             lifetime token usage and tool stats\n"
-            "  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
-            "  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
-            "  /remote-control    toggle Telegram remote poller on/off\n"
-            "  /ludicrous         toggle ludicrous mode (auto-approve all tool permissions)\n"
-            "  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
-                  << "\n";
-        const auto custom = commands::names();
-        if (!custom.empty()) {
-            std::string body = "custom commands from .claude/commands/ and user dir:\n";
-            for (const auto& c : custom) body += "  /" + c + "\n";
-            std::cout << tui::meta(body) << "\n";
-        }
-        return SlashAction::Continue;
-    }
-    if (cmd == "/todos") {
-        const auto result = tools::run("TodoRead", json::object());
-        std::cout << tui::meta("current todos:") << "\n"
-                  << result.content << "\n";
-        return SlashAction::Continue;
-    }
-    if (cmd == "/stats") {
-        std::cout << tui::meta(stats::format_display()) << "\n";
-        return SlashAction::Continue;
-    }
-    if (cmd == "/memory") {
-        // With an explicit "user" arg go straight there; otherwise
-        // show a picker so the user can choose project or user scope.
-        std::string target;
-        if (args == "user") {
-            target = paths::user_memory_path();
-            const auto slash = target.rfind('/');
-            if (slash != std::string::npos) paths::mkdir_p(target.substr(0, slash));
-        } else if (!args.empty()) {
-            // Any other explicit arg is treated as a direct path (future-proofing).
-            target = paths::project_memory_path();
-        } else {
-            // Interactive picker: project vs user.
-            const std::string proj = paths::project_memory_path();
-            const std::string user = paths::user_memory_path();
-            const std::vector<std::string> options = {
-                "Project  (" + proj + ")",
-                "User     (" + user + ")",
-            };
-            std::cout << tui::bold("open memory file:") << "\n";
-            const int picked = tui::select_option(options);
-            if (picked == 1) {
-                target = user;
-                const auto slash = target.rfind('/');
-                if (slash != std::string::npos) paths::mkdir_p(target.substr(0, slash));
-            } else {
-                target = proj;
-            }
-        }
-        const char* editor_env = std::getenv("EDITOR");
-        const std::string editor = editor_env && *editor_env ? editor_env : "nano";
-        const std::string cmdline = editor + " '" + target + "'";
-        std::cout << tui::meta("[opening " + target + " with " + editor + "]") << "\n";
-        const int rc = std::system(cmdline.c_str());
-        if (rc != 0) {
-            std::cout << tui::meta("[editor exited " + std::to_string(rc) + "]") << "\n";
-        } else {
-            std::cout << tui::meta("[memory will be reloaded on the next turn]") << "\n";
-        }
-        return SlashAction::Continue;
-    }
-    if (cmd == "/notify") {
-        auto state_line = [&]() {
-            char buf[128];
-            std::snprintf(buf, sizeof(buf),
-                "[notify: %s, threshold %.0fs]",
-                ctx.notify_enabled ? "on" : "off",
-                ctx.notify_min_duration);
-            return std::string(buf);
-        };
-        if (args.empty()) {
-            std::cout << tui::meta(state_line()) << "\n";
-            std::cout << tui::dim("  /notify on | off | <seconds>") << "\n";
-            return SlashAction::Continue;
-        }
-        if (args == "on")  { ctx.notify_enabled = true;  std::cout << tui::meta(state_line()) << "\n"; return SlashAction::Continue; }
-        if (args == "off") { ctx.notify_enabled = false; std::cout << tui::meta(state_line()) << "\n"; return SlashAction::Continue; }
+	if (cmd == "/help" || cmd == "/?") {
+		std::cout << tui::Meta(
+			"multi-line input:\n"
+			"  \\ + Enter          new line (works everywhere, including SSH)\n"
+			"  Ctrl+J             new line (local terminal)\n"
+			"  Alt+Enter          new line (local terminal)\n"
+			"\n"
+			"slash commands:\n"
+			"  /help              this list\n"
+			"  /clear             reset the running conversation\n"
+			"  /model [name]      list all available models, or swap to <name>\n"
+			"  /compact           summarize and replace the running history\n"
+			"  /usage             session tokens, cost estimate, subscription windows\n"
+			"  /todos             show the current in-session todo list\n"
+			"  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
+			"  /stats             lifetime token usage and tool stats\n"
+			"  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
+			"  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
+			"  /remote-control    toggle Telegram remote poller on/off\n"
+			"  /ludicrous         toggle ludicrous mode (auto-approve all tool permissions)\n"
+			"  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
+				  << "\n";
+		const auto custom = commands::Names();
+		if (!custom.empty()) {
+			std::string body = "custom commands from .claude/commands/ and user dir:\n";
+			for (const auto& c : custom) body += "  /" + c + "\n";
+			std::cout << tui::Meta(body) << "\n";
+		}
+		return SlashAction::Continue;
+	}
+	if (cmd == "/todos") {
+		const auto result = tools::Run("TodoRead", json::object());
+		std::cout << tui::Meta("current todos:") << "\n"
+				  << result.content << "\n";
+		return SlashAction::Continue;
+	}
+	if (cmd == "/stats") {
+		std::cout << tui::Meta(stats::FormatDisplay()) << "\n";
+		return SlashAction::Continue;
+	}
+	if (cmd == "/memory") {
+		// With an explicit "user" arg go straight there; otherwise
+		// show a picker so the user can choose project or user scope.
+		std::string target;
+		if (args == "user") {
+			target = paths::UserMemoryPath();
+			const auto slash = target.rfind('/');
+			if (slash != std::string::npos) paths::MkdirP(target.substr(0, slash));
+		} else if (!args.empty()) {
+			// Any other explicit arg is treated as a direct path (future-proofing).
+			target = paths::ProjectMemoryPath();
+		} else {
+			// Interactive picker: project vs user.
+			const std::string proj = paths::ProjectMemoryPath();
+			const std::string user = paths::UserMemoryPath();
+			const std::vector<std::string> options = {
+				"Project  (" + proj + ")",
+				"User     (" + user + ")",
+			};
+			const int picked = tui::SelectOption(options, "open memory file:");
+			if (picked == 1) {
+				target = user;
+				const auto slash = target.rfind('/');
+				if (slash != std::string::npos) paths::MkdirP(target.substr(0, slash));
+			} else {
+				target = proj;
+			}
+		}
+		const char* editor_env = std::getenv("EDITOR");
+		const std::string editor = editor_env && *editor_env ? editor_env : "nano";
+		const std::string cmdline = editor + " '" + target + "'";
+		std::cout << tui::Meta("[opening " + target + " with " + editor + "]") << "\n";
+		const int rc = std::system(cmdline.c_str());
+		if (rc != 0) {
+			std::cout << tui::Meta("[editor exited " + std::to_string(rc) + "]") << "\n";
+		} else {
+			std::cout << tui::Meta("[memory will be reloaded on the next turn]") << "\n";
+		}
+		return SlashAction::Continue;
+	}
+	if (cmd == "/notify") {
+		auto state_line = [&]() {
+			char buf[128];
+			std::snprintf(buf, sizeof(buf),
+				"[notify: %s, threshold %.0fs]",
+				ctx.notify_enabled ? "on" : "off",
+				ctx.notify_min_duration);
+			return std::string(buf);
+		};
+		if (args.empty()) {
+			std::cout << tui::Meta(state_line()) << "\n";
+			std::cout << tui::Dim("  /notify on | off | <seconds>") << "\n";
+			return SlashAction::Continue;
+		}
+		if (args == "on")  { ctx.notify_enabled = true;  std::cout << tui::Meta(state_line()) << "\n"; return SlashAction::Continue; }
+		if (args == "off") { ctx.notify_enabled = false; std::cout << tui::Meta(state_line()) << "\n"; return SlashAction::Continue; }
 
-        // Numeric → new threshold. Accepts int or float seconds.
-        // Negative or zero values disable without changing enabled.
-        char* end = nullptr;
-        const double v = std::strtod(args.c_str(), &end);
-        if (end == args.c_str() || *end != '\0') {
-            std::cout << tui::meta("[/notify: expected 'on', 'off', or a number of seconds]") << "\n";
-            return SlashAction::Continue;
-        }
-        if (v < 0.0) {
-            std::cout << tui::meta("[/notify: threshold must be >= 0]") << "\n";
-            return SlashAction::Continue;
-        }
-        ctx.notify_min_duration = v;
-        std::cout << tui::meta(state_line()) << "\n";
-        return SlashAction::Continue;
-    }
-    if (cmd == "/open") {
-        std::string target;
-        if (args.empty()) {
-            if (ctx.session_urls.empty()) {
-                std::cout << tui::meta("[no URLs seen in this session yet]") << "\n";
-                return SlashAction::Continue;
-            }
-            for (size_t i = 0; i < ctx.session_urls.size(); ++i) {
-                char idx[16];
-                std::snprintf(idx, sizeof(idx), "  %zu. ", i + 1);
-                std::cout << tui::meta(std::string(idx) + ctx.session_urls[i]) << "\n";
-            }
-            std::cout << tui::dim("  /open N to launch, or /open <url>") << "\n";
-            return SlashAction::Continue;
-        }
+		// Numeric → new threshold. Accepts int or float seconds.
+		// Negative or zero values disable without changing enabled.
+		char* end = nullptr;
+		const double v = std::strtod(args.c_str(), &end);
+		if (end == args.c_str() || *end != '\0') {
+			std::cout << tui::Meta("[/notify: expected 'on', 'off', or a number of seconds]") << "\n";
+			return SlashAction::Continue;
+		}
+		if (v < 0.0) {
+			std::cout << tui::Meta("[/notify: threshold must be >= 0]") << "\n";
+			return SlashAction::Continue;
+		}
+		ctx.notify_min_duration = v;
+		std::cout << tui::Meta(state_line()) << "\n";
+		return SlashAction::Continue;
+	}
+	if (cmd == "/open") {
+		std::string target;
+		if (args.empty()) {
+			if (ctx.session_urls.empty()) {
+				std::cout << tui::Meta("[no URLs seen in this session yet]") << "\n";
+				return SlashAction::Continue;
+			}
+			for (size_t i = 0; i < ctx.session_urls.size(); ++i) {
+				char idx[16];
+				std::snprintf(idx, sizeof(idx), "  %zu. ", i + 1);
+				std::cout << tui::Meta(std::string(idx) + ctx.session_urls[i]) << "\n";
+			}
+			std::cout << tui::Dim("  /open N to launch, or /open <url>") << "\n";
+			return SlashAction::Continue;
+		}
 
-        bool is_num = !args.empty();
-        for (char c : args) {
-            if (!std::isdigit(static_cast<unsigned char>(c))) { is_num = false; break; }
-        }
-        if (is_num) {
-            const size_t idx = static_cast<size_t>(std::atoi(args.c_str()));
-            if (idx == 0 || idx > ctx.session_urls.size()) {
-                std::cout << tui::meta("[no URL #" + args + " — /open with no args to list]") << "\n";
-                return SlashAction::Continue;
-            }
-            target = ctx.session_urls[idx - 1];
-        } else {
-            target = args;
-        }
+		bool is_num = !args.empty();
+		for (char c : args) {
+			if (!std::isdigit(static_cast<unsigned char>(c))) { is_num = false; break; }
+		}
+		if (is_num) {
+			const size_t idx = static_cast<size_t>(std::atoi(args.c_str()));
+			if (idx == 0 || idx > ctx.session_urls.size()) {
+				std::cout << tui::Meta("[no URL #" + args + " — /open with no args to list]") << "\n";
+				return SlashAction::Continue;
+			}
+			target = ctx.session_urls[idx - 1];
+		} else {
+			target = args;
+		}
 
-        // Fire-and-forget via `open` (Haiku's native URL launcher,
-        // also present on macOS for the dev workflow). Background
-        // the child so the REPL keeps its status frame; redirect
-        // stdout/stderr so the launcher can't stomp on our TUI.
-        const std::string cmdline =
-            "open " + shell_single_quote(target) + " >/dev/null 2>&1 &";
-        std::cout << tui::meta("[opening " + target + "]") << "\n";
-        const int rc = std::system(cmdline.c_str());
-        if (rc != 0) {
-            std::cout << tui::meta("[open exited " + std::to_string(rc) + "]") << "\n";
-        }
-        return SlashAction::Continue;
-    }
-    if (cmd == "/exit" || cmd == "/quit") {
-        return SlashAction::Quit;
-    }
-    if (cmd == "/ludicrous") {
-        const bool now = !g_ludicrous_mode.load();
-        g_ludicrous_mode.store(now);
-        if (now) {
-            std::cout << tui::yellow("\xE2\x9A\xA1 LUDICROUS MODE ENGAGED")
-                      << tui::dim(" \xe2\x80\x94 all tool permissions auto-approved") << "\n";
-        } else {
-            std::cout << tui::dim("\xE2\x9A\xA1 Ludicrous mode off \xe2\x80\x94 permission prompts restored") << "\n";
-        }
-        if (ctx.redraw_status) ctx.redraw_status();
-        return SlashAction::Continue;
-    }
-    if (cmd == "/clear") {
-        ctx.messages        = json::array();
-        ctx.turn_count      = 0;
-        ctx.session_input   = 0;
-        ctx.session_output  = 0;
-        std::cout << tui::meta("[conversation cleared]") << "\n";
-        if (ctx.redraw_status) ctx.redraw_status();
-        return SlashAction::Continue;
-    }
-    if (cmd == "/model") {
-        if (args.empty()) {
-            // Fetch the model list and show an interactive picker.
-            const auto models = fetch_models(ctx.auth);
-            if (models.empty()) {
-                std::cout << tui::meta("[current model: " + ctx.model + "]") << "\n";
-                std::cout << tui::meta("[could not fetch model list — check connection/key]") << "\n";
-                return SlashAction::Continue;
-            }
-            // Build option strings. Include display_name if it differs from id.
-            std::vector<std::string> options;
-            options.reserve(models.size());
-            int preselect = 0;
-            for (int i = 0; i < static_cast<int>(models.size()); ++i) {
-                const auto& m = models[i];
-                std::string label = m.id;
-                if (m.display_name != m.id)
-                    label += "  (" + m.display_name + ")";
-                options.push_back(std::move(label));
-                if (m.id == ctx.model) preselect = i;
-            }
-            std::cout << tui::bold("select model:") << "\n";
-            // Prime the selector on the currently active model.
-            // select_option always starts at index 0; swap the active
-            // model to the top so it's highlighted by default, then
-            // map back to the real index after the user picks.
-            // Simpler: just note the preselect index and pass it via
-            // a wrapper that renders with the cursor starting there.
-            // tui::select_option starts at 0, so we pass a reordered
-            // list with the active model first, then remap.
-            std::vector<std::string> ordered = options;
-            std::vector<int>         index_map(models.size());
-            std::iota(index_map.begin(), index_map.end(), 0);
-            if (preselect > 0) {
-                // Rotate so active model is first.
-                std::rotate(ordered.begin(),
-                            ordered.begin() + preselect,
-                            ordered.end());
-                std::rotate(index_map.begin(),
-                            index_map.begin() + preselect,
-                            index_map.end());
-            }
-            const int picked = tui::select_option(ordered);
-            const int real_idx = index_map[picked];
-            const std::string chosen = models[real_idx].id;
-            if (chosen != ctx.model) {
-                ctx.model = chosen;
-                std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
-                if (ctx.redraw_status) ctx.redraw_status();
-            } else {
-                std::cout << tui::meta("[model unchanged: " + ctx.model + "]") << "\n";
-            }
-        } else {
-            ctx.model = args;
-            std::cout << tui::meta("[model set to " + ctx.model + "]") << "\n";
-            if (ctx.redraw_status) ctx.redraw_status();
-        }
-        return SlashAction::Continue;
-    }
-    if (cmd == "/usage") {
-        auto header = [](const std::string& key) -> std::string {
-            const auto it = g_last_rate_headers.find(key);
-            return it == g_last_rate_headers.end() ? std::string() : it->second;
-        };
+		// Fire-and-forget via `open` (Haiku's native URL launcher,
+		// also present on macOS for the dev workflow). Background
+		// the child so the REPL keeps its status frame; redirect
+		// stdout/stderr so the launcher can't stomp on our TUI.
+		const std::string cmdline =
+			"open " + shell_single_quote(target) + " >/dev/null 2>&1 &";
+		std::cout << tui::Meta("[opening " + target + "]") << "\n";
+		const int rc = std::system(cmdline.c_str());
+		if (rc != 0) {
+			std::cout << tui::Meta("[open exited " + std::to_string(rc) + "]") << "\n";
+		}
+		return SlashAction::Continue;
+	}
+	if (cmd == "/exit" || cmd == "/quit") {
+		return SlashAction::Quit;
+	}
+	if (cmd == "/ludicrous") {
+		const bool now = !g_ludicrous_mode.load();
+		g_ludicrous_mode.store(now);
+		if (now) {
+			std::cout << tui::Yellow("\xE2\x9A\xA1 LUDICROUS MODE ENGAGED")
+					  << tui::Dim(" \xe2\x80\x94 all tool permissions auto-approved") << "\n";
+		} else {
+			std::cout << tui::Dim("\xE2\x9A\xA1 Ludicrous mode off \xe2\x80\x94 permission prompts restored") << "\n";
+		}
+		if (ctx.redraw_status) ctx.redraw_status();
+		return SlashAction::Continue;
+	}
+	if (cmd == "/clear") {
+		ctx.messages        = json::array();
+		ctx.turn_count      = 0;
+		ctx.session_input   = 0;
+		ctx.session_output  = 0;
+		std::cout << tui::Meta("[conversation cleared]") << "\n";
+		if (ctx.redraw_status) ctx.redraw_status();
+		return SlashAction::Continue;
+	}
+	if (cmd == "/model") {
+		if (args.empty()) {
+			// Fetch the model list and show an interactive picker.
+			const auto models = fetch_models(ctx.auth);
+			if (models.empty()) {
+				std::cout << tui::Meta("[current model: " + ctx.model + "]") << "\n";
+				std::cout << tui::Meta("[could not fetch model list — check connection/key]") << "\n";
+				return SlashAction::Continue;
+			}
+			// Build option strings. Include display_name if it differs from id.
+			std::vector<std::string> options;
+			options.reserve(models.size());
+			int preselect = 0;
+			for (int i = 0; i < static_cast<int>(models.size()); ++i) {
+				const auto& m = models[i];
+				std::string label = m.id;
+				if (m.display_name != m.id)
+					label += "  (" + m.display_name + ")";
+				options.push_back(std::move(label));
+				if (m.id == ctx.model) preselect = i;
+			}
+			// Prime the selector on the currently active model.
+			// SelectOption always starts at index 0; swap the active
+			// model to the top so it's highlighted by default, then
+			// map back to the real index after the user picks.
+			// Simpler: just note the preselect index and pass it via
+			// a wrapper that renders with the cursor starting there.
+			// tui::SelectOption starts at 0, so we pass a reordered
+			// list with the active model first, then remap.
+			std::vector<std::string> ordered = options;
+			std::vector<int>         index_map(models.size());
+			std::iota(index_map.begin(), index_map.end(), 0);
+			if (preselect > 0) {
+				// Rotate so active model is first.
+				std::rotate(ordered.begin(),
+							ordered.begin() + preselect,
+							ordered.end());
+				std::rotate(index_map.begin(),
+							index_map.begin() + preselect,
+							index_map.end());
+			}
+			const int picked = tui::SelectOption(ordered, "select model:");
+			const int real_idx = index_map[picked];
+			const std::string chosen = models[real_idx].id;
+			if (chosen != ctx.model) {
+				ctx.model = chosen;
+				std::cout << tui::Meta("[model set to " + ctx.model + "]") << "\n";
+				if (ctx.redraw_status) ctx.redraw_status();
+			} else {
+				std::cout << tui::Meta("[model unchanged: " + ctx.model + "]") << "\n";
+			}
+		} else {
+			ctx.model = args;
+			std::cout << tui::Meta("[model set to " + ctx.model + "]") << "\n";
+			if (ctx.redraw_status) ctx.redraw_status();
+		}
+		return SlashAction::Continue;
+	}
+	if (cmd == "/usage") {
+		auto header = [](const std::string& key) -> std::string {
+			const auto it = g_last_rate_headers.find(key);
+			return it == g_last_rate_headers.end() ? std::string() : it->second;
+		};
 
-        auto render_bar = [](double pct) {
-            constexpr int kBarWidth = 50;
-            if (pct < 0.0)   pct = 0.0;
-            if (pct > 100.0) pct = 100.0;
-            const int filled = static_cast<int>(pct * kBarWidth / 100.0 + 0.5);
-            std::string out;
-            for (int i = 0; i < filled;                ++i) out += "\u2588";
-            for (int i = 0; i < kBarWidth - filled;    ++i) out += ' ';
-            return out;
-        };
+		auto render_bar = [](double pct) {
+			constexpr int kBarWidth = 50;
+			if (pct < 0.0)   pct = 0.0;
+			if (pct > 100.0) pct = 100.0;
+			const int filled = static_cast<int>(pct * kBarWidth / 100.0 + 0.5);
+			std::string out;
+			for (int i = 0; i < filled;                ++i) out += "\u2588";
+			for (int i = 0; i < kBarWidth - filled;    ++i) out += ' ';
+			return out;
+		};
 
-        auto format_reset = [](const std::string& ts_str) {
-            if (ts_str.empty()) return std::string();
-            const time_t ts = static_cast<time_t>(std::atoll(ts_str.c_str()));
-            std::tm tm {};
-            localtime_r(&ts, &tm);
-            char out[64];
-            std::strftime(out, sizeof(out), "%a %b %d at %H:%M (%Z)", &tm);
-            return std::string(out);
-        };
+		auto format_reset = [](const std::string& ts_str) {
+			if (ts_str.empty()) return std::string();
+			const time_t ts = static_cast<time_t>(std::atoll(ts_str.c_str()));
+			std::tm tm {};
+			localtime_r(&ts, &tm);
+			char out[64];
+			std::strftime(out, sizeof(out), "%a %b %d at %H:%M (%Z)", &tm);
+			return std::string(out);
+		};
 
-        auto print_window = [&](const std::string& label,
-                                const std::string& util_key,
-                                const std::string& reset_key) {
-            const std::string util_s  = header(util_key);
-            const std::string reset_s = header(reset_key);
-            if (util_s.empty()) return;
-            const double util = std::atof(util_s.c_str());
-            const double pct  = util * 100.0;
-            char pct_str[16];
-            std::snprintf(pct_str, sizeof(pct_str), "%3.0f%% used", pct);
-            std::cout << "  " << tui::bold(label) << "\n"
-                      << "  " << render_bar(pct) << " " << pct_str << "\n"
-                      << "  " << tui::dim("Resets " + format_reset(reset_s)) << "\n"
-                      << "\n";
-        };
+		auto print_window = [&](const std::string& label,
+								const std::string& util_key,
+								const std::string& reset_key) {
+			const std::string util_s  = header(util_key);
+			const std::string reset_s = header(reset_key);
+			if (util_s.empty()) return;
+			const double util = std::atof(util_s.c_str());
+			const double pct  = util * 100.0;
+			char pct_str[16];
+			std::snprintf(pct_str, sizeof(pct_str), "%3.0f%% used", pct);
+			std::cout << "  " << tui::Bold(label) << "\n"
+					  << "  " << render_bar(pct) << " " << pct_str << "\n"
+					  << "  " << tui::Dim("Resets " + format_reset(reset_s)) << "\n"
+					  << "\n";
+		};
 
-        // Session summary (our own state).
-        const PriceEntry price = get_price(ctx.model, ctx.prices);
-        const double in_cost   = (ctx.session_input  / 1'000'000.0) * price.input;
-        const double out_cost  = (ctx.session_output / 1'000'000.0) * price.output;
-        char session_buf[512];
-        std::snprintf(session_buf, sizeof(session_buf),
-            "  model %s  turns %d  in %d  out %d  est $%.4f",
-            ctx.model.c_str(),
-            ctx.turn_count,
-            ctx.session_input,
-            ctx.session_output,
-            in_cost + out_cost);
-        std::cout << tui::dim(session_buf) << "\n\n";
+		// Session summary (our own state).
+		const PriceEntry price = get_price(ctx.model, ctx.prices);
+		const double in_cost   = (ctx.session_input  / 1'000'000.0) * price.input;
+		const double out_cost  = (ctx.session_output / 1'000'000.0) * price.output;
+		char session_buf[512];
+		std::snprintf(session_buf, sizeof(session_buf),
+			"  model %s  turns %d  in %d  out %d  est $%.4f",
+			ctx.model.c_str(),
+			ctx.turn_count,
+			ctx.session_input,
+			ctx.session_output,
+			in_cost + out_cost);
+		std::cout << tui::Dim(session_buf) << "\n\n";
 
-        if (header("anthropic-ratelimit-unified-5h-utilization").empty()) {
-            std::cout << tui::dim("(no rate-limit data yet — make a request first)")
-                      << "\n";
-            return SlashAction::Continue;
-        }
+		if (header("anthropic-ratelimit-unified-5h-utilization").empty()) {
+			std::cout << tui::Dim("(no rate-limit data yet — make a request first)")
+					  << "\n";
+			return SlashAction::Continue;
+		}
 
-        print_window("Current session",
-                     "anthropic-ratelimit-unified-5h-utilization",
-                     "anthropic-ratelimit-unified-5h-reset");
-        print_window("Current week (all models)",
-                     "anthropic-ratelimit-unified-7d-utilization",
-                     "anthropic-ratelimit-unified-7d-reset");
-        print_window("Current week (Sonnet only)",
-                     "anthropic-ratelimit-unified-7d_sonnet-utilization",
-                     "anthropic-ratelimit-unified-7d_sonnet-reset");
+		print_window("Current session",
+					 "anthropic-ratelimit-unified-5h-utilization",
+					 "anthropic-ratelimit-unified-5h-reset");
+		print_window("Current week (all models)",
+					 "anthropic-ratelimit-unified-7d-utilization",
+					 "anthropic-ratelimit-unified-7d-reset");
+		print_window("Current week (Sonnet only)",
+					 "anthropic-ratelimit-unified-7d_sonnet-utilization",
+					 "anthropic-ratelimit-unified-7d_sonnet-reset");
 
-        const std::string claim = header("anthropic-ratelimit-unified-representative-claim");
-        if (!claim.empty()) {
-            std::cout << tui::dim("  binding window: " + claim) << "\n";
-        }
-        return SlashAction::Continue;
-    }
-    if (cmd == "/compact") {
-        if (ctx.messages.empty()) {
-            std::cout << tui::meta("[nothing to compact]") << "\n";
-            return SlashAction::Continue;
-        }
-        // Confirmation prompt — compacting replaces the whole history.
-        {
-            const std::vector<std::string> options = {
-                "Yes, summarize and replace history",
-                "No, keep history as-is",
-            };
-            std::cout << tui::bold("compact conversation history?") << "\n";
-            const int picked = tui::select_option(options);
-            if (picked != 0) {
-                std::cout << tui::meta("[compact cancelled]") << "\n";
-                return SlashAction::Continue;
-            }
-        }
-        json request_messages = ctx.messages;
-        request_messages.push_back({
-            {"role",    "user"},
-            {"content",
-                "Two tasks, in order:\n"
-                "\n"
-                "1. For each source file you've gained real understanding "
-                "of during this conversation, call WriteAttr to persist a "
-                "concise one-line claude:summary capturing what the file "
-                "is for. Only write for files you could confidently "
-                "describe — skip files only mentioned in passing. "
-                "WriteAttr is auto-approved and restricted to the "
-                "claude:* namespace, so these writes are cheap and safe. "
-                "This lets future sessions start with accurate summaries "
-                "instead of the mechanical auto-seed placeholders.\n"
-                "\n"
-                "2. Then summarize the preceding conversation in 2-3 "
-                "short paragraphs, preserving important context, "
-                "decisions, code, and open questions. Reply with only "
-                "the summary after the WriteAttr calls."},
-        });
-        std::cout << "\n" << tui::claude_prompt();
-        const std::string compact_system = compose_system(ctx.custom_system);
-        // send_with_tools (not send_conversation) so the WriteAttr
-        // calls inside step 1 actually fire. The tool-use loop
-        // terminates when Claude emits the final summary text block.
-        const auto result = send_with_tools(
-            ctx.auth, ctx.model, ctx.max_tokens,
-            request_messages, compact_system);
-        std::cout << "\n";
-        if (result.exit_code != 0) {
-            std::cout << tui::meta("[compact failed]") << "\n";
-            return SlashAction::Continue;
-        }
-        ctx.session_input  += result.input_tokens;
-        ctx.session_output += result.output_tokens;
-        ctx.messages = json::array({
-            {{"role", "user"},      {"content", "[previous conversation context follows]"}},
-            {{"role", "assistant"}, {"content", result.assistant_text}},
-        });
-        char note[96];
-        std::snprintf(note, sizeof(note),
-            "[compacted: %d in / %d out tokens]",
-            result.input_tokens, result.output_tokens);
-        std::cout << tui::meta(note) << "\n";
-        return SlashAction::Continue;
-    }
-    // Fall back to user-defined commands loaded from
-    // .claude/commands/*.md (or the global dir). If a match exists we
-    // substitute {{args}} and hand the expanded text back to the REPL
-    // loop to send as a normal user message.
-    const std::string cmd_name = cmd.substr(1); // drop leading '/'
-    if (auto expanded = commands::expand(cmd_name, args); expanded) {
-        passthrough_out = std::move(*expanded);
-        return SlashAction::Passthrough;
-    }
+		const std::string claim = header("anthropic-ratelimit-unified-representative-claim");
+		if (!claim.empty()) {
+			std::cout << tui::Dim("  binding window: " + claim) << "\n";
+		}
+		return SlashAction::Continue;
+	}
+	if (cmd == "/compact") {
+		if (ctx.messages.empty()) {
+			std::cout << tui::Meta("[nothing to compact]") << "\n";
+			return SlashAction::Continue;
+		}
+		// Confirmation prompt — compacting replaces the whole history.
+		{
+			const std::vector<std::string> options = {
+				"Yes, summarize and replace history",
+				"No, keep history as-is",
+			};
+			const int picked = tui::SelectOption(options, "compact conversation history?");
+			if (picked != 0) {
+				std::cout << tui::Meta("[compact cancelled]") << "\n";
+				return SlashAction::Continue;
+			}
+		}
+		json request_messages = ctx.messages;
+		request_messages.push_back({
+			{"role",    "user"},
+			{"content",
+				"Two tasks, in order:\n"
+				"\n"
+				"1. For each source file you've gained real understanding "
+				"of during this conversation, call WriteAttr to persist a "
+				"concise one-line claude:summary capturing what the file "
+				"is for. Only write for files you could confidently "
+				"describe — skip files only mentioned in passing. "
+				"WriteAttr is auto-approved and restricted to the "
+				"claude:* namespace, so these writes are cheap and safe. "
+				"This lets future sessions start with accurate summaries "
+				"instead of the mechanical auto-seed placeholders.\n"
+				"\n"
+				"2. Then summarize the preceding conversation in 2-3 "
+				"short paragraphs, preserving important context, "
+				"decisions, code, and open questions. Reply with only "
+				"the summary after the WriteAttr calls."},
+		});
+		std::cout << "\n" << tui::ClaudePrompt();
+		const std::string compact_system = ComposeSystem(ctx.custom_system);
+		// SendWithTools (not SendConversation) so the WriteAttr
+		// calls inside step 1 actually Fire. The tool-use loop
+		// terminates when Claude emits the final summary text block.
+		const auto result = SendWithTools(
+			ctx.auth, ctx.model, ctx.max_tokens,
+			request_messages, compact_system);
+		std::cout << "\n";
+		if (result.exit_code != 0) {
+			std::cout << tui::Meta("[compact failed]") << "\n";
+			return SlashAction::Continue;
+		}
+		ctx.session_input  += result.input_tokens;
+		ctx.session_output += result.output_tokens;
+		ctx.messages = json::array({
+			{{"role", "user"},      {"content", "[previous conversation context follows]"}},
+			{{"role", "assistant"}, {"content", result.assistant_text}},
+		});
+		char note[96];
+		std::snprintf(note, sizeof(note),
+			"[compacted: %d in / %d out tokens]",
+			result.input_tokens, result.output_tokens);
+		std::cout << tui::Meta(note) << "\n";
+		return SlashAction::Continue;
+	}
+	// Fall back to user-defined commands loaded from
+	// .claude/commands/*.md (or the global dir). If a match exists we
+	// substitute {{args}} and hand the expanded text back to the REPL
+	// loop to send as a normal user message.
+	const std::string cmd_name = cmd.substr(1); // drop leading '/'
+	if (auto expanded = commands::Expand(cmd_name, args); expanded) {
+		passthrough_out = std::move(*expanded);
+		return SlashAction::Passthrough;
+	}
 
-    std::cout << tui::meta("[unknown command: " + cmd + " — try /help]") << "\n";
-    return SlashAction::Continue;
+	std::cout << tui::Meta("[unknown command: " + cmd + " — try /help]") << "\n";
+	return SlashAction::Continue;
 }
 
 // Compact a raw token count into a k/M suffix so it fits on the
@@ -2245,21 +2236,21 @@ SlashAction dispatch_slash(const std::string& line, LoopCtx& ctx,
 //   142   -> "142"
 //   1832  -> "1.8k"
 //   24110 -> "24k"
-std::string compact_tokens(int n) {
-    if (n < 1000) return std::to_string(n);
-    if (n < 10000) {
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%.1fk", n / 1000.0);
-        return buf;
-    }
-    if (n < 1000000) {
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%dk", n / 1000);
-        return buf;
-    }
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%.1fM", n / 1000000.0);
-    return buf;
+std::string CompactTokens(int n) {
+	if (n < 1000) return std::to_string(n);
+	if (n < 10000) {
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%.1fk", n / 1000.0);
+		return buf;
+	}
+	if (n < 1000000) {
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%dk", n / 1000);
+		return buf;
+	}
+	char buf[16];
+	std::snprintf(buf, sizeof(buf), "%.1fM", n / 1000000.0);
+	return buf;
 }
 
 // Compose the fixed-bottom status row for a regular REPL session.
@@ -2267,274 +2258,274 @@ std::string compact_tokens(int n) {
 //   <short_model> · turn N · ↑ 1.2k · ↓ 420 · max 8192
 // Padded with a leading space for visual breathing room. Caller
 // is responsible for passing the numbers; this helper just
-// formats. Truncates to terminal_width() minus 1 so the row never
+// formats. Truncates to TerminalWidth() minus 1 so the row never
 // wraps to the next line (which would destroy the fixed frame).
-std::string format_status_row(const std::string& model,
-                              int turn_count,
-                              int session_input,
-                              int session_output,
-                              int max_tokens,
-                              const std::string& right_label) {
-    auto short_model = [](const std::string& m) {
-        const std::string prefix = "claude-";
-        if (m.rfind(prefix, 0) == 0) return m.substr(prefix.size());
-        return m;
-    };
+std::string FormatStatusRow(const std::string& model,
+							  int turn_count,
+							  int session_input,
+							  int session_output,
+							  int max_tokens,
+							  const std::string& right_label) {
+	auto short_model = [](const std::string& m) {
+		const std::string prefix = "claude-";
+		if (m.rfind(prefix, 0) == 0) return m.substr(prefix.size());
+		return m;
+	};
 
-    std::string left;
-    left.reserve(96);
-    left += " ";
-    left += tui::bold(short_model(model));
-    left += tui::muted(" \xC2\xB7 turn ") + tui::muted(std::to_string(turn_count));
-    left += tui::muted(" \xC2\xB7 \xE2\x86\x91 ") + tui::muted(compact_tokens(session_input));
-    left += tui::muted(" \xC2\xB7 \xE2\x86\x93 ") + tui::muted(compact_tokens(session_output));
-    left += tui::muted(" \xC2\xB7 max ") + tui::muted(std::to_string(max_tokens));
+	std::string left;
+	left.reserve(96);
+	left += " ";
+	left += tui::Bold(short_model(model));
+	left += tui::Muted(" \xC2\xB7 turn ") + tui::Muted(std::to_string(turn_count));
+	left += tui::Muted(" \xC2\xB7 \xE2\x86\x91 ") + tui::Muted(CompactTokens(session_input));
+	left += tui::Muted(" \xC2\xB7 \xE2\x86\x93 ") + tui::Muted(CompactTokens(session_output));
+	left += tui::Muted(" \xC2\xB7 max ") + tui::Muted(std::to_string(max_tokens));
 
-    if (right_label.empty()) return left;
+	if (right_label.empty()) return left;
 
-    // Right-justify `right_label` on the same line. The helper
-    // counts display columns (skipping ANSI) via a quick inline
-    // walk so bold/color wraps don't break the math.
-    auto display_width = [](const std::string& s) {
-        int cols = 0;
-        bool in_esc = false;
-        for (size_t i = 0; i < s.size(); ++i) {
-            const unsigned char c = static_cast<unsigned char>(s[i]);
-            if (in_esc) { if (c == 'm') in_esc = false; continue; }
-            if (c == 0x1b) { in_esc = true; continue; }
-            if (c < 0x80) { ++cols; continue; }
-            ++cols;
-            if      ((c & 0xE0) == 0xC0) i += 1;
-            else if ((c & 0xF0) == 0xE0) i += 2;
-            else if ((c & 0xF8) == 0xF0) i += 3;
-        }
-        return cols;
-    };
+	// Right-justify `right_label` on the same line. The helper
+	// counts display columns (skipping ANSI) via a quick inline
+	// walk so bold/color wraps don't break the math.
+	auto display_width = [](const std::string& s) {
+		int cols = 0;
+		bool in_esc = false;
+		for (size_t i = 0; i < s.size(); ++i) {
+			const unsigned char c = static_cast<unsigned char>(s[i]);
+			if (in_esc) { if (c == 'm') in_esc = false; continue; }
+			if (c == 0x1b) { in_esc = true; continue; }
+			if (c < 0x80) { ++cols; continue; }
+			++cols;
+			if      ((c & 0xE0) == 0xC0) i += 1;
+			else if ((c & 0xF0) == 0xE0) i += 2;
+			else if ((c & 0xF8) == 0xF0) i += 3;
+		}
+		return cols;
+	};
 
-    const int width = tui::terminal_width();
-    if (width <= 0) return left + "  " + right_label;
+	const int width = tui::TerminalWidth();
+	if (width <= 0) return left + "  " + right_label;
 
-    const int left_cols  = display_width(left);
-    const int right_cols = display_width(right_label);
-    const int gap        = (width - 1) - left_cols - right_cols;
-    if (gap < 2) return left + "  " + right_label;
-    return left + std::string(gap, ' ') + right_label + " ";
+	const int left_cols  = display_width(left);
+	const int right_cols = display_width(right_label);
+	const int gap        = (width - 1) - left_cols - right_cols;
+	if (gap < 2) return left + "  " + right_label;
+	return left + std::string(gap, ' ') + right_label + " ";
 }
 
 // Self-contained background Telegram poller spawned on demand by
-// the /remote-control slash command inside interactive_loop. Runs
+// the /remote-control slash command inside InteractiveLoop. Runs
 // in its own thread, polls Telegram for incoming messages from
-// allowed users, and hands each one to send_with_tools on the
+// allowed users, and hands each one to SendWithTools on the
 // local machine. Each Telegram user gets an independent rolling
-// history in user_messages_ (no sharing with the REPL's own
+// history in fUserMessages (no sharing with the REPL's own
 // `messages` — /remote-control is purely additive, not a mirror).
 //
-// Deliberately thinner than run_telegram_bridge: no streaming
+// Deliberately thinner than RunTelegramBridge: no streaming
 // edits, no typing indicator, no inline-keyboard buttons, no
 // local input mirroring. The response is posted via a single
 // sendMessage at the end of each turn. If you want the full UX,
 // run `claude telegram` as its own subcommand.
 //
-// Thread-safe: the poller thread grabs repl_mutex_ for the
-// duration of each send_with_tools call so it serializes cleanly
+// Thread-safe: the poller thread grabs fReplMutex for the
+// duration of each SendWithTools call so it serializes cleanly
 // against whatever the REPL's own main thread is doing. The REPL
 // loop provides the mutex; RemoteControl only reads the
 // reference.
 class RemoteControl {
 public:
-    static bool config_is_valid(const Config& cfg, std::string* reason) {
-        if (!cfg.telegram.is_object()) {
-            if (reason) *reason = "config.telegram is missing from config.json";
-            return false;
-        }
-        if (cfg.telegram.value("bot_token", std::string{}).empty()) {
-            if (reason) *reason = "config.telegram.bot_token is not set";
-            return false;
-        }
-        if (!cfg.telegram.contains("allowed_user_ids")
-            || !cfg.telegram["allowed_user_ids"].is_array()
-            || cfg.telegram["allowed_user_ids"].empty()) {
-            if (reason) *reason = "config.telegram.allowed_user_ids must list at least one Telegram user ID";
-            return false;
-        }
-        return true;
-    }
+	static bool config_is_valid(const Config& cfg, std::string* reason) {
+		if (!cfg.telegram.is_object()) {
+			if (reason) *reason = "config.telegram is missing from config.json";
+			return false;
+		}
+		if (cfg.telegram.value("bot_token", std::string{}).empty()) {
+			if (reason) *reason = "config.telegram.bot_token is not set";
+			return false;
+		}
+		if (!cfg.telegram.contains("fAlloweduser_ids")
+			|| !cfg.telegram["fAlloweduser_ids"].is_array()
+			|| cfg.telegram["fAlloweduser_ids"].empty()) {
+			if (reason) *reason = "config.telegram.fAlloweduser_ids must list at least one Telegram user ID";
+			return false;
+		}
+		return true;
+	}
 
-    RemoteControl(const Config& cfg, const Auth& auth,
-                  const std::string& custom_system, std::mutex& repl_mutex)
-        : client_(cfg.telegram.value("bot_token", std::string{})),
-          auth_(auth),
-          custom_system_(custom_system),
-          cfg_model_(cfg.model),
-          cfg_max_tokens_(cfg.max_tokens),
-          repl_mutex_(repl_mutex) {
-        for (const auto& v : cfg.telegram["allowed_user_ids"]) {
-            if (v.is_number_integer()) allowed_.insert(v.get<int64_t>());
-        }
-        allow_destructive_ = cfg.telegram.value("allow_destructive_tools", false);
-    }
+	RemoteControl(const Config& cfg, const Auth& auth,
+				  const std::string& custom_system, std::mutex& repl_mutex)
+		: fClient(cfg.telegram.value("bot_token", std::string{})),
+		  fAuth(auth),
+		  fCustomSystem(custom_system),
+		  fCfgModel(cfg.model),
+		  fCfgMaxTokens(cfg.max_tokens),
+		  fReplMutex(repl_mutex) {
+		for (const auto& v : cfg.telegram["fAlloweduser_ids"]) {
+			if (v.is_number_integer()) fAllowed.insert(v.get<int64_t>());
+		}
+		fAllowDestructive = cfg.telegram.value("fAllowDestructivetools", false);
+	}
 
-    ~RemoteControl() { stop(); }
-    RemoteControl(const RemoteControl&) = delete;
-    RemoteControl& operator=(const RemoteControl&) = delete;
+	~RemoteControl() { Stop(); }
+	RemoteControl(const RemoteControl&) = delete;
+	RemoteControl& operator=(const RemoteControl&) = delete;
 
-    bool start() {
-        if (running_.load()) return false;
-        // Determine the primary user for local mirroring —
-        // smallest allowed_user_id, same logic as run_telegram_bridge.
-        primary_user_id_ = 0;
-        for (const auto& id : allowed_) {
-            if (primary_user_id_ == 0 || id < primary_user_id_) primary_user_id_ = id;
-        }
-        running_.store(true);
-        poller_ = std::thread(&RemoteControl::poll_loop, this);
-        return true;
-    }
+	bool start() {
+		if (fRunning.load()) return false;
+		// Determine the primary user for local mirroring —
+		// smallest fAlloweduser_id, same logic as RunTelegramBridge.
+		fPrimaryUserId = 0;
+		for (const auto& id : fAllowed) {
+			if (fPrimaryUserId == 0 || id < fPrimaryUserId) fPrimaryUserId = id;
+		}
+		fRunning.store(true);
+		fPoller = std::thread(&RemoteControl::poll_loop, this);
+		return true;
+	}
 
-    void stop() {
-        if (!running_.exchange(false)) return;
-        if (poller_.joinable()) poller_.join();
-    }
+	void Stop() {
+		if (!fRunning.exchange(false)) return;
+		if (fPoller.joinable()) fPoller.join();
+	}
 
-    bool running() const { return running_.load(); }
+	bool running() const { return fRunning.load(); }
 
-    // Mirror a local REPL turn to the primary Telegram chat so
-    // the phone-side user sees what was typed locally. Called from
-    // the main thread after each interactive_loop turn completes.
-    void mirror_to_primary(const std::string& user_text,
-                           const std::string& assistant_text) {
-        if (!running_.load()) return;
-        if (primary_user_id_ == 0) return;
-        tg_send(primary_user_id_, "> " + user_text);
-        if (!assistant_text.empty()) {
-            tg_send(primary_user_id_, assistant_text);
-        }
-    }
+	// Mirror a local REPL turn to the primary Telegram chat so
+	// the phone-side user sees what was typed locally. Called from
+	// the main thread after each InteractiveLoop turn completes.
+	void mirror_to_primary(const std::string& user_text,
+						   const std::string& assistant_text) {
+		if (!fRunning.load()) return;
+		if (fPrimaryUserId == 0) return;
+		tg_send(fPrimaryUserId, "> " + user_text);
+		if (!assistant_text.empty()) {
+			tg_send(fPrimaryUserId, assistant_text);
+		}
+	}
 
 private:
-    void poll_loop() {
-        while (running_.load() && !g_interrupted) {
-            // Pass &running_ so the curl progress callback can
-            // abort the in-flight long-poll when stop() flips the
-            // flag — otherwise /remote-control off would wait up
-            // to ~20s for Telegram's long-poll to return.
-            const auto updates = client_.poll(10, &running_);
-            if (!running_.load() || g_interrupted) break;
-            for (const auto& u : updates) {
-                if (!running_.load() || g_interrupted) break;
-                if (!allowed_.count(u.user_id)) {
-                    log_line("remote-control reject user=" + std::to_string(u.user_id));
-                    continue;
-                }
-                std::lock_guard<std::mutex> lk(repl_mutex_);
-                process_update(u);
-            }
-        }
-    }
+	void poll_loop() {
+		while (fRunning.load() && !g_interrupted) {
+			// Pass &fRunning so the curl progress callback can
+			// abort the in-flight long-poll when Stop() flips the
+			// flag — otherwise /remote-control off would wait up
+			// to ~20s for Telegram's long-poll to return.
+			const auto updates = fClient.poll(10, &fRunning);
+			if (!fRunning.load() || g_interrupted) break;
+			for (const auto& u : updates) {
+				if (!fRunning.load() || g_interrupted) break;
+				if (!fAllowed.count(u.user_id)) {
+					LogLine("remote-control reject user=" + std::to_string(u.user_id));
+					continue;
+				}
+				std::lock_guard<std::mutex> lk(fReplMutex);
+				process_update(u);
+			}
+		}
+	}
 
-    // Gate an outgoing client call on the shared mute flag so
-    // /mute from either surface silences the remote too.
-    void tg_send(int64_t chat, const std::string& text) {
-        if (g_telegram_muted.load()) return;
-        client_.send_message(chat, text);
-    }
+	// Gate an outgoing client call on the shared mute flag so
+	// /mute from either surface silences the remote too.
+	void tg_send(int64_t chat, const std::string& text) {
+		if (g_telegram_muted.load()) return;
+		fClient.SendMessage(chat, text);
+	}
 
-    void process_update(const telegram::Update& u) {
-        if (u.is_callback) client_.answer_callback(u.callback_query_id);
+	void process_update(const telegram::Update& u) {
+		if (u.is_callback) fClient.AnswerCallback(u.callback_query_id);
 
-        const std::string who = u.username.empty()
-            ? std::to_string(u.user_id) : u.username;
+		const std::string who = u.username.empty()
+			? std::to_string(u.user_id) : u.username;
 
-        // The poller thread runs while libedit has the cursor
-        // parked on the fixed input row. Route all our stdout
-        // writes into the scroll region via save/restore so we
-        // don't clobber the prompt and libedit can redraw on the
-        // next keystroke without damage.
-        std::cout << "\x1b""7";          // save cursor
-        tui::position_cursor_for_chat();
-        std::cout << tui::meta("[remote " + who + "] " + u.text) << "\n";
-        log_line("remote-control rx user=" + std::to_string(u.user_id)
-                 + " text=" + u.text);
+		// The poller thread runs while libedit has the cursor
+		// parked on the fixed input row. Route all our stdout
+		// writes into the scroll region via save/restore so we
+		// don't clobber the prompt and libedit can redraw on the
+		// next keystroke without damage.
+		std::cout << "\x1b""7";          // save cursor
+		tui::PositionCursorForChat();
+		std::cout << tui::Meta("[remote " + who + "] " + u.text) << "\n";
+		LogLine("remote-control rx user=" + std::to_string(u.user_id)
+				 + " text=" + u.text);
 
-        if (u.text == "/mute") {
-            if (!g_telegram_muted.exchange(true)) {
-                client_.send_message(u.chat_id,
-                    "Remote muted. No replies until /unmute.");
-            }
-            std::cout << "\x1b""8" << std::flush;
-            return;
-        }
-        if (u.text == "/unmute") {
-            if (g_telegram_muted.exchange(false)) {
-                client_.send_message(u.chat_id,
-                    "Remote unmuted. Replies will be sent again.");
-            }
-            std::cout << "\x1b""8" << std::flush;
-            return;
-        }
-        if (u.text == "/new" || u.text == "/clear") {
-            user_messages_.erase(u.user_id);
-            tg_send(u.chat_id, "(history cleared)");
-            std::cout << "\x1b""8" << std::flush;
-            return;
-        }
-        if (u.text == "/help" || u.text == "/start") {
-            tg_send(u.chat_id,
-                "claude remote-control\n"
-                "\n"
-                "Send a message and I'll run it through Claude on the "
-                "local machine.\n"
-                "\n"
-                "Commands:\n"
-                "  /new     reset this chat's rolling history\n"
-                "  /mute    stop sending replies until /unmute\n"
-                "  /unmute  resume sending replies\n"
-                "  /help    this message");
-            std::cout << "\x1b""8" << std::flush;
-            return;
-        }
+		if (u.text == "/mute") {
+			if (!g_telegram_muted.exchange(true)) {
+				fClient.SendMessage(u.chat_id,
+					"Remote muted. No replies until /unmute.");
+			}
+			std::cout << "\x1b""8" << std::flush;
+			return;
+		}
+		if (u.text == "/unmute") {
+			if (g_telegram_muted.exchange(false)) {
+				fClient.SendMessage(u.chat_id,
+					"Remote unmuted. Replies will be sent again.");
+			}
+			std::cout << "\x1b""8" << std::flush;
+			return;
+		}
+		if (u.text == "/new" || u.text == "/clear") {
+			fUserMessages.erase(u.user_id);
+			tg_send(u.chat_id, "(history cleared)");
+			std::cout << "\x1b""8" << std::flush;
+			return;
+		}
+		if (u.text == "/help" || u.text == "/start") {
+			tg_send(u.chat_id,
+				"claude remote-control\n"
+				"\n"
+				"Send a message and I'll run it through Claude on the "
+				"local machine.\n"
+				"\n"
+				"Commands:\n"
+				"  /new     reset this chat's rolling history\n"
+				"  /mute    stop sending replies until /unmute\n"
+				"  /unmute  resume sending replies\n"
+				"  /help    this message");
+			std::cout << "\x1b""8" << std::flush;
+			return;
+		}
 
-        json& messages = user_messages_[u.user_id];
-        if (!messages.is_array()) messages = json::array();
-        const json snapshot = messages;
-        messages.push_back({{"role", "user"}, {"content", u.text}});
+		json& messages = fUserMessages[u.user_id];
+		if (!messages.is_array()) messages = json::array();
+		const json snapshot = messages;
+		messages.push_back({{"role", "user"}, {"content", u.text}});
 
-        g_non_interactive_tools              = true;
-        g_non_interactive_allow_destructive  = allow_destructive_;
-        std::cout << tui::claude_prompt();
-        const std::string effective_system = compose_system(custom_system_);
-        const auto result = send_with_tools(auth_, cfg_model_, cfg_max_tokens_,
-                                            messages, effective_system);
-        std::cout << "\n";
-        g_non_interactive_tools    = false;
-        g_telegram_permission_hook = nullptr;
+		g_non_interactive_tools              = true;
+		g_non_interactive_allow_destructive  = fAllowDestructive;
+		std::cout << tui::ClaudePrompt();
+		const std::string effective_system = ComposeSystem(fCustomSystem);
+		const auto result = SendWithTools(fAuth, fCfgModel, fCfgMaxTokens,
+											messages, effective_system);
+		std::cout << "\n";
+		g_non_interactive_tools    = false;
+		g_telegram_permission_hook = nullptr;
 
-        if (result.exit_code != 0 || result.assistant_text.empty()) {
-            messages = snapshot;
-            tg_send(u.chat_id, "(error: Claude did not return a response)");
-            log_line("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
-            std::cout << "\x1b""8" << std::flush;
-            return;
-        }
+		if (result.exit_code != 0 || result.assistant_text.empty()) {
+			messages = snapshot;
+			tg_send(u.chat_id, "(error: Claude did not return a response)");
+			LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
+			std::cout << "\x1b""8" << std::flush;
+			return;
+		}
 
-        tg_send(u.chat_id, result.assistant_text);
-        log_line("remote-control tx user=" + std::to_string(u.user_id)
-                 + " out=" + std::to_string(result.output_tokens));
-        std::cout << "\x1b""8" << std::flush;
-    }
+		tg_send(u.chat_id, result.assistant_text);
+		LogLine("remote-control tx user=" + std::to_string(u.user_id)
+				 + " out=" + std::to_string(result.output_tokens));
+		std::cout << "\x1b""8" << std::flush;
+	}
 
-    telegram::Client             client_;
-    std::unordered_set<int64_t>  allowed_;
-    int64_t                      primary_user_id_ = 0;
-    bool                         allow_destructive_ = false;
-    Auth                         auth_;
-    std::string                  custom_system_;
-    std::string                  cfg_model_;
-    int                          cfg_max_tokens_;
-    std::mutex&                  repl_mutex_;
-    std::map<int64_t, json>      user_messages_;
-    std::atomic<bool>            running_ { false };
-    std::thread                  poller_;
+	telegram::Client             fClient;
+	std::unordered_set<int64_t>  fAllowed;
+	int64_t                      fPrimaryUserId = 0;
+	bool                         fAllowDestructive = false;
+	Auth                         fAuth;
+	std::string                  fCustomSystem;
+	std::string                  fCfgModel;
+	int                          fCfgMaxTokens;
+	std::mutex&                  fReplMutex;
+	std::map<int64_t, json>      fUserMessages;
+	std::atomic<bool>            fRunning { false };
+	std::thread                  fPoller;
 };
 
 // Break a libedit line into shell-style tokens so a drop of one
@@ -2544,33 +2535,33 @@ private:
 // globbing. Tracker drops arrive as absolute POSIX paths so the
 // simple cases cover the real workflow.
 static std::vector<std::string> shell_tokenize(const std::string& s) {
-    std::vector<std::string> out;
-    std::string cur;
-    char quote = 0;
-    bool in_tok = false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = s[i];
-        if (quote) {
-            if (c == quote) { quote = 0; }
-            else            { cur += c; }
-            in_tok = true;
-            continue;
-        }
-        if (c == '"' || c == '\'') { quote = c; in_tok = true; continue; }
-        if (c == '\\' && i + 1 < s.size()) {
-            cur += s[++i];
-            in_tok = true;
-            continue;
-        }
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            if (in_tok) { out.push_back(std::move(cur)); cur.clear(); in_tok = false; }
-            continue;
-        }
-        cur += c;
-        in_tok = true;
-    }
-    if (in_tok) out.push_back(std::move(cur));
-    return out;
+	std::vector<std::string> out;
+	std::string cur;
+	char quote = 0;
+	bool in_tok = false;
+	for (size_t i = 0; i < s.size(); ++i) {
+		char c = s[i];
+		if (quote) {
+			if (c == quote) { quote = 0; }
+			else            { cur += c; }
+			in_tok = true;
+			continue;
+		}
+		if (c == '"' || c == '\'') { quote = c; in_tok = true; continue; }
+		if (c == '\\' && i + 1 < s.size()) {
+			cur += s[++i];
+			in_tok = true;
+			continue;
+		}
+		if (std::isspace(static_cast<unsigned char>(c))) {
+			if (in_tok) { out.push_back(std::move(cur)); cur.clear(); in_tok = false; }
+			continue;
+		}
+		cur += c;
+		in_tok = true;
+	}
+	if (in_tok) out.push_back(std::move(cur));
+	return out;
 }
 
 // True if the line is a drop from Tracker: one or more tokens,
@@ -2581,474 +2572,474 @@ static std::vector<std::string> shell_tokenize(const std::string& s) {
 
 // Returns true when the process is running inside an SSH session.
 // The SSH daemon always exports at least one of these variables.
-static bool is_ssh_session() {
-    return std::getenv("SSH_CLIENT")     != nullptr
-        || std::getenv("SSH_TTY")        != nullptr
-        || std::getenv("SSH_CONNECTION") != nullptr;
+static bool IsSshSession() {
+	return std::getenv("SSH_CLIENT")     != nullptr
+		|| std::getenv("SSH_TTY")        != nullptr
+		|| std::getenv("SSH_CONNECTION") != nullptr;
 }
 
-static bool line_is_path_drop(const std::string& line,
-                              std::vector<std::string>& out_abs_paths) {
-    auto tokens = shell_tokenize(line);
-    if (tokens.empty()) return false;
-    std::vector<std::string> resolved;
-    resolved.reserve(tokens.size());
-    for (const auto& t : tokens) {
-        if (t.empty() || t.front() != '/') return false;
-        struct stat st;
-        if (stat(t.c_str(), &st) != 0) return false;
-        char abs[PATH_MAX];
-        const char* use = realpath(t.c_str(), abs) ? abs : t.c_str();
-        resolved.emplace_back(use);
-    }
-    out_abs_paths = std::move(resolved);
-    return true;
+static bool LineIsPathDrop(const std::string& line,
+							  std::vector<std::string>& out_abs_paths) {
+	auto tokens = shell_tokenize(line);
+	if (tokens.empty()) return false;
+	std::vector<std::string> resolved;
+	resolved.reserve(tokens.size());
+	for (const auto& t : tokens) {
+		if (t.empty() || t.front() != '/') return false;
+		struct stat st;
+		if (stat(t.c_str(), &st) != 0) return false;
+		char abs[PATH_MAX];
+		const char* use = realpath(t.c_str(), abs) ? abs : t.c_str();
+		resolved.emplace_back(use);
+	}
+	out_abs_paths = std::move(resolved);
+	return true;
 }
 
 // Compose the "Files attached:" preamble block the same way the
 // one-shot path does, so drops and --attach produce the same shape
 // of content for Claude to reason about.
-static std::string compose_attachment_preamble(const std::vector<std::string>& paths) {
-    if (paths.empty()) return {};
-    std::string s = "Files attached to this session:\n";
-    for (const auto& p : paths) { s += "- "; s += p; s += '\n'; }
-    s += '\n';
-    return s;
+static std::string ComposeAttachmentPreamble(const std::vector<std::string>& paths) {
+	if (paths.empty()) return {};
+	std::string s = "Files attached to this session:\n";
+	for (const auto& p : paths) { s += "- "; s += p; s += '\n'; }
+	s += '\n';
+	return s;
 }
 
 // Dim `[attached: a, b, +N more]` line shown after a successful
 // --attach or drop. Keeps the list short on narrow terminals.
-static std::string format_attached_line(const std::vector<std::string>& paths) {
-    std::string shown;
-    for (size_t i = 0; i < paths.size() && i < 3; ++i) {
-        if (i > 0) shown += ", ";
-        shown += paths[i];
-    }
-    if (paths.size() > 3) {
-        shown += ", +" + std::to_string(paths.size() - 3) + " more";
-    }
-    return "[attached: " + shown + "]";
+static std::string FormatAttachedLine(const std::vector<std::string>& paths) {
+	std::string shown;
+	for (size_t i = 0; i < paths.size() && i < 3; ++i) {
+		if (i > 0) shown += ", ";
+		shown += paths[i];
+	}
+	if (paths.size() > 3) {
+		shown += ", +" + std::to_string(paths.size() - 3) + " more";
+	}
+	return "[attached: " + shown + "]";
 }
 
-int interactive_loop(const Auth& initial_auth, const Config& cfg,
-                     const std::string& initial_model, int max_tokens,
-                     const std::string& custom_system, const json& prices, bool resume,
-                     const std::string& resume_name,
-                     const std::string& initial_message,
-                     std::vector<std::string> initial_attachments) {
-    InterruptGuard interrupt_guard;
-    json messages = json::array();
-    std::string model = initial_model;
+int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
+					 const std::string& initial_model, int max_tokens,
+					 const std::string& custom_system, const json& prices, bool resume,
+					 const std::string& resume_name,
+					 const std::string& initial_message,
+					 std::vector<std::string> initial_attachments) {
+	InterruptGuard interrupt_guard;
+	json messages = json::array();
+	std::string model = initial_model;
 
-    repl::init(paths::repl_history_path());
+	repl::Init(paths::ReplHistoryPath());
 
-    commands::load(paths::config_dir() + "/commands");
-    std::vector<std::string> all_slash = {
-        "/help", "/clear", "/model", "/compact", "/usage",
-        "/todos", "/memory", "/stats", "/open", "/notify",
-        "/remote-control", "/ludicrous", "/exit", "/quit",
-    };
-    for (const auto& c : commands::names()) all_slash.push_back("/" + c);
-    repl::set_slash_commands(all_slash);
+	commands::Load(paths::ConfigDir() + "/commands");
+	std::vector<std::string> all_slash = {
+		"/help", "/clear", "/model", "/compact", "/usage",
+		"/todos", "/memory", "/stats", "/open", "/notify",
+		"/remote-control", "/ludicrous", "/exit", "/quit",
+	};
+	for (const auto& c : commands::Names()) all_slash.push_back("/" + c);
+	repl::SetSlashCommands(all_slash);
 
-    // Mutable copy of the initial auth so we can refresh tokens
-    // in-place before each turn without touching the caller's
-    // reference.
-    Auth auth = initial_auth;
+	// Mutable copy of the initial auth so we can refresh tokens
+	// in-place before each turn without touching the caller's
+	// reference.
+	Auth auth = initial_auth;
 
-    hooks::fire(hooks::Event::SessionStart, json::object());
-    stats::record_session();
-    log_line("session start (model=" + model + ")");
+	hooks::Fire(hooks::Event::SessionStart, json::object());
+	stats::RecordSession();
+	LogLine("session start (model=" + model + ")");
 
-    int turn_count         = 0;
-    int session_input      = 0;
-    int session_output     = 0;
+	int turn_count         = 0;
+	int session_input      = 0;
+	int session_output     = 0;
 
-    // Notification state — start from config, toggleable at runtime
-    // via `/notify on|off|<seconds>`. Local copies so the user can
-    // experiment without rewriting config.json.
-    bool   notify_enabled       = cfg.notify_enabled;
-    double notify_min_duration  = cfg.notify_min_duration_sec;
+	// Notification state — start from config, toggleable at runtime
+	// via `/notify on|off|<seconds>`. Local copies so the user can
+	// experiment without rewriting config.json.
+	bool   notify_enabled       = cfg.notify_enabled;
+	double notify_min_duration  = cfg.notify_min_duration_sec;
 
-    // Auto-compact thresholds. context_window resolves to the
-    // model-specific cap on first use (handled inside the loop so
-    // a `/model` swap mid-session picks up the new window).
-    const double compact_auto_threshold = cfg.compact_auto_threshold;
-    const int    compact_window_override = cfg.compact_context_window;
+	// Auto-compact thresholds. context_window resolves to the
+	// model-specific cap on first use (handled inside the loop so
+	// a `/model` swap mid-session picks up the new window).
+	const double compact_auto_threshold = cfg.compact_auto_threshold;
+	const int    compact_window_override = cfg.compact_context_window;
 
-    if (resume) {
-        if (auto loaded = load_history(resume_name); loaded && loaded->is_array()) {
-            messages = *loaded;
-            const std::string hist_path = resume_name.empty()
-                ? paths::history_path()
-                : paths::named_history_path(resume_name);
-            std::cout << tui::meta("[resumed " + std::to_string(messages.size())
-                                   + " messages from " + hist_path + "]")
-                      << "\n";
-        } else {
-            const std::string hist_path = resume_name.empty()
-                ? paths::history_path()
-                : paths::named_history_path(resume_name);
-            std::cout << tui::meta("[no prior session to resume at " + hist_path + "]")
-                      << "\n";
-        }
-    }
+	if (resume) {
+		if (auto loaded = load_history(resume_name); loaded && loaded->is_array()) {
+			messages = *loaded;
+			const std::string hist_path = resume_name.empty()
+				? paths::HistoryPath()
+				: paths::NamedHistoryPath(resume_name);
+			std::cout << tui::Meta("[resumed " + std::to_string(messages.size())
+								   + " messages from " + hist_path + "]")
+					  << "\n";
+		} else {
+			const std::string hist_path = resume_name.empty()
+				? paths::HistoryPath()
+				: paths::NamedHistoryPath(resume_name);
+			std::cout << tui::Meta("[no prior session to resume at " + hist_path + "]")
+					  << "\n";
+		}
+	}
 
-    std::cout << tui::bold("Claude CLI interactive mode") << tui::dim(" (model: " + model + ")") << ".\n"
-              << tui::dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
-              << tui::dim(is_ssh_session()
-                  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
-                  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
+	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
+			  << tui::Dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
+			  << tui::Dim(IsSshSession()
+				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
+				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
 
-    // Shared mutex between the REPL main thread and an optional
-    // RemoteControl poller thread. When /remote-control is toggled
-    // on, the poller grabs this before each send_with_tools call
-    // so it can't run concurrently with whatever the REPL is
-    // doing. The REPL itself doesn't lock it (there's no other
-    // thread to race with when /remote-control is off), but the
-    // lock is cheap to acquire the rare times it matters.
-    std::mutex remote_mutex;
-    std::unique_ptr<RemoteControl> remote;
+	// Shared mutex between the REPL main thread and an optional
+	// RemoteControl poller thread. When /remote-control is toggled
+	// on, the poller grabs this before each SendWithTools call
+	// so it can't run concurrently with whatever the REPL is
+	// doing. The REPL itself doesn't lock it (there's no other
+	// thread to race with when /remote-control is off), but the
+	// lock is cheap to acquire the rare times it matters.
+	std::mutex remote_mutex;
+	std::unique_ptr<RemoteControl> remote;
 
-    // Compose the status row including a green "Remote Control
-    // active" right-label whenever the remote poller is running.
-    // Mute state gets an appended "· muted" marker in yellow.
-    auto compose_status = [&]() {
-        std::string right;
-        if (g_ludicrous_mode.load()) {
-            right = tui::yellow("\xE2\x9A\xA1 LUDICROUS");
-        }
-        if (remote && remote->running()) {
-            if (!right.empty()) right += tui::dim("  \xC2\xB7  ");
-            right += tui::green("Remote Control active");
-            if (g_telegram_muted.load()) {
-                right += tui::yellow(" \xC2\xB7 muted");
-            }
-        }
-        return format_status_row(model, turn_count, session_input,
-                                 session_output, max_tokens, right);
-    };
+	// Compose the status row including a green "Remote Control
+	// active" right-label whenever the remote poller is running.
+	// Mute state gets an appended "· muted" marker in yellow.
+	auto compose_status = [&]() {
+		std::string right;
+		if (g_ludicrous_mode.load()) {
+			right = tui::Yellow("\xE2\x9A\xA1 LUDICROUS");
+		}
+		if (remote && remote->running()) {
+			if (!right.empty()) right += tui::Dim("  \xC2\xB7  ");
+			right += tui::Green("Remote Control active");
+			if (g_telegram_muted.load()) {
+				right += tui::Yellow(" \xC2\xB7 muted");
+			}
+		}
+		return FormatStatusRow(model, turn_count, session_input,
+								 session_output, max_tokens, right);
+	};
 
-    // Install the fixed-bottom status frame after the welcome text
-    // so the scrolling welcome lines live in the chat history
-    // region. RAII teardown happens in the StatusFrame guard below.
-    tui::install_status_bar(compose_status());
-    struct StatusFrameGuard {
-        ~StatusFrameGuard() { tui::teardown_status_bar(); }
-    } status_frame_guard;
+	// Install the fixed-bottom status frame after the welcome text
+	// so the scrolling welcome lines live in the chat history
+	// region. RAII teardown happens in the StatusFrame guard below.
+	tui::InstallStatusBar(compose_status());
+	struct StatusFrameGuard {
+		~StatusFrameGuard() { tui::TeardownStatusBar(); }
+	} status_frame_guard;
 
-    std::string pending = initial_message;
+	std::string pending = initial_message;
 
-    // Paths announced to Claude on the next outgoing user turn.
-    // Starts with any --attach values and grows each time the user
-    // drops a file from Tracker onto the Terminal window. Drained
-    // exactly once per turn, then refills from subsequent drops.
-    std::vector<std::string> pending_paths = std::move(initial_attachments);
+	// Paths announced to Claude on the next outgoing user turn.
+	// Starts with any --attach values and grows each time the user
+	// drops a file from Tracker onto the Terminal window. Drained
+	// exactly once per turn, then refills from subsequent drops.
+	std::vector<std::string> pending_paths = std::move(initial_attachments);
 
-    // URLs seen in assistant replies so far this session. Populated
-    // after each turn by extract_urls; consumed by `/open` for
-    // numbered launches.
-    std::vector<std::string> session_urls;
+	// URLs seen in assistant replies so far this session. Populated
+	// after each turn by ExtractUrls; consumed by `/open` for
+	// numbered launches.
+	std::vector<std::string> session_urls;
 
-    while (true) {
-        // Resize events rebuild the scroll region and redraw the
-        // fixed rows so the frame stays correct after the user
-        // drags the terminal window. Also unconditionally show
-        // the cursor in case a previous interrupt left it hidden
-        // — cheap, runs once per prompt.
-        if (tui::consume_resize_pending()) tui::redraw_status_bar();
-        tui::show_cursor();
-        tui::position_cursor_for_input();
+	while (true) {
+		// Resize events rebuild the scroll region and redraw the
+		// fixed rows so the frame stays correct after the user
+		// drags the terminal window. Also unconditionally show
+		// the cursor in case a previous interrupt left it hidden
+		// — cheap, runs once per prompt.
+		if (tui::ConsumeResizePending()) tui::RedrawStatusBar();
+		tui::ShowCursor();
+		tui::PositionCursorForInput();
 
-        std::string line;
-        if (!pending.empty()) {
-            line    = std::move(pending);
-            pending.clear();
-            tui::position_cursor_for_chat();
-            std::cout << tui::user_prompt() << line << "\n";
-        } else {
-            if (!repl::read_message(tui::user_prompt(),
-                                    tui::continuation_prompt(),
-                                    line)) {
-                std::cout << "\n";
-                break;
-            }
-            tui::clear_input_row();
-            // libedit drew the prompt on the fixed input row and
-            // echoed a newline on enter. Push the cursor back
-            // into the scroll region and replay the submitted
-            // line so the chat history preserves a record of
-            // the user's message.
-            tui::position_cursor_for_chat();
-            if (!line.empty()) {
-                std::cout << tui::user_prompt() << line << "\n";
-            }
-        }
+		std::string line;
+		if (!pending.empty()) {
+			line    = std::move(pending);
+			pending.clear();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n";
+		} else {
+			if (!repl::ReadMessage(tui::UserPrompt(),
+									tui::ContinuationPrompt(),
+									line)) {
+				std::cout << "\n";
+				break;
+			}
+			tui::ClearInputRow();
+			// libedit drew the prompt on the fixed input row and
+			// echoed a newline on enter. Push the cursor back
+			// into the scroll region and replay the submitted
+			// line so the chat history preserves a Record of
+			// the user's message.
+			tui::PositionCursorForChat();
+			if (!line.empty()) {
+				std::cout << tui::UserPrompt() << line << "\n";
+			}
+		}
 
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
-            line.pop_back();
-        }
-        if (line.empty()) continue;
+		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+			line.pop_back();
+		}
+		if (line.empty()) continue;
 
-        // Drag-and-drop from Tracker: Haiku's Terminal inserts the
-        // dropped file's POSIX path into the active input line (quoted
-        // if it contains spaces). If libedit hands back a line that's
-        // purely one-or-more absolute paths that all exist on disk,
-        // treat it as an attachment event rather than a prompt: stash
-        // the paths, acknowledge with a dim meta line, and wait for
-        // the user's actual question. The leading-slash requirement
-        // avoids swallowing bare filenames like "main.cpp" that a user
-        // might type as a literal question.
-        {
-            std::vector<std::string> dropped;
-            if (line_is_path_drop(line, dropped)) {
-                for (auto& p : dropped) pending_paths.push_back(std::move(p));
-                std::cout << tui::meta(format_attached_line(pending_paths)) << "\n";
-                continue;
-            }
-        }
+		// Drag-and-drop from Tracker: Haiku's Terminal inserts the
+		// dropped file's POSIX path into the active input line (quoted
+		// if it contains spaces). If libedit hands back a line that's
+		// purely one-or-more absolute paths that all exist on disk,
+		// treat it as an attachment event rather than a prompt: stash
+		// the paths, acknowledge with a dim meta line, and wait for
+		// the user's actual question. The leading-slash requirement
+		// avoids swallowing bare filenames like "main.cpp" that a user
+		// might type as a literal question.
+		{
+			std::vector<std::string> dropped;
+			if (LineIsPathDrop(line, dropped)) {
+				for (auto& p : dropped) pending_paths.push_back(std::move(p));
+				std::cout << tui::Meta(FormatAttachedLine(pending_paths)) << "\n";
+				continue;
+			}
+		}
 
-        bool already_recorded = false;
-        if (!line.empty() && line.front() == '/') {
-            // /remote-control toggles the background Telegram
-            // poller on and off. dispatch_slash doesn't know about
-            // it because the REPL's own telegram mode is a separate
-            // subcommand with its own entry point; here we own the
-            // lifecycle directly.
-            //
-            // Parse the head of the line as `/remote-control`
-            // followed by an optional ` on` / ` off` / ` status`
-            // suffix so users can type any of them without being
-            // too picky about exact whitespace.
-            auto starts_with = [](const std::string& s, const char* prefix) {
-                const size_t n = std::strlen(prefix);
-                return s.size() >= n && s.compare(0, n, prefix) == 0;
-            };
-            if (starts_with(line, "/remote-control")) {
-                std::string arg;
-                if (line.size() > std::strlen("/remote-control")) {
-                    arg = line.substr(std::strlen("/remote-control"));
-                    // Trim leading / trailing whitespace.
-                    size_t a = 0, b = arg.size();
-                    while (a < b && (arg[a] == ' ' || arg[a] == '\t')) ++a;
-                    while (b > a && (arg[b - 1] == ' ' || arg[b - 1] == '\t')) --b;
-                    arg = arg.substr(a, b - a);
-                }
-                log_line("slash remote-control arg='" + arg + "'");
+		bool already_recorded = false;
+		if (!line.empty() && line.front() == '/') {
+			// /remote-control toggles the background Telegram
+			// poller on and off. DispatchSlash doesn't know about
+			// it because the REPL's own telegram mode is a separate
+			// subcommand with its own entry point; here we own the
+			// lifecycle directly.
+			//
+			// Parse the head of the line as `/remote-control`
+			// followed by an optional ` on` / ` off` / ` status`
+			// suffix so users can type any of them without being
+			// too picky about exact whitespace.
+			auto starts_with = [](const std::string& s, const char* prefix) {
+				const size_t n = std::strlen(prefix);
+				return s.size() >= n && s.compare(0, n, prefix) == 0;
+			};
+			if (starts_with(line, "/remote-control")) {
+				std::string arg;
+				if (line.size() > std::strlen("/remote-control")) {
+					arg = line.substr(std::strlen("/remote-control"));
+					// Trim leading / trailing whitespace.
+					size_t a = 0, b = arg.size();
+					while (a < b && (arg[a] == ' ' || arg[a] == '\t')) ++a;
+					while (b > a && (arg[b - 1] == ' ' || arg[b - 1] == '\t')) --b;
+					arg = arg.substr(a, b - a);
+				}
+				LogLine("slash remote-control arg='" + arg + "'");
 
-                // /remote-control with no arg toggles. Explicit
-                // "on" / "off" force the state.
-                const bool currently_running = remote && remote->running();
-                const bool want_off = (arg == "off")
-                    || (arg.empty() && currently_running);
-                const bool want_on  = (arg == "on")
-                    || (arg.empty() && !currently_running);
+				// /remote-control with no arg toggles. Explicit
+				// "on" / "off" force the state.
+				const bool currently_running = remote && remote->running();
+				const bool want_off = (arg == "off")
+					|| (arg.empty() && currently_running);
+				const bool want_on  = (arg == "on")
+					|| (arg.empty() && !currently_running);
 
-                if (want_off) {
-                    if (currently_running) {
-                        remote->stop();
-                        std::cout << tui::meta("[remote control: telegram poller stopped]") << "\n";
-                        log_line("remote control stopped from /remote-control" +
-                                 (arg.empty() ? std::string(" (toggle)") : std::string(" off")));
-                        tui::set_status_bar(compose_status());
-                    } else {
-                        std::cout << tui::meta("[remote control is not active]") << "\n";
-                    }
-                } else if (want_on) {
-                    if (currently_running) {
-                        std::cout << tui::meta("[remote control already active]") << "\n";
-                    } else {
-                        std::string why;
-                        if (!RemoteControl::config_is_valid(cfg, &why)) {
-                            std::cout << tui::meta("[remote control error: " + why + "]") << "\n";
-                            log_line("remote control config invalid: " + why);
-                        } else {
-                            try {
-                                if (!remote) {
-                                    remote = std::make_unique<RemoteControl>(
-                                        cfg, auth, custom_system, remote_mutex);
-                                }
-                                if (remote->start()) {
-                                    std::cout << tui::meta("[remote control: telegram poller started]") << "\n";
-                                    log_line("remote control started from /remote-control");
-                                    tui::set_status_bar(compose_status());
-                                } else {
-                                    std::cout << tui::meta("[remote control: start() returned false — already running?]") << "\n";
-                                }
-                            } catch (const std::exception& e) {
-                                std::cout << tui::meta(std::string("[remote control error: ") + e.what() + "]") << "\n";
-                                log_line(std::string("remote control construction failed: ") + e.what());
-                            }
-                        }
-                    }
-                } else {
-                    std::cout << tui::meta("[remote control: unknown argument '" + arg
-                                           + "' — use /remote-control, /remote-control on, or /remote-control off]") << "\n";
-                }
-                repl::record(line);
-                continue;
-            }
+				if (want_off) {
+					if (currently_running) {
+						remote->Stop();
+						std::cout << tui::Meta("[remote control: telegram poller stopped]") << "\n";
+						LogLine("remote control stopped from /remote-control" +
+								 (arg.empty() ? std::string(" (toggle)") : std::string(" off")));
+						tui::SetStatusBar(compose_status());
+					} else {
+						std::cout << tui::Meta("[remote control is not active]") << "\n";
+					}
+				} else if (want_on) {
+					if (currently_running) {
+						std::cout << tui::Meta("[remote control already active]") << "\n";
+					} else {
+						std::string why;
+						if (!RemoteControl::config_is_valid(cfg, &why)) {
+							std::cout << tui::Meta("[remote control error: " + why + "]") << "\n";
+							LogLine("remote control config invalid: " + why);
+						} else {
+							try {
+								if (!remote) {
+									remote = std::make_unique<RemoteControl>(
+										cfg, auth, custom_system, remote_mutex);
+								}
+								if (remote->start()) {
+									std::cout << tui::Meta("[remote control: telegram poller started]") << "\n";
+									LogLine("remote control started from /remote-control");
+									tui::SetStatusBar(compose_status());
+								} else {
+									std::cout << tui::Meta("[remote control: start() returned false — already running?]") << "\n";
+								}
+							} catch (const std::exception& e) {
+								std::cout << tui::Meta(std::string("[remote control error: ") + e.what() + "]") << "\n";
+								LogLine(std::string("remote control construction failed: ") + e.what());
+							}
+						}
+					}
+				} else {
+					std::cout << tui::Meta("[remote control: unknown argument '" + arg
+										   + "' — use /remote-control, /remote-control on, or /remote-control off]") << "\n";
+				}
+				repl::Record(line);
+				continue;
+			}
 
-            LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
-                        turn_count, session_input, session_output, messages,
-                        session_urls, notify_enabled, notify_min_duration,
-                        [&]() { tui::set_status_bar(compose_status()); }};
-            std::string expanded;
-            const SlashAction action = dispatch_slash(line, ctx, expanded);
-            repl::record(line);
-            already_recorded = true;
-            if (action == SlashAction::Quit) break;
-            if (action == SlashAction::Continue) continue;
-            if (action == SlashAction::Passthrough) {
-                // Custom command resolved to a prompt; fall through
-                // with the expanded text as the actual user message.
-                line = std::move(expanded);
-            }
-        }
+			LoopCtx ctx{auth, max_tokens, custom_system, prices, model,
+						turn_count, session_input, session_output, messages,
+						session_urls, notify_enabled, notify_min_duration,
+						[&]() { tui::SetStatusBar(compose_status()); }};
+			std::string expanded;
+			const SlashAction action = DispatchSlash(line, ctx, expanded);
+			repl::Record(line);
+			already_recorded = true;
+			if (action == SlashAction::Quit) break;
+			if (action == SlashAction::Continue) continue;
+			if (action == SlashAction::Passthrough) {
+				// Custom command resolved to a prompt; fall through
+				// with the expanded text as the actual user message.
+				line = std::move(expanded);
+			}
+		}
 
-        if (!already_recorded) repl::record(line);
+		if (!already_recorded) repl::Record(line);
 
-        if (hooks::fire(hooks::Event::UserPromptSubmit, json{{"prompt", line}}) == hooks::Outcome::Block) {
-            std::cout << tui::meta("[hook blocked prompt]") << "\n";
-            continue;
-        }
+		if (hooks::Fire(hooks::Event::UserPromptSubmit, json{{"prompt", line}}) == hooks::Outcome::Block) {
+			std::cout << tui::Meta("[hook blocked prompt]") << "\n";
+			continue;
+		}
 
-        // Prepend the accumulated attachment preamble (from --attach
-        // at launch or any drops during the session) silently to the
-        // outgoing API content. The replay and hooks payload keep
-        // only the user's actual typed text.
-        std::string api_content = line;
-        if (!pending_paths.empty()) {
-            api_content = compose_attachment_preamble(pending_paths) + api_content;
-            pending_paths.clear();
-        }
-        const json snapshot = messages;
-        messages.push_back({{"role", "user"}, {"content", api_content}});
+		// Prepend the accumulated attachment preamble (from --attach
+		// at launch or any drops during the session) silently to the
+		// outgoing API content. The replay and hooks payload keep
+		// only the user's actual typed text.
+		std::string api_content = line;
+		if (!pending_paths.empty()) {
+			api_content = ComposeAttachmentPreamble(pending_paths) + api_content;
+			pending_paths.clear();
+		}
+		const json snapshot = messages;
+		messages.push_back({{"role", "user"}, {"content", api_content}});
 
-        std::cout << "\n" << tui::claude_prompt();
-        const auto turn_start = std::chrono::steady_clock::now();
-        const std::string system_for_turn = compose_system(custom_system);
-        // Refresh the OAuth token if it's about to expire so
-        // long-running REPL sessions don't fail mid-conversation.
-        // resolve_auth is cheap — reads credentials.json and
-        // checks the clock; refresh is only attempted when the
-        // current token is within 60 s of expiry.
-        auth = resolve_auth();
-        if (auth.kind == AuthKind::None) {
-            std::cout << "\n" << tui::meta("[error: authentication expired — run /exit and `claude login`]") << "\n";
-            messages = snapshot;
-            continue;
-        }
-        // Hold remote_mutex for the full duration of the local
-        // turn so the RemoteControl poller (if running) can't
-        // interleave its own send_with_tools mid-stream. When
-        // /remote-control is off this is an uncontended lock and
-        // costs effectively nothing.
-        SendResult result;
-        {
-            std::lock_guard<std::mutex> lk(remote_mutex);
-            result = send_with_tools(auth, model, max_tokens, messages, system_for_turn);
-        }
-        const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - turn_start).count();
-        std::cout << "\n";
+		std::cout << "\n" << tui::ClaudePrompt();
+		const auto turn_start = std::chrono::steady_clock::now();
+		const std::string system_for_turn = ComposeSystem(custom_system);
+		// Refresh the OAuth token if it's about to expire so
+		// long-running REPL sessions don't fail mid-conversation.
+		// ResolveAuth is cheap — reads credentials.json and
+		// checks the clock; refresh is only attempted when the
+		// current token is within 60 s of expiry.
+		auth = ResolveAuth();
+		if (auth.kind == AuthKind::None) {
+			std::cout << "\n" << tui::Meta("[error: authentication expired — run /exit and `claude login`]") << "\n";
+			messages = snapshot;
+			continue;
+		}
+		// Hold remote_mutex for the full duration of the local
+		// turn so the RemoteControl poller (if running) can't
+		// interleave its own SendWithTools mid-stream. When
+		// /remote-control is off this is an uncontended lock and
+		// costs effectively nothing.
+		SendResult result;
+		{
+			std::lock_guard<std::mutex> lk(remote_mutex);
+			result = SendWithTools(auth, model, max_tokens, messages, system_for_turn);
+		}
+		const double elapsed = std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - turn_start).count();
+		std::cout << "\n";
 
-        if (result.exit_code != 0) {
-            messages = snapshot;
-            continue;
-        }
+		if (result.exit_code != 0) {
+			messages = snapshot;
+			continue;
+		}
 
-        ++turn_count;
-        session_input  += result.input_tokens;
-        session_output += result.output_tokens;
-        stats::record_turn(result.input_tokens, result.output_tokens);
+		++turn_count;
+		session_input  += result.input_tokens;
+		session_output += result.output_tokens;
+		stats::RecordTurn(result.input_tokens, result.output_tokens);
 
-        // Harvest any URLs Claude mentioned so `/open N` can launch
-        // them later. Dedup in insertion order so the index stays
-        // stable across turns.
-        for (auto& url : notify::extract_urls(result.assistant_text)) {
-            if (std::find(session_urls.begin(), session_urls.end(), url)
-                == session_urls.end()) {
-                session_urls.push_back(std::move(url));
-            }
-        }
+		// Harvest any URLs Claude mentioned so `/open N` can launch
+		// them later. Dedup in insertion order so the index stays
+		// stable across turns.
+		for (auto& url : notify::ExtractUrls(result.assistant_text)) {
+			if (std::find(session_urls.begin(), session_urls.end(), url)
+				== session_urls.end()) {
+				session_urls.push_back(std::move(url));
+			}
+		}
 
-        // Desktop notification for slow turns. The threshold default
-        // (60 s) targets the "I walked away from the laptop" case —
-        // fast replies on a user sitting at the keyboard don't buzz.
-        // Body is the first sentence of the reply so the user can
-        // glance at the notification and know whether to come back.
-        if (notify_enabled && elapsed >= notify_min_duration) {
-            notify::send(
-                notify::pick_playful_title(elapsed),
-                notify::first_sentence(result.assistant_text, 120));
-        }
+		// Desktop notification for slow turns. The threshold default
+		// (60 s) targets the "I walked away from the laptop" case —
+		// fast replies on a user sitting at the keyboard don't buzz.
+		// Body is the first sentence of the reply so the user can
+		// glance at the notification and know whether to come back.
+		if (notify_enabled && elapsed >= notify_min_duration) {
+			notify::Send(
+				notify::PickPlayfulTitle(elapsed),
+				notify::FirstSentence(result.assistant_text, 120));
+		}
 
-        // Auto-compact: if this turn's input-token count crosses
-        // the threshold share of the model's context window, queue
-        // a `/compact` for the next iteration. Setting `pending`
-        // routes through the slash-command path so the existing
-        // compact handler runs (no code duplication). Announced
-        // with a meta line so the user sees why it fired.
-        if (compact_auto_threshold > 0.0) {
-            const int window = detect_context_window(model, compact_window_override);
-            const int trigger = static_cast<int>(window * compact_auto_threshold);
-            if (result.input_tokens >= trigger) {
-                char note[160];
-                std::snprintf(note, sizeof(note),
-                    "[auto-compact: context at %d%% (%d / %d tokens)]",
-                    (result.input_tokens * 100) / window,
-                    result.input_tokens, window);
-                std::cout << tui::meta(note) << "\n";
-                pending = "/compact";
-            }
-        }
+		// Auto-compact: if this turn's input-token count crosses
+		// the threshold share of the model's context window, queue
+		// a `/compact` for the next iteration. Setting `pending`
+		// routes through the slash-command path so the existing
+		// compact handler runs (no code duplication). Announced
+		// with a meta line so the user sees why it fired.
+		if (compact_auto_threshold > 0.0) {
+			const int window = DetectContextWindow(model, compact_window_override);
+			const int trigger = static_cast<int>(window * compact_auto_threshold);
+			if (result.input_tokens >= trigger) {
+				char note[160];
+				std::snprintf(note, sizeof(note),
+					"[auto-compact: context at %d%% (%d / %d tokens)]",
+					(result.input_tokens * 100) / window,
+					result.input_tokens, window);
+				std::cout << tui::Meta(note) << "\n";
+				pending = "/compact";
+			}
+		}
 
-        char status[256];
-        // Append cache info when either creation or read is non-zero
-        // so the user can see caching working without digging into
-        // /stats. " · cache R:N W:N" tail — R = read (near-instant
-        // reuse), W = write (new content, cached for next turn).
-        char cache_tail[64] = {0};
-        const int c_read  = result.cache_read_input_tokens;
-        const int c_write = result.cache_creation_input_tokens;
-        if (c_read > 0 || c_write > 0) {
-            std::snprintf(cache_tail, sizeof(cache_tail),
-                "  \xC2\xB7 cache R:%d W:%d", c_read, c_write);
-        }
-        std::snprintf(status, sizeof(status),
-            "[turn %d  %.1fs  in %d/%d  out %d/%d%s]",
-            turn_count, elapsed,
-            result.input_tokens, session_input,
-            result.output_tokens, session_output,
-            cache_tail);
-        std::cout << tui::meta(status) << "\n";
-        log_line("turn " + std::to_string(turn_count)
-                 + " model=" + model
-                 + " in=" + std::to_string(result.input_tokens)
-                 + " out=" + std::to_string(result.output_tokens)
-                 + " cache_r=" + std::to_string(c_read)
-                 + " cache_w=" + std::to_string(c_write));
+		char status[256];
+		// Append cache info when either creation or read is non-zero
+		// so the user can see caching working without digging into
+		// /stats. " · cache R:N W:N" tail — R = read (near-instant
+		// reuse), W = write (new content, cached for next turn).
+		char cache_tail[64] = {0};
+		const int c_read  = result.cache_read_input_tokens;
+		const int c_write = result.cache_creation_input_tokens;
+		if (c_read > 0 || c_write > 0) {
+			std::snprintf(cache_tail, sizeof(cache_tail),
+				"  \xC2\xB7 cache R:%d W:%d", c_read, c_write);
+		}
+		std::snprintf(status, sizeof(status),
+			"[turn %d  %.1fs  in %d/%d  out %d/%d%s]",
+			turn_count, elapsed,
+			result.input_tokens, session_input,
+			result.output_tokens, session_output,
+			cache_tail);
+		std::cout << tui::Meta(status) << "\n";
+		LogLine("turn " + std::to_string(turn_count)
+				 + " model=" + model
+				 + " in=" + std::to_string(result.input_tokens)
+				 + " out=" + std::to_string(result.output_tokens)
+				 + " cache_r=" + std::to_string(c_read)
+				 + " cache_w=" + std::to_string(c_write));
 
-        // Push the updated session counters into the fixed-bottom
-        // status row so the user sees the running totals without
-        // having to pull up /usage. Uses compose_status so the
-        // "Remote Control active" label reflects the current
-        // toggle state.
-        tui::set_status_bar(compose_status());
+		// Push the updated session counters into the fixed-bottom
+		// status row so the user sees the running totals without
+		// having to pull up /usage. Uses compose_status so the
+		// "Remote Control active" label reflects the current
+		// toggle state.
+		tui::SetStatusBar(compose_status());
 
-        // Mirror the local turn to the primary Telegram chat so
-        // the phone-side user sees the conversation in real time
-        // when /remote-control is active.
-        if (remote && remote->running()) {
-            remote->mirror_to_primary(line, result.assistant_text);
-        }
+		// Mirror the local turn to the primary Telegram chat so
+		// the phone-side user sees the conversation in real time
+		// when /remote-control is active.
+		if (remote && remote->running()) {
+			remote->mirror_to_primary(line, result.assistant_text);
+		}
 
-        save_history(messages, model, resume_name);
+		SaveHistory(messages, model, resume_name);
 
-        hooks::fire(hooks::Event::Stop, json{{"assistant_text", result.assistant_text}});
-    }
-    return 0;
+		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistant_text}});
+	}
+	return 0;
 }
 
 } // namespace
@@ -3060,953 +3051,957 @@ int interactive_loop(const Auth& initial_auth, const Config& cfg,
 // so the buttons stay readable in Telegram.
 std::vector<std::pair<std::string, std::string>>
 extract_numbered_options(const std::string& text) {
-    std::vector<std::pair<std::string, std::string>> out;
-    std::istringstream iss(text);
-    std::string        line;
-    while (std::getline(iss, line)) {
-        size_t i = 0;
-        while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
-        if (i == 0 || i > 2)                       continue;    // need 1-2 digits
-        if (i >= line.size() || line[i] != '.')    continue;
-        if (i + 1 >= line.size() || line[i + 1] != ' ') continue;
-        std::string number = line.substr(0, i);
-        std::string label  = line.substr(i + 2);
-        // Truncate the label to fit inside a Telegram button cleanly.
-        if (label.size() > 28) label = label.substr(0, 27) + "\xE2\x80\xA6"; // …
-        out.emplace_back(std::move(number), std::move(label));
-    }
-    if (out.size() < 2) return {};
-    return out;
+	std::vector<std::pair<std::string, std::string>> out;
+	std::istringstream iss(text);
+	std::string        line;
+	while (std::getline(iss, line)) {
+		size_t i = 0;
+		while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
+		if (i == 0 || i > 2)                       continue;    // need 1-2 digits
+		if (i >= line.size() || line[i] != '.')    continue;
+		if (i + 1 >= line.size() || line[i + 1] != ' ') continue;
+		std::string number = line.substr(0, i);
+		std::string label  = line.substr(i + 2);
+		// Truncate the label to fit inside a Telegram button cleanly.
+		if (label.size() > 28) label = label.substr(0, 27) + "\xE2\x80\xA6"; // …
+		out.emplace_back(std::move(number), std::move(label));
+	}
+	if (out.size() < 2) return {};
+	return out;
 }
 
-int run_telegram_bridge(const Config& cfg) {
-    if (!cfg.telegram.is_object()) {
-        std::cerr << "error: config.telegram is missing from config.json\n";
-        return 1;
-    }
-    const std::string token = cfg.telegram.value("bot_token", std::string{});
-    if (token.empty()) {
-        std::cerr << "error: config.telegram.bot_token is not set\n";
-        return 1;
-    }
+int RunTelegramBridge(const Config& cfg) {
+	if (!cfg.telegram.is_object()) {
+		std::cerr << "error: config.telegram is missing from config.json\n";
+		return 1;
+	}
+	const std::string token = cfg.telegram.value("bot_token", std::string{});
+	if (token.empty()) {
+		std::cerr << "error: config.telegram.bot_token is not set\n";
+		return 1;
+	}
 
-    std::unordered_set<int64_t> allowed;
-    if (cfg.telegram.contains("allowed_user_ids")
-        && cfg.telegram["allowed_user_ids"].is_array()) {
-        for (const auto& v : cfg.telegram["allowed_user_ids"]) {
-            if (v.is_number_integer()) allowed.insert(v.get<int64_t>());
-        }
-    }
-    if (allowed.empty()) {
-        std::cerr << "error: config.telegram.allowed_user_ids must list "
-                     "at least one Telegram user ID\n";
-        return 1;
-    }
+	std::unordered_set<int64_t> allowed;
+	if (cfg.telegram.contains("fAlloweduser_ids")
+		&& cfg.telegram["fAlloweduser_ids"].is_array()) {
+		for (const auto& v : cfg.telegram["fAlloweduser_ids"]) {
+			if (v.is_number_integer()) allowed.insert(v.get<int64_t>());
+		}
+	}
+	if (allowed.empty()) {
+		std::cerr << "error: config.telegram.fAlloweduser_ids must list "
+					 "at least one Telegram user ID\n";
+		return 1;
+	}
 
-    const bool allow_destructive =
-        cfg.telegram.value("allow_destructive_tools", false);
+	const bool allow_destructive =
+		cfg.telegram.value("fAllowDestructivetools", false);
 
-    Auth auth = resolve_auth();
-    if (auth.kind == AuthKind::None) {
-        std::cerr << "error: no authentication configured. Run `claude login` "
-                     "or set ANTHROPIC_API_KEY before `claude telegram`.\n";
-        return 1;
-    }
+	Auth auth = ResolveAuth();
+	if (auth.kind == AuthKind::None) {
+		std::cerr << "error: no authentication configured. Run `claude login` "
+					 "or set ANTHROPIC_API_KEY before `claude telegram`.\n";
+		return 1;
+	}
 
-    telegram::Client client(token);
+	telegram::Client client(token);
 
-    InterruptGuard interrupt_guard;
+	InterruptGuard interrupt_guard;
 
-    std::cout << tui::bold("Telegram bridge active") << "\n"
-              << tui::dim("  authorized user ids: ");
-    bool first = true;
-    for (const auto& id : allowed) {
-        if (!first) std::cout << ",";
-        std::cout << " " << id;
-        first = false;
-    }
-    std::cout << "\n"
-              << tui::dim(allow_destructive
-                          ? "  destructive tools: ALLOWED"
-                          : "  destructive tools: blocked (Bash/Write/Edit/MCP)")
-              << "\n"
-              << tui::dim("  local prompt below; also polling Telegram "
-                          "in the background")
-              << "\n\n";
+	std::cout << tui::Bold("Telegram bridge active") << "\n"
+			  << tui::Dim("  authorized user ids: ");
+	bool first = true;
+	for (const auto& id : allowed) {
+		if (!first) std::cout << ",";
+		std::cout << " " << id;
+		first = false;
+	}
+	std::cout << "\n"
+			  << tui::Dim(allow_destructive
+						  ? "  destructive tools: ALLOWED"
+						  : "  destructive tools: blocked (Bash/Write/Edit/MCP)")
+			  << "\n"
+			  << tui::Dim("  local prompt below; also polling Telegram "
+						  "in the background")
+			  << "\n\n";
 
-    log_line("telegram bridge start (destructive="
-             + std::string(allow_destructive ? "yes" : "no") + ")");
+	LogLine("telegram bridge start (destructive="
+			 + std::string(allow_destructive ? "yes" : "no") + ")");
 
-    // The "primary" allowed user ID is the one local input mirrors
-    // to, so typing locally appears in the same Telegram chat as
-    // your phone-side conversation and shares the same rolling
-    // history. Pick the smallest ID deterministically rather than
-    // relying on set iteration order.
-    int64_t primary_user_id = 0;
-    for (const auto& id : allowed) {
-        if (primary_user_id == 0 || id < primary_user_id) primary_user_id = id;
-    }
+	// The "primary" allowed user ID is the one local input mirrors
+	// to, so typing locally appears in the same Telegram chat as
+	// your phone-side conversation and shares the same rolling
+	// history. Pick the smallest ID deterministically rather than
+	// relying on set iteration order.
+	int64_t primary_user_id = 0;
+	for (const auto& id : allowed) {
+		if (primary_user_id == 0 || id < primary_user_id) primary_user_id = id;
+	}
 
-    // Mutable runtime state for the shared LoopCtx passed into
-    // dispatch_slash — /model, /compact, and /usage all need to
-    // mutate or read this. active_model replaces cfg.model in the
-    // worker so /model NAME from the bridge prompt actually swaps
-    // the model for subsequent turns (local or Telegram).
-    std::string active_model  = cfg.model;
-    int         turn_count    = 0;
-    int         session_input = 0;
-    int         session_output= 0;
+	// Mutable runtime state for the shared LoopCtx passed into
+	// DispatchSlash — /model, /compact, and /usage all need to
+	// mutate or read this. fActivemodel replaces cfg.model in the
+	// worker so /model NAME from the bridge prompt actually swaps
+	// the model for subsequent turns (local or Telegram).
+	std::string fActivemodel  = cfg.model;
+	int         turn_count    = 0;
+	int         session_input = 0;
+	int         session_output= 0;
 
-    // Local-side /open needs a URL list too. The bridge doesn't
-    // populate it from Telegram-bound replies (a phone user hitting
-    // /open would launch a browser on the dev machine, which is
-    // pointless), but the operator at the laptop can still use
-    // /open on URLs they type or paste into the local prompt.
-    std::vector<std::string> telegram_session_urls;
+	// Local-side /open needs a URL list too. The bridge doesn't
+	// populate it from Telegram-bound replies (a phone user hitting
+	// /open would launch a browser on the dev machine, which is
+	// pointless), but the operator at the laptop can still use
+	// /open on URLs they type or paste into the local prompt.
+	std::vector<std::string> telegram_session_urls;
 
-    // Notification toggles are session-local in the bridge too, so
-    // `/notify on|off` from the laptop prompt lives for the bridge's
-    // lifetime. Desktop alerts only fire from the REPL path; the
-    // bridge relies on Telegram itself to notify the phone.
-    bool   telegram_notify_enabled      = cfg.notify_enabled;
-    double telegram_notify_min_duration = cfg.notify_min_duration_sec;
+	// Notification toggles are session-local in the bridge too, so
+	// `/notify on|off` from the laptop prompt lives for the bridge's
+	// lifetime. Desktop alerts only Fire from the REPL path; the
+	// bridge relies on Telegram itself to notify the phone.
+	bool   telegram_notify_enabled      = cfg.notify_enabled;
+	double telegram_notify_min_duration = cfg.notify_min_duration_sec;
 
-    std::mutex              process_mutex;
-    std::map<int64_t, json> user_messages;
+	std::mutex              process_mutex;
+	std::map<int64_t, json> user_messages;
 
-    // Start every bridge session unmuted — the flag is process-scoped
-    // so a previous in-process toggle could otherwise leak into the
-    // next run_telegram_bridge invocation if we ever call it twice.
-    g_telegram_muted.store(false);
+	// Start every bridge session unmuted — the flag is process-scoped
+	// so a previous in-process toggle could otherwise leak into the
+	// next RunTelegramBridge invocation if we ever call it twice.
+	g_telegram_muted.store(false);
 
-    // Compose and install the fixed-bottom status row for the
-    // bridge. Right label is "Remote Control active" in green so
-    // the operator always sees that the bridge is live, with
-    // "· muted" appended in yellow when /mute is toggled on.
-    auto compose_bridge_status = [&]() {
-        std::string label = tui::green("Remote Control active");
-        if (g_ludicrous_mode.load()) {
-            label = tui::yellow("\xE2\x9A\xA1 LUDICROUS") + tui::dim("  \xC2\xB7  ") + label;
-        }
-        if (g_telegram_muted.load()) {
-            label += tui::yellow(" \xC2\xB7 muted");
-        }
-        return format_status_row(active_model, turn_count, session_input,
-                                 session_output, cfg.max_tokens, label);
-    };
-    tui::install_status_bar(compose_bridge_status());
-    struct BridgeStatusGuard {
-        ~BridgeStatusGuard() { tui::teardown_status_bar(); }
-    } bridge_status_guard;
+	// Compose and install the fixed-bottom status row for the
+	// bridge. Right label is "Remote Control active" in green so
+	// the operator always sees that the bridge is live, with
+	// "· muted" appended in yellow when /mute is toggled on.
+	auto compose_bridge_status = [&]() {
+		std::string label = tui::Green("Remote Control active");
+		if (g_ludicrous_mode.load()) {
+			label = tui::Yellow("\xE2\x9A\xA1 LUDICROUS") + tui::Dim("  \xC2\xB7  ") + label;
+		}
+		if (g_telegram_muted.load()) {
+			label += tui::Yellow(" \xC2\xB7 muted");
+		}
+		return FormatStatusRow(fActivemodel, turn_count, session_input,
+								 session_output, cfg.max_tokens, label);
+	};
+	tui::InstallStatusBar(compose_bridge_status());
+	struct BridgeStatusGuard {
+		~BridgeStatusGuard() { tui::TeardownStatusBar(); }
+	} bridge_status_guard;
 
-    // Mute-aware wrappers around the Telegram client. Every outbound
-    // call in process_turn / process_telegram goes through these so
-    // that a single /mute toggle silences the whole bridge in one
-    // shot. The /mute and /unmute ack messages themselves deliberately
-    // bypass these wrappers (calling client.send_message directly) so
-    // the operator's own state transitions are always visible.
-    auto tg_send = [&](int64_t chat, const std::string& text,
-                       const std::vector<std::vector<telegram::Button>>& kb = {}) {
-        if (g_telegram_muted.load()) return;
-        client.send_message(chat, text, kb);
-    };
-    auto tg_send_id = [&](int64_t chat, const std::string& text) -> int64_t {
-        if (g_telegram_muted.load()) return 0;
-        return client.send_message_with_id(chat, text);
-    };
-    auto tg_edit = [&](int64_t chat, int64_t message_id, const std::string& text,
-                       const std::vector<std::vector<telegram::Button>>& kb = {}) {
-        if (g_telegram_muted.load()) return;
-        if (message_id == 0) return;
-        client.edit_message_text(chat, message_id, text, kb);
-    };
+	// Mute-aware wrappers around the Telegram client. Every outbound
+	// call in process_turn / process_telegram goes through these so
+	// that a single /mute toggle silences the whole bridge in one
+	// shot. The /mute and /unmute ack messages themselves deliberately
+	// bypass these wrappers (calling client.SendMessage directly) so
+	// the operator's own state transitions are always visible.
+	auto tg_send = [&](int64_t chat, const std::string& text,
+					   const std::vector<std::vector<telegram::Button>>& kb = {}) {
+		if (g_telegram_muted.load()) return;
+		client.SendMessage(chat, text, kb);
+	};
+	auto tg_send_id = [&](int64_t chat, const std::string& text) -> int64_t {
+		if (g_telegram_muted.load()) return 0;
+		return client.SendMessageWithId(chat, text);
+	};
+	auto tg_edit = [&](int64_t chat, int64_t message_id, const std::string& text,
+					   const std::vector<std::vector<telegram::Button>>& kb = {}) {
+		if (g_telegram_muted.load()) return;
+		if (message_id == 0) return;
+		client.EditMessageText(chat, message_id, text, kb);
+	};
 
-    // Shared worker: runs one send_with_tools call and mirrors the
-    // whole thing (user echo + typing + streaming edits + buttons
-    // on the final response) to a Telegram chat. Used by both the
-    // poller thread and the local REPL.
-    auto process_turn = [&](int64_t           chat_id,
-                            json&             messages,
-                            const std::string& prompt_text,
-                            bool              non_interactive,
-                            const char*       source_label) {
-        // 1. Echo the user's prompt into the chat so the remote
-        //    side sees what was typed (even for local-origin turns).
-        if (chat_id != 0) {
-            tg_send(chat_id, "> " + prompt_text);
-        }
+	// Shared worker: runs one SendWithTools call and mirrors the
+	// whole thing (user echo + typing + streaming edits + buttons
+	// on the final response) to a Telegram chat. Used by both the
+	// poller thread and the local REPL.
+	auto process_turn = [&](int64_t           chat_id,
+							json&             messages,
+							const std::string& prompt_text,
+							bool              non_interactive,
+							const char*       source_label) {
+		// 1. Echo the user's prompt into the chat so the remote
+		//    side sees what was typed (even for local-origin turns).
+		if (chat_id != 0) {
+			tg_send(chat_id, "> " + prompt_text);
+		}
 
-        // 2. Initial placeholder; we'll edit it as tokens stream in.
-        //    tg_send_id returns 0 when muted so the updater thread's
-        //    `if (placeholder_id == 0) continue;` guard naturally
-        //    skips edits even if unmute happens mid-turn.
-        const int64_t placeholder_id = chat_id == 0
-            ? 0
-            : tg_send_id(chat_id, "\xE2\x80\xA6"); // …
+		// 2. Initial placeholder; we'll edit it as tokens stream in.
+		//    tg_send_id returns 0 when muted so the updater thread's
+		//    `if (placeholder_id == 0) continue;` guard naturally
+		//    skips edits even if unmute happens mid-turn.
+		const int64_t placeholder_id = chat_id == 0
+			? 0
+			: tg_send_id(chat_id, "\xE2\x80\xA6"); // …
 
-        // 3. Updater thread: thinking indicator + streaming text edits.
-        //    Before first token: cycles "⏳ thinking…" with animated dots
-        //    so the user sees immediate feedback.
-        //    Once text arrives: edits the placeholder every ~1 s with the
-        //    accumulated text and a ▌ cursor so it looks like live typing.
-        StreamProgress    progress;
-        g_stream_progress = &progress;
-        std::atomic<bool> updater_running { chat_id != 0 };
-        int               last_version = 0;
-        int               dot_phase    = 0;
-        std::thread updater;
-        if (updater_running.load()) {
-            updater = std::thread([&]() {
-                while (updater_running.load()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                    if (!updater_running.load()) break;
-                    if (placeholder_id == 0) continue;
+		// 3. Updater thread: thinking indicator + streaming text edits.
+		//    Before first token: cycles "⏳ thinking…" with animated dots
+		//    so the user sees immediate feedback.
+		//    Once text arrives: edits the placeholder every ~1 s with the
+		//    accumulated text and a ▌ cursor so it looks like live typing.
+		StreamProgress    progress;
+		g_stream_progress = &progress;
+		std::atomic<bool> updater_running { chat_id != 0 };
+		int               last_version = 0;
+		int               dot_phase    = 0;
+		std::thread updater;
+		if (updater_running.load()) {
+			updater = std::thread([&]() {
+				while (updater_running.load()) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+					if (!updater_running.load()) break;
+					if (placeholder_id == 0) continue;
 
-                    const int v = progress.version.load(std::memory_order_relaxed);
-                    if (v == last_version) {
-                        // No new tokens yet — animate a "thinking" indicator.
-                        static const char* kDots[] = {
-                            "\xE2\x8F\xB3 thinking\xE2\x80\xA6",   // ⏳ thinking…
-                            "\xE2\x8F\xB3 thinking\xE2\x80\xA4",   // ⏳ thinking.
-                            "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",  // ⏳ thinking..
-                            "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4", // ⏳ thinking...
-                        };
-                        tg_edit(chat_id, placeholder_id,
-                                kDots[dot_phase % 4]);
-                        ++dot_phase;
-                    } else {
-                        // Tokens are streaming — show accumulated text + cursor.
-                        last_version = v;
-                        std::string snapshot_text;
-                        {
-                            std::lock_guard<std::mutex> lk(progress.mu);
-                            snapshot_text = progress.text;
-                        }
-                        if (!snapshot_text.empty()) {
-                            tg_edit(chat_id, placeholder_id,
-                                    snapshot_text + " \xE2\x96\x8C"); // ▌
-                        }
-                    }
-                }
-            });
-        }
+					const int v = progress.version.load(std::memory_order_relaxed);
+					if (v == last_version) {
+						// No new tokens yet — animate a "thinking" indicator.
+						static const char* kDots[] = {
+							"\xE2\x8F\xB3 thinking\xE2\x80\xA6",   // ⏳ thinking…
+							"\xE2\x8F\xB3 thinking\xE2\x80\xA4",   // ⏳ thinking.
+							"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",  // ⏳ thinking..
+							"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4", // ⏳ thinking...
+						};
+						tg_edit(chat_id, placeholder_id,
+								kDots[dot_phase % 4]);
+						++dot_phase;
+					} else {
+						// Tokens are streaming — show accumulated text + cursor.
+						last_version = v;
+						std::string snapshot_text;
+						{
+							std::lock_guard<std::mutex> lk(progress.mu);
+							snapshot_text = progress.text;
+						}
+						if (!snapshot_text.empty()) {
+							tg_edit(chat_id, placeholder_id,
+									snapshot_text + " \xE2\x96\x8C"); // ▌
+						}
+					}
+				}
+			});
+		}
 
-        // 4. Snapshot + push the user turn onto the shared history.
-        const json snapshot = messages;
-        if (!messages.is_array()) messages = json::array();
-        messages.push_back({{"role", "user"}, {"content", prompt_text}});
+		// 4. Snapshot + push the user turn onto the shared history.
+		const json snapshot = messages;
+		if (!messages.is_array()) messages = json::array();
+		messages.push_back({{"role", "user"}, {"content", prompt_text}});
 
-        g_non_interactive_tools             = non_interactive;
-        g_non_interactive_allow_destructive = allow_destructive;
+		g_non_interactive_tools             = non_interactive;
+		g_non_interactive_allow_destructive = allow_destructive;
 
-        // Install a Telegram permission hook so prompt_permission can
-        // ask the user via inline keyboard buttons instead of silently
-        // denying. The hook sends a message with three buttons and
-        // mini-polls getUpdates until a callback or "always" comes
-        // back from this chat.
-        if (non_interactive && chat_id != 0) {
-            g_telegram_permission_hook = [&](const std::string& tool_name,
-                                             const std::string& preview) -> Permission {
-                // Build the question message.
-                const std::string question =
-                    "\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
-                // Three buttons, one per row.
-                const std::vector<std::vector<telegram::Button>> kb = {
-                    {{ "1. Yes, allow once",          "perm:yes"    }},
-                    {{ "2. Always allow this session", "perm:always" }},
-                    {{ "3. No, deny",                 "perm:no"     }},
-                };
-                client.send_message(chat_id, question, kb);
-                // Mini-poll loop: short-poll (2 s) until we get one of
-                // our perm:* callbacks from this user/chat.
-                std::atomic<bool> keep_going { true };
-                while (!g_interrupted) {
-                    const auto updates = client.poll(2, &keep_going);
-                    for (const auto& u : updates) {
-                        if (!u.is_callback) continue;
-                        if (u.chat_id != chat_id) continue;
-                        client.answer_callback(u.callback_query_id);
-                        if (u.text == "perm:always") {
-                            always_allowed().insert(tool_name);
-                            return Permission::Allow;
-                        }
-                        if (u.text == "perm:yes")  return Permission::Allow;
-                        if (u.text == "perm:no")   return Permission::Deny;
-                        // Tap on some unrelated button — keep waiting.
-                    }
-                }
-                return Permission::Deny; // interrupted
-            };
-        }
+		// Install a Telegram permission hook so PromptPermission can
+		// ask the user via inline keyboard buttons instead of silently
+		// denying. The hook sends a message with three buttons and
+		// mini-polls getUpdates until a callback or "always" comes
+		// back from this chat.
+		if (non_interactive && chat_id != 0) {
+			g_telegram_permission_hook = [&](const std::string& tool_name,
+											 const std::string& preview) -> Permission {
+				// Build the question message.
+				const std::string question =
+					"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
+				// Three buttons, one per row.
+				const std::vector<std::vector<telegram::Button>> kb = {
+					{{ "1. Yes, allow once",          "perm:yes"    }},
+					{{ "2. Always allow this session", "perm:always" }},
+					{{ "3. No, deny",                 "perm:no"     }},
+				};
+				client.SendMessage(chat_id, question, kb);
+				// Mini-poll loop: short-poll (2 s) until we get one of
+				// our perm:* callbacks from this user/chat.
+				std::atomic<bool> keep_going { true };
+				while (!g_interrupted) {
+					const auto updates = client.poll(2, &keep_going);
+					for (const auto& u : updates) {
+						if (!u.is_callback) continue;
+						if (u.chat_id != chat_id) continue;
+						client.AnswerCallback(u.callback_query_id);
+						if (u.text == "perm:always") {
+							always_allowed().insert(tool_name);
+							return Permission::Allow;
+						}
+						if (u.text == "perm:yes")  return Permission::Allow;
+						if (u.text == "perm:no")   return Permission::Deny;
+						// Tap on some unrelated button — keep waiting.
+					}
+				}
+				return Permission::Deny; // interrupted
+			};
+		}
 
-        // Refresh OAuth token before each call so long-running
-        // bridge sessions don't hit 401 after the token expires.
-        auth = resolve_auth();
-        if (auth.kind == AuthKind::None) {
-            updater_running.store(false);
-            if (updater.joinable()) updater.join();
-            g_stream_progress = nullptr;
-            messages = snapshot;
-            const std::string err = "(error: authentication expired — run `claude logout && claude login`)";
-            if (chat_id != 0) {
-                if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
-                else                 tg_send(chat_id, err);
-            }
-            log_line(std::string(source_label) + " tx -> auth expired");
-            return;
-        }
-        std::cout << tui::claude_prompt();
-        const std::string effective_system = compose_system(cfg.system);
-        const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
-                                            messages, effective_system);
-        std::cout << "\n";
-        g_non_interactive_tools    = false;
-        g_telegram_permission_hook = nullptr;
+		// Refresh OAuth token before each call so long-running
+		// bridge sessions don't hit 401 after the token expires.
+		auth = ResolveAuth();
+		if (auth.kind == AuthKind::None) {
+			updater_running.store(false);
+			if (updater.joinable()) updater.join();
+			g_stream_progress = nullptr;
+			messages = snapshot;
+			const std::string err = "(error: authentication expired — run `claude logout && claude login`)";
+			if (chat_id != 0) {
+				if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+				else                 tg_send(chat_id, err);
+			}
+			LogLine(std::string(source_label) + " tx -> auth expired");
+			return;
+		}
+		std::cout << tui::ClaudePrompt();
+		const std::string effective_system = ComposeSystem(cfg.system);
+		const auto result = SendWithTools(auth, fActivemodel, cfg.max_tokens,
+											messages, effective_system);
+		std::cout << "\n";
+		g_non_interactive_tools    = false;
+		g_telegram_permission_hook = nullptr;
 
-        ++turn_count;
-        session_input  += result.input_tokens;
-        session_output += result.output_tokens;
-        tui::set_status_bar(compose_bridge_status());
+		++turn_count;
+		session_input  += result.input_tokens;
+		session_output += result.output_tokens;
+		tui::SetStatusBar(compose_bridge_status());
 
-        // 5. Tear down the updater thread.
-        updater_running.store(false);
-        if (updater.joinable()) updater.join();
-        g_stream_progress = nullptr;
+		// 5. Tear down the updater thread.
+		updater_running.store(false);
+		if (updater.joinable()) updater.join();
+		g_stream_progress = nullptr;
 
-        if (result.exit_code != 0 || result.assistant_text.empty()) {
-            messages = snapshot;
-            if (chat_id != 0) {
-                const std::string err = "(error: Claude did not return a response)";
-                if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
-                else                 tg_send(chat_id, err);
-            }
-            log_line(std::string(source_label) + " tx -> error");
-            return;
-        }
+		if (result.exit_code != 0 || result.assistant_text.empty()) {
+			messages = snapshot;
+			if (chat_id != 0) {
+				const std::string err = "(error: Claude did not return a response)";
+				if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+				else                 tg_send(chat_id, err);
+			}
+			LogLine(std::string(source_label) + " tx -> error");
+			return;
+		}
 
-        // 6. Numbered-list → inline-keyboard buttons.
-        std::vector<std::vector<telegram::Button>> keyboard;
-        const auto options = extract_numbered_options(result.assistant_text);
-        for (const auto& opt : options) {
-            telegram::Button b;
-            b.text          = opt.first + ". " + opt.second;
-            b.callback_data = opt.first;
-            keyboard.push_back({ std::move(b) });
-        }
+		// 6. Numbered-list → inline-keyboard buttons.
+		std::vector<std::vector<telegram::Button>> keyboard;
+		const auto options = extract_numbered_options(result.assistant_text);
+		for (const auto& opt : options) {
+			telegram::Button b;
+			b.text          = opt.first + ". " + opt.second;
+			b.callback_data = opt.first;
+			keyboard.push_back({ std::move(b) });
+		}
 
-        // 7. Final edit with the complete text + buttons.
-        if (chat_id != 0) {
-            if (placeholder_id) {
-                if (!client.edit_message_text(chat_id, placeholder_id, result.assistant_text, keyboard)) {
-                    // edit failed (rate-limit, wrong message_id, etc.) — send fresh
-                    tg_send(chat_id, result.assistant_text, keyboard);
-                }
-            } else {
-                tg_send(chat_id, result.assistant_text, keyboard);
-            }
-        }
-        log_line(std::string(source_label) + " tx out="
-                 + std::to_string(result.output_tokens)
-                 + (keyboard.empty()
-                        ? ""
-                        : " buttons=" + std::to_string(keyboard.size())));
-    };
+		// 7. Final edit with the complete text + buttons.
+		if (chat_id != 0) {
+			if (placeholder_id) {
+				if (!client.EditMessageText(chat_id, placeholder_id, result.assistant_text, keyboard)) {
+					// edit failed (rate-limit, wrong message_id, etc.) — send fresh
+					tg_send(chat_id, result.assistant_text, keyboard);
+				}
+			} else {
+				tg_send(chat_id, result.assistant_text, keyboard);
+			}
+		}
+		LogLine(std::string(source_label) + " tx out="
+				 + std::to_string(result.output_tokens)
+				 + (keyboard.empty()
+						? ""
+						: " buttons=" + std::to_string(keyboard.size())));
+	};
 
-    // Process one Telegram update — called from the poller thread
-    // with `process_mutex` held.
-    auto process_telegram = [&](const telegram::Update& u) {
-        if (u.is_callback) {
-            client.answer_callback(u.callback_query_id);
-        }
+	// Process one Telegram update — called from the poller thread
+	// with `process_mutex` held.
+	auto process_telegram = [&](const telegram::Update& u) {
+		if (u.is_callback) {
+			client.AnswerCallback(u.callback_query_id);
+		}
 
-        const std::string who = u.username.empty()
-            ? std::to_string(u.user_id)
-            : u.username;
-        const std::string arrow = u.is_callback ? "tap" : "text";
-        std::cout << tui::meta("[telegram " + who + " " + arrow + "] " + u.text)
-                  << "\n";
-        log_line("telegram rx user=" + std::to_string(u.user_id)
-                 + " " + arrow + "=" + u.text);
+		const std::string who = u.username.empty()
+			? std::to_string(u.user_id)
+			: u.username;
+		const std::string arrow = u.is_callback ? "tap" : "text";
+		std::cout << tui::Meta("[telegram " + who + " " + arrow + "] " + u.text)
+				  << "\n";
+		LogLine("telegram rx user=" + std::to_string(u.user_id)
+				 + " " + arrow + "=" + u.text);
 
-        // /mute and /unmute bypass the mute wrapper for their own
-        // ack so the state transition is always visible on the
-        // Telegram side even though every *other* outbound call in
-        // this handler is gated on g_telegram_muted. /mute acks
-        // *before* flipping the flag; /unmute flips first so its
-        // ack also goes through.
-        if (u.text == "/mute") {
-            if (g_telegram_muted.load()) {
-                client.send_message(u.chat_id, "(bridge already muted)");
-            } else {
-                client.send_message(u.chat_id,
-                    "Bridge muted. No replies will be sent until /unmute. "
-                    "Incoming messages are still processed locally.");
-                g_telegram_muted.store(true);
-                tui::set_status_bar(compose_bridge_status());
-                std::cout << tui::meta("[telegram bridge muted]") << "\n";
-                log_line("telegram mute (from user=" + std::to_string(u.user_id) + ")");
-            }
-            return;
-        }
-        if (u.text == "/unmute") {
-            const bool was = g_telegram_muted.exchange(false);
-            if (!was) {
-                client.send_message(u.chat_id, "(bridge was not muted)");
-            } else {
-                client.send_message(u.chat_id,
-                    "Bridge unmuted. Replies will be sent again.");
-                tui::set_status_bar(compose_bridge_status());
-                std::cout << tui::meta("[telegram bridge unmuted]") << "\n";
-                log_line("telegram unmute (from user=" + std::to_string(u.user_id) + ")");
-            }
-            return;
-        }
-        if (u.text == "/new" || u.text == "/clear") {
-            user_messages.erase(u.user_id);
-            tg_send(u.chat_id, "(history cleared)");
-            return;
-        }
-        if (u.text == "/help" || u.text == "/start") {
-            tg_send(u.chat_id,
-                "haiku-claude-cli bridge\n"
-                "\n"
-                "Send any message and I'll run it through Claude on the "
-                "local machine.\n"
-                "\n"
-                "Commands:\n"
-                "  /new     reset this chat's rolling history\n"
-                "  /mute    stop sending replies until /unmute\n"
-                "  /unmute  resume sending replies\n"
-                "  /help    this message");
-            return;
-        }
+		// /mute and /unmute bypass the mute wrapper for their own
+		// ack so the state transition is always visible on the
+		// Telegram side even though every *other* outbound call in
+		// this handler is gated on g_telegram_muted. /mute acks
+		// *before* flipping the flag; /unmute flips first so its
+		// ack also goes through.
+		if (u.text == "/mute") {
+			if (g_telegram_muted.load()) {
+				client.SendMessage(u.chat_id, "(bridge already muted)");
+			} else {
+				client.SendMessage(u.chat_id,
+					"Bridge muted. No replies will be sent until /unmute. "
+					"Incoming messages are still processed locally.");
+				g_telegram_muted.store(true);
+				tui::SetStatusBar(compose_bridge_status());
+				std::cout << tui::Meta("[telegram bridge muted]") << "\n";
+				LogLine("telegram mute (from user=" + std::to_string(u.user_id) + ")");
+			}
+			return;
+		}
+		if (u.text == "/unmute") {
+			const bool was = g_telegram_muted.exchange(false);
+			if (!was) {
+				client.SendMessage(u.chat_id, "(bridge was not muted)");
+			} else {
+				client.SendMessage(u.chat_id,
+					"Bridge unmuted. Replies will be sent again.");
+				tui::SetStatusBar(compose_bridge_status());
+				std::cout << tui::Meta("[telegram bridge unmuted]") << "\n";
+				LogLine("telegram unmute (from user=" + std::to_string(u.user_id) + ")");
+			}
+			return;
+		}
+		if (u.text == "/new" || u.text == "/clear") {
+			user_messages.erase(u.user_id);
+			tg_send(u.chat_id, "(history cleared)");
+			return;
+		}
+		if (u.text == "/help" || u.text == "/start") {
+			tg_send(u.chat_id,
+				"haiku-claude-cli bridge\n"
+				"\n"
+				"Send any message and I'll run it through Claude on the "
+				"local machine.\n"
+				"\n"
+				"Commands:\n"
+				"  /new     reset this chat's rolling history\n"
+				"  /mute    stop sending replies until /unmute\n"
+				"  /unmute  resume sending replies\n"
+				"  /help    this message");
+			return;
+		}
 
-        json& messages = user_messages[u.user_id];
-        // Note: we intentionally do NOT echo the user's message back
-        // in the Telegram-origin case — they already see their own
-        // bubble in the chat UI. process_turn's echo is guarded by
-        // calling it through a telegram-origin wrapper instead:
-        // inline the logic here without the echo.
-        const int64_t chat_id = u.chat_id;
+		json& messages = user_messages[u.user_id];
+		// Note: we intentionally do NOT echo the user's message back
+		// in the Telegram-origin case — they already see their own
+		// bubble in the chat UI. process_turn's echo is guarded by
+		// calling it through a telegram-origin wrapper instead:
+		// inline the logic here without the echo.
+		const int64_t chat_id = u.chat_id;
 
-        const int64_t placeholder_id = tg_send_id(chat_id, "\xE2\x80\xA6");
+		const int64_t placeholder_id = tg_send_id(chat_id, "\xE2\x80\xA6");
 
-        StreamProgress progress;
-        g_stream_progress = &progress;
-        std::atomic<bool> updater_running { true };
-        int last_version = 0;
-        int dot_phase    = 0;
-        std::thread updater([&]() {
-            while (updater_running.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                if (!updater_running.load()) break;
-                if (placeholder_id == 0) continue;
+		StreamProgress progress;
+		g_stream_progress = &progress;
+		std::atomic<bool> updater_running { true };
+		int last_version = 0;
+		int dot_phase    = 0;
+		std::thread updater([&]() {
+			while (updater_running.load()) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+				if (!updater_running.load()) break;
+				if (placeholder_id == 0) continue;
 
-                const int v = progress.version.load(std::memory_order_relaxed);
-                if (v == last_version) {
-                    // No tokens yet — animate a thinking indicator.
-                    static const char* kDots[] = {
-                        "\xE2\x8F\xB3 thinking\xE2\x80\xA6",
-                        "\xE2\x8F\xB3 thinking\xE2\x80\xA4",
-                        "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",
-                        "\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4",
-                    };
-                    tg_edit(chat_id, placeholder_id, kDots[dot_phase % 4]);
-                    ++dot_phase;
-                } else {
-                    // Tokens streaming — show accumulated text + cursor.
-                    last_version = v;
-                    std::string snapshot_text;
-                    {
-                        std::lock_guard<std::mutex> lk(progress.mu);
-                        snapshot_text = progress.text;
-                    }
-                    if (!snapshot_text.empty()) {
-                        tg_edit(chat_id, placeholder_id,
-                                snapshot_text + " \xE2\x96\x8C"); // ▌
-                    }
-                }
-            }
-        });
+				const int v = progress.version.load(std::memory_order_relaxed);
+				if (v == last_version) {
+					// No tokens yet — animate a thinking indicator.
+					static const char* kDots[] = {
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA6",
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA4",
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4",
+					};
+					tg_edit(chat_id, placeholder_id, kDots[dot_phase % 4]);
+					++dot_phase;
+				} else {
+					// Tokens streaming — show accumulated text + cursor.
+					last_version = v;
+					std::string snapshot_text;
+					{
+						std::lock_guard<std::mutex> lk(progress.mu);
+						snapshot_text = progress.text;
+					}
+					if (!snapshot_text.empty()) {
+						tg_edit(chat_id, placeholder_id,
+								snapshot_text + " \xE2\x96\x8C"); // ▌
+					}
+				}
+			}
+		});
 
-        if (!messages.is_array()) messages = json::array();
-        const json snapshot = messages;
-        messages.push_back({{"role", "user"}, {"content", u.text}});
+		if (!messages.is_array()) messages = json::array();
+		const json snapshot = messages;
+		messages.push_back({{"role", "user"}, {"content", u.text}});
 
-        g_non_interactive_tools              = true;
-        g_non_interactive_allow_destructive  = allow_destructive;
-        // Refresh OAuth token before each call so long-running
-        // bridge sessions don't hit 401 after the token expires.
-        auth = resolve_auth();
-        if (auth.kind == AuthKind::None) {
-            updater_running.store(false);
-            if (updater.joinable()) updater.join();
-            g_stream_progress = nullptr;
-            messages = snapshot;
-            const std::string err = "(error: authentication expired — run `claude logout && claude login` on the server)";
-            if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
-            else                 tg_send(chat_id, err);
-            log_line("telegram tx user=" + std::to_string(u.user_id) + " -> auth expired");
-            return;
-        }
-        std::cout << tui::claude_prompt();
-        const std::string effective_system = compose_system(cfg.system);
-        const auto result = send_with_tools(auth, active_model, cfg.max_tokens,
-                                            messages, effective_system);
-        std::cout << "\n";
-        g_non_interactive_tools    = false;
-        g_telegram_permission_hook = nullptr;
+		g_non_interactive_tools              = true;
+		g_non_interactive_allow_destructive  = allow_destructive;
+		// Refresh OAuth token before each call so long-running
+		// bridge sessions don't hit 401 after the token expires.
+		auth = ResolveAuth();
+		if (auth.kind == AuthKind::None) {
+			updater_running.store(false);
+			if (updater.joinable()) updater.join();
+			g_stream_progress = nullptr;
+			messages = snapshot;
+			const std::string err = "(error: authentication expired — run `claude logout && claude login` on the server)";
+			if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+			else                 tg_send(chat_id, err);
+			LogLine("telegram tx user=" + std::to_string(u.user_id) + " -> auth expired");
+			return;
+		}
+		std::cout << tui::ClaudePrompt();
+		const std::string effective_system = ComposeSystem(cfg.system);
+		const auto result = SendWithTools(auth, fActivemodel, cfg.max_tokens,
+											messages, effective_system);
+		std::cout << "\n";
+		g_non_interactive_tools    = false;
+		g_telegram_permission_hook = nullptr;
 
-        ++turn_count;
-        session_input  += result.input_tokens;
-        session_output += result.output_tokens;
-        tui::set_status_bar(compose_bridge_status());
+		++turn_count;
+		session_input  += result.input_tokens;
+		session_output += result.output_tokens;
+		tui::SetStatusBar(compose_bridge_status());
 
-        updater_running.store(false);
-        if (updater.joinable()) updater.join();
-        g_stream_progress = nullptr;
+		updater_running.store(false);
+		if (updater.joinable()) updater.join();
+		g_stream_progress = nullptr;
 
-        if (result.exit_code != 0 || result.assistant_text.empty()) {
-            messages = snapshot;
-            const std::string err = "(error: Claude did not return a response)";
-            if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
-            else                 tg_send(chat_id, err);
-            log_line("telegram tx user=" + std::to_string(u.user_id) + " -> error");
-            return;
-        }
+		if (result.exit_code != 0 || result.assistant_text.empty()) {
+			messages = snapshot;
+			const std::string err = "(error: Claude did not return a response)";
+			if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
+			else                 tg_send(chat_id, err);
+			LogLine("telegram tx user=" + std::to_string(u.user_id) + " -> error");
+			return;
+		}
 
-        std::vector<std::vector<telegram::Button>> keyboard;
-        const auto options = extract_numbered_options(result.assistant_text);
-        for (const auto& opt : options) {
-            telegram::Button b;
-            b.text          = opt.first + ". " + opt.second;
-            b.callback_data = opt.first;
-            keyboard.push_back({ std::move(b) });
-        }
-        if (placeholder_id) {
-            if (!client.edit_message_text(chat_id, placeholder_id, result.assistant_text, keyboard)) {
-                // edit failed (rate-limit, wrong message_id, etc.) — send fresh
-                tg_send(chat_id, result.assistant_text, keyboard);
-            }
-        } else {
-            tg_send(chat_id, result.assistant_text, keyboard);
-        }
-        log_line("telegram tx user=" + std::to_string(u.user_id)
-                 + " out=" + std::to_string(result.output_tokens));
-    };
+		std::vector<std::vector<telegram::Button>> keyboard;
+		const auto options = extract_numbered_options(result.assistant_text);
+		for (const auto& opt : options) {
+			telegram::Button b;
+			b.text          = opt.first + ". " + opt.second;
+			b.callback_data = opt.first;
+			keyboard.push_back({ std::move(b) });
+		}
+		if (placeholder_id) {
+			if (!client.EditMessageText(chat_id, placeholder_id, result.assistant_text, keyboard)) {
+				// edit failed (rate-limit, wrong message_id, etc.) — send fresh
+				tg_send(chat_id, result.assistant_text, keyboard);
+			}
+		} else {
+			tg_send(chat_id, result.assistant_text, keyboard);
+		}
+		LogLine("telegram tx user=" + std::to_string(u.user_id)
+				 + " out=" + std::to_string(result.output_tokens));
+	};
 
-    // Background Telegram poller. Long-polls getUpdates; when
-    // messages arrive, grabs process_mutex and hands off to
-    // process_telegram.
-    std::thread poller([&]() {
-        while (!g_interrupted) {
-            const auto updates = client.poll(10);
-            if (g_interrupted) break;
+	// Background Telegram poller. Long-polls getUpdates; when
+	// messages arrive, grabs process_mutex and hands off to
+	// process_telegram.
+	std::thread poller([&]() {
+		while (!g_interrupted) {
+			const auto updates = client.poll(10);
+			if (g_interrupted) break;
 
-            for (const auto& u : updates) {
-                if (g_interrupted) break;
-                if (!allowed.count(u.user_id)) {
-                    log_line("telegram reject user=" + std::to_string(u.user_id));
-                    continue;
-                }
-                std::lock_guard<std::mutex> lk(process_mutex);
-                process_telegram(u);
-            }
-        }
-    });
+			for (const auto& u : updates) {
+				if (g_interrupted) break;
+				if (!allowed.count(u.user_id)) {
+					LogLine("telegram reject user=" + std::to_string(u.user_id));
+					continue;
+				}
+				std::lock_guard<std::mutex> lk(process_mutex);
+				process_telegram(u);
+			}
+		}
+	});
 
-    // Main thread — libedit-backed local REPL. Each committed line
-    // grabs the same process_mutex so it serializes cleanly against
-    // concurrent Telegram traffic.
-    repl::init(paths::repl_history_path());
-    commands::load(paths::config_dir() + "/commands");
-    {
-        std::vector<std::string> all_slash = {
-            "/help", "/clear", "/model", "/compact", "/usage",
-            "/todos", "/memory", "/stats", "/open", "/notify",
-            "/mute", "/unmute", "/ludicrous", "/exit", "/quit",
-        };
-        for (const auto& c : commands::names()) all_slash.push_back("/" + c);
-        repl::set_slash_commands(all_slash);
-    }
+	// Main thread — libedit-backed local REPL. Each committed line
+	// grabs the same process_mutex so it serializes cleanly against
+	// concurrent Telegram traffic.
+	repl::Init(paths::ReplHistoryPath());
+	commands::Load(paths::ConfigDir() + "/commands");
+	{
+		std::vector<std::string> all_slash = {
+			"/help", "/clear", "/model", "/compact", "/usage",
+			"/todos", "/memory", "/stats", "/open", "/notify",
+			"/mute", "/unmute", "/ludicrous", "/exit", "/quit",
+		};
+		for (const auto& c : commands::Names()) all_slash.push_back("/" + c);
+		repl::SetSlashCommands(all_slash);
+	}
 
-    while (!g_interrupted) {
-        if (tui::consume_resize_pending()) tui::redraw_status_bar();
-        tui::show_cursor();
-        tui::position_cursor_for_input();
+	while (!g_interrupted) {
+		if (tui::ConsumeResizePending()) tui::RedrawStatusBar();
+		tui::ShowCursor();
+		tui::PositionCursorForInput();
 
-        std::string line;
-        if (!repl::read_message(tui::user_prompt(),
-                                tui::continuation_prompt(), line)) {
-            std::cout << "\n";
-            break;
-        }
-        tui::clear_input_row();
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
-            line.pop_back();
-        }
-        if (line.empty()) continue;
+		std::string line;
+		if (!repl::ReadMessage(tui::UserPrompt(),
+								tui::ContinuationPrompt(), line)) {
+			std::cout << "\n";
+			break;
+		}
+		tui::ClearInputRow();
+		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+			line.pop_back();
+		}
+		if (line.empty()) continue;
 
-        bool already_recorded = false;
-        if (!line.empty() && line.front() == '/') {
-            // /mute and /unmute are bridge-specific so dispatch_slash
-            // (shared with the REPL) doesn't know them. Handle them
-            // here before falling through to dispatch_slash. The
-            // local terminal always prints the state change; the
-            // primary Telegram chat also gets an ack so an operator
-            // driving from the laptop tells their phone what they
-            // did. The ack bypasses the mute wrapper so /unmute is
-            // able to announce itself.
-            if (line == "/mute") {
-                std::lock_guard<std::mutex> lk(process_mutex);
-                if (g_telegram_muted.load()) {
-                    std::cout << tui::meta("[bridge already muted]") << "\n";
-                } else {
-                    if (primary_user_id != 0) {
-                        client.send_message(primary_user_id,
-                            "Bridge muted from local prompt. No replies will "
-                            "be sent until /unmute.");
-                    }
-                    g_telegram_muted.store(true);
-                    tui::set_status_bar(compose_bridge_status());
-                    std::cout << tui::meta("[telegram bridge muted]") << "\n";
-                    log_line("telegram mute (from local prompt)");
-                }
-                repl::record(line);
-                continue;
-            }
-            if (line == "/unmute") {
-                std::lock_guard<std::mutex> lk(process_mutex);
-                const bool was = g_telegram_muted.exchange(false);
-                if (!was) {
-                    std::cout << tui::meta("[bridge was not muted]") << "\n";
-                } else {
-                    if (primary_user_id != 0) {
-                        client.send_message(primary_user_id,
-                            "Bridge unmuted from local prompt. Replies will "
-                            "be sent again.");
-                    }
-                    tui::set_status_bar(compose_bridge_status());
-                    std::cout << tui::meta("[telegram bridge unmuted]") << "\n";
-                    log_line("telegram unmute (from local prompt)");
-                }
-                repl::record(line);
-                continue;
-            }
+		bool already_recorded = false;
+		if (!line.empty() && line.front() == '/') {
+			// /mute and /unmute are bridge-specific so DispatchSlash
+			// (shared with the REPL) doesn't know them. Handle them
+			// here before falling through to DispatchSlash. The
+			// local terminal always prints the state change; the
+			// primary Telegram chat also gets an ack so an operator
+			// driving from the laptop tells their phone what they
+			// did. The ack bypasses the mute wrapper so /unmute is
+			// able to announce itself.
+			if (line == "/mute") {
+				std::lock_guard<std::mutex> lk(process_mutex);
+				if (g_telegram_muted.load()) {
+					std::cout << tui::Meta("[bridge already muted]") << "\n";
+				} else {
+					if (primary_user_id != 0) {
+						client.SendMessage(primary_user_id,
+							"Bridge muted from local prompt. No replies will "
+							"be sent until /unmute.");
+					}
+					g_telegram_muted.store(true);
+					tui::SetStatusBar(compose_bridge_status());
+					std::cout << tui::Meta("[telegram bridge muted]") << "\n";
+					LogLine("telegram mute (from local prompt)");
+				}
+				repl::Record(line);
+				continue;
+			}
+			if (line == "/unmute") {
+				std::lock_guard<std::mutex> lk(process_mutex);
+				const bool was = g_telegram_muted.exchange(false);
+				if (!was) {
+					std::cout << tui::Meta("[bridge was not muted]") << "\n";
+				} else {
+					if (primary_user_id != 0) {
+						client.SendMessage(primary_user_id,
+							"Bridge unmuted from local prompt. Replies will "
+							"be sent again.");
+					}
+					tui::SetStatusBar(compose_bridge_status());
+					std::cout << tui::Meta("[telegram bridge unmuted]") << "\n";
+					LogLine("telegram unmute (from local prompt)");
+				}
+				repl::Record(line);
+				continue;
+			}
 
-            std::lock_guard<std::mutex> lk(process_mutex);
-            json& messages_ref = user_messages[primary_user_id];
-            if (!messages_ref.is_array()) messages_ref = json::array();
-            LoopCtx ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,
-                        active_model, turn_count, session_input, session_output,
-                        messages_ref, telegram_session_urls,
-                        telegram_notify_enabled, telegram_notify_min_duration,
-                        [&]() { tui::set_status_bar(compose_bridge_status()); }};
-            std::string expanded;
-            const SlashAction action = dispatch_slash(line, ctx, expanded);
-            repl::record(line);
-            already_recorded = true;
-            if (action == SlashAction::Quit)     break;
-            if (action == SlashAction::Continue) continue;
-            if (action == SlashAction::Passthrough) {
-                line = std::move(expanded);
-            }
-        }
-        if (!already_recorded) repl::record(line);
+			std::lock_guard<std::mutex> lk(process_mutex);
+			json& messages_ref = user_messages[primary_user_id];
+			if (!messages_ref.is_array()) messages_ref = json::array();
+			LoopCtx ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,
+						fActivemodel, turn_count, session_input, session_output,
+						messages_ref, telegram_session_urls,
+						telegram_notify_enabled, telegram_notify_min_duration,
+						[&]() { tui::SetStatusBar(compose_bridge_status()); }};
+			std::string expanded;
+			const SlashAction action = DispatchSlash(line, ctx, expanded);
+			repl::Record(line);
+			already_recorded = true;
+			if (action == SlashAction::Quit)     break;
+			if (action == SlashAction::Continue) continue;
+			if (action == SlashAction::Passthrough) {
+				line = std::move(expanded);
+			}
+		}
+		if (!already_recorded) repl::Record(line);
 
-        std::lock_guard<std::mutex> lk(process_mutex);
-        // Push the cursor back into the scroll region and replay
-        // the submitted line so the chat history shows what was
-        // typed. libedit only drew on the ephemeral input row,
-        // which gets overwritten on the next turn.
-        tui::position_cursor_for_chat();
-        std::cout << tui::user_prompt() << line << "\n\n";
-        // Local input shares history with the primary Telegram user so
-        // the conversation is seamless across the two surfaces. The
-        // primary chat id equals the primary user id for direct DMs.
-        process_turn(primary_user_id, user_messages[primary_user_id],
-                     line, /*non_interactive=*/false, "local");
-    }
+		std::lock_guard<std::mutex> lk(process_mutex);
+		// Push the cursor back into the scroll region and replay
+		// the submitted line so the chat history shows what was
+		// typed. libedit only drew on the ephemeral input row,
+		// which gets overwritten on the next turn.
+		tui::PositionCursorForChat();
+		std::cout << tui::UserPrompt() << line << "\n\n";
+		// Local input shares history with the primary Telegram user so
+		// the conversation is seamless across the two surfaces. The
+		// primary chat id equals the primary user id for direct DMs.
+		process_turn(primary_user_id, user_messages[primary_user_id],
+					 line, /*non_interactive=*/false, "local");
+	}
 
-    g_interrupted = 1;
-    if (poller.joinable()) poller.join();
+	g_interrupted = 1;
+	if (poller.joinable()) poller.join();
 
-    std::cout << tui::meta("[telegram bridge stopped]") << "\n";
-    log_line("telegram bridge stop");
-    return 0;
+	std::cout << tui::Meta("[telegram bridge stopped]") << "\n";
+	LogLine("telegram bridge stop");
+	return 0;
 }
 
 int main(int argc, char* argv[]) {
-    tui::init();
-    tui::install_sigwinch_handler();
+	tui::Init();
+	tui::InstallSigwinchHandler();
 
-    // Crash-safe teardown. std::atexit fires on normal return,
-    // exit(), and unhandled exceptions (via terminate). Signal
-    // handlers for SIGINT / SIGTERM below call it explicitly
-    // before re-raising so Ctrl+C out of a REPL also restores
-    // the scroll region. Without this, a crashed bridge leaves
-    // the user's terminal with a truncated scroll region stuck
-    // above the now-missing status row.
-    std::atexit([]() { tui::teardown_status_bar(); });
-    {
-        struct sigaction sa {};
-        sa.sa_handler = [](int sig) {
-            tui::teardown_status_bar();
-            // Re-raise with the default handler so the exit
-            // status reflects the signal, not a clean return.
-            struct sigaction dfl {};
-            dfl.sa_handler = SIG_DFL;
-            sigemptyset(&dfl.sa_mask);
-            sigaction(sig, &dfl, nullptr);
-            raise(sig);
-        };
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(SIGTERM, &sa, nullptr);
-        // Note: we deliberately do NOT install this for SIGINT
-        // because InterruptGuard already has a SIGINT handler
-        // that sets g_interrupted, and replacing it here would
-        // break Ctrl+C cancellation of in-flight requests.
-        // teardown_status_bar will still fire via std::atexit
-        // when the REPL loop exits cleanly after the interrupt.
-    }
+	// Crash-safe teardown. std::atexit fires on normal return,
+	// exit(), and unhandled exceptions (via terminate). Signal
+	// handlers for SIGINT / SIGTERM below call it explicitly
+	// before re-raising so Ctrl+C out of a REPL also restores
+	// the scroll region. Without this, a crashed bridge leaves
+	// the user's terminal with a truncated scroll region stuck
+	// above the now-missing status row.
+	std::atexit([]() {
+		repl::Deinit();           // disable bracketed paste mode
+		tui::TeardownStatusBar();
+	});
+	{
+		struct sigaction sa {};
+		sa.sa_handler = [](int sig) {
+			repl::Deinit();           // disable bracketed paste mode
+			tui::TeardownStatusBar();
+			// Re-raise with the default handler so the exit
+			// status reflects the signal, not a clean return.
+			struct sigaction dfl {};
+			dfl.sa_handler = SIG_DFL;
+			sigemptyset(&dfl.sa_mask);
+			sigaction(sig, &dfl, nullptr);
+			raise(sig);
+		};
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sigaction(SIGTERM, &sa, nullptr);
+		// Note: we deliberately do NOT install this for SIGINT
+		// because InterruptGuard already has a SIGINT handler
+		// that sets g_interrupted, and replacing it here would
+		// break Ctrl+C cancellation of in-flight requests.
+		// TeardownStatusBar will still Fire via std::atexit
+		// when the REPL loop exits cleanly after the interrupt.
+	}
 
-    if (argc >= 2) {
-        const std::string cmd = argv[1];
-        if (cmd == "login")  return do_login();
-        if (cmd == "logout") return do_logout();
-    }
+	if (argc >= 2) {
+		const std::string cmd = argv[1];
+		if (cmd == "login")  return DoLogin();
+		if (cmd == "logout") return DoLogout();
+	}
 
-    const Config cfg = load_config();
-    init_logging(cfg.logging_enabled);
-    hooks::load(cfg.hooks);
-    mcp::init(cfg.mcp_servers);
+	const Config cfg = load_config();
+	InitLogging(cfg.logging_enabled);
+	hooks::Load(cfg.hooks);
+	mcp::Init(cfg.mcp_servers);
 
 #ifdef __HAIKU__
-    // Ensure the claude:summary BFS index exists on this volume so
-    // Query("\"claude:summary\" == \"*\"") runs in O(1) rather than
-    // walking every file. mkindex is idempotent: it exits non-zero
-    // with "File or Directory already exists" when the index is
-    // already present, which we intentionally ignore. Fork+exec keeps
-    // the failure mode fully silent — no output, no effect on the
-    // running process if mkindex is absent or the volume is read-only.
-    {
-        pid_t pid = fork();
-        if (pid == 0) {
-            // Child: redirect stdio to /dev/null, exec mkindex.
-            int devnull = ::open("/dev/null", O_RDWR);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                dup2(devnull, STDOUT_FILENO);
-                dup2(devnull, STDERR_FILENO);
-                if (devnull > 2) close(devnull);
-            }
-            const char* argv_mk[] = {
-                "mkindex", "-t", "string", "claude:summary", nullptr
-            };
-            execvp("mkindex", const_cast<char* const*>(argv_mk));
-            _exit(127);
-        }
-        if (pid > 0) {
-            int status = 0;
-            waitpid(pid, &status, 0); // reap; ignore exit code
-        }
-    }
+	// Ensure the claude:summary BFS index exists on this volume so
+	// Query("\"claude:summary\" == \"*\"") runs in O(1) rather than
+	// walking every file. mkindex is idempotent: it exits non-zero
+	// with "File or Directory already exists" when the index is
+	// already present, which we intentionally ignore. Fork+exec keeps
+	// the failure mode fully silent — no output, no effect on the
+	// running process if mkindex is absent or the volume is read-only.
+	{
+		pid_t pid = fork();
+		if (pid == 0) {
+			// Child: redirect stdio to /dev/null, exec mkindex.
+			int devnull = ::open("/dev/null", O_RDWR);
+			if (devnull >= 0) {
+				dup2(devnull, STDIN_FILENO);
+				dup2(devnull, STDOUT_FILENO);
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > 2) close(devnull);
+			}
+			const char* argv_mk[] = {
+				"mkindex", "-t", "string", "claude:summary", nullptr
+			};
+			execvp("mkindex", const_cast<char* const*>(argv_mk));
+			_exit(127);
+		}
+		if (pid > 0) {
+			int status = 0;
+			waitpid(pid, &status, 0); // reap; ignore exit code
+		}
+	}
 #endif
 
-    if (argc >= 2 && std::string(argv[1]) == "telegram") {
-        return run_telegram_bridge(cfg);
-    }
+	if (argc >= 2 && std::string(argv[1]) == "telegram") {
+		return RunTelegramBridge(cfg);
+	}
 
-    std::string              model         = cfg.model;
-    int                      max_tokens    = cfg.max_tokens;
-    bool                     interactive   = false;
-    bool                     show_usage    = cfg.show_usage;
-    bool                     resume        = false;
-    std::string              resume_name;   // empty = default history.json
-    std::string              custom_system = cfg.system;
-    std::vector<std::string> parts;
-    std::vector<std::string> attachments;
+	std::string              model         = cfg.model;
+	int                      max_tokens    = cfg.max_tokens;
+	bool                     interactive   = false;
+	bool                     show_usage    = cfg.show_usage;
+	bool                     resume        = false;
+	std::string              resume_name;   // empty = default history.json
+	std::string              custom_system = cfg.system;
+	std::vector<std::string> parts;
+	std::vector<std::string> attachments;
 
-    // Seed the destructive-tool flag from config. -y/--yes below can
-    // still flip it on for ad-hoc runs; there's no reason to flip it
-    // off mid-invocation so we don't expose a --no-yes counterpart.
-    if (cfg.allow_destructive_tools) g_allow_destructive_tools = true;
+	// Seed the destructive-tool flag from config. -y/--yes below can
+	// still flip it on for ad-hoc runs; there's no reason to flip it
+	// off mid-invocation so we don't expose a --no-yes counterpart.
+	if (cfg.fAllowDestructivetools) g_allow_destructive_tools = true;
 
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "-h" || arg == "--help") {
-            print_usage(argv[0], model, max_tokens);
-            return 0;
-        }
-        if (arg == "-V" || arg == "--version") {
-            std::cout << "haiku-claude-cli " << kVersion << "\n";
-            return 0;
-        }
-        if (arg == "-i" || arg == "--interactive") {
-            interactive = true;
-            continue;
-        }
-        if (arg == "-u" || arg == "--usage") {
-            show_usage = true;
-            continue;
-        }
-        if (arg == "-r" || arg == "--resume") {
-            resume      = true;
-            interactive = true;
-            // Optional next argument is the session name. Consume it
-            // only if it doesn't look like a flag (i.e. doesn't start
-            // with '-') so `claude -r -i` still works.
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                resume_name = argv[++i];
-            }
-            continue;
-        }
-        if (arg == "-y" || arg == "--yes") {
-            g_allow_destructive_tools = true;
-            continue;
-        }
-        if (arg == "-a" || arg == "--attach") {
-            if (i + 1 >= argc) {
-                std::cerr << "error: " << arg << " requires a path\n";
-                return 1;
-            }
-            attachments.emplace_back(argv[++i]);
-            continue;
-        }
-        if (arg == "--plain") {
-            tui::set_color_enabled(false);
-            continue;
-        }
-        if (arg == "--color") {
-            tui::set_color_enabled(true);
-            continue;
-        }
-        if (arg == "-m" || arg == "--model") {
-            if (i + 1 >= argc) {
-                std::cerr << "error: " << arg << " requires a value\n";
-                return 1;
-            }
-            model = argv[++i];
-            continue;
-        }
-        if (arg == "-t" || arg == "--max-tokens") {
-            if (i + 1 >= argc) {
-                std::cerr << "error: " << arg << " requires a value\n";
-                return 1;
-            }
-            max_tokens = std::atoi(argv[++i]);
-            if (max_tokens <= 0) {
-                std::cerr << "error: --max-tokens must be a positive integer\n";
-                return 1;
-            }
-            continue;
-        }
-        if (arg == "-s" || arg == "--system") {
-            if (i + 1 >= argc) {
-                std::cerr << "error: " << arg << " requires a value\n";
-                return 1;
-            }
-            custom_system = argv[++i];
-            continue;
-        }
-        parts.push_back(arg);
-    }
+	for (int i = 1; i < argc; ++i) {
+		const std::string arg = argv[i];
+		if (arg == "-h" || arg == "--help") {
+			PrintUsage(argv[0], model, max_tokens);
+			return 0;
+		}
+		if (arg == "-V" || arg == "--version") {
+			std::cout << "haiku-claude-cli " << kVersion << "\n";
+			return 0;
+		}
+		if (arg == "-i" || arg == "--interactive") {
+			interactive = true;
+			continue;
+		}
+		if (arg == "-u" || arg == "--usage") {
+			show_usage = true;
+			continue;
+		}
+		if (arg == "-r" || arg == "--resume") {
+			resume      = true;
+			interactive = true;
+			// Optional next argument is the session name. Consume it
+			// only if it doesn't look like a flag (i.e. doesn't start
+			// with '-') so `claude -r -i` still works.
+			if (i + 1 < argc && argv[i + 1][0] != '-') {
+				resume_name = argv[++i];
+			}
+			continue;
+		}
+		if (arg == "-y" || arg == "--yes") {
+			g_allow_destructive_tools = true;
+			continue;
+		}
+		if (arg == "-a" || arg == "--attach") {
+			if (i + 1 >= argc) {
+				std::cerr << "error: " << arg << " requires a path\n";
+				return 1;
+			}
+			attachments.emplace_back(argv[++i]);
+			continue;
+		}
+		if (arg == "--plain") {
+			tui::SetColorEnabled(false);
+			continue;
+		}
+		if (arg == "--color") {
+			tui::SetColorEnabled(true);
+			continue;
+		}
+		if (arg == "-m" || arg == "--model") {
+			if (i + 1 >= argc) {
+				std::cerr << "error: " << arg << " requires a value\n";
+				return 1;
+			}
+			model = argv[++i];
+			continue;
+		}
+		if (arg == "-t" || arg == "--max-tokens") {
+			if (i + 1 >= argc) {
+				std::cerr << "error: " << arg << " requires a value\n";
+				return 1;
+			}
+			max_tokens = std::atoi(argv[++i]);
+			if (max_tokens <= 0) {
+				std::cerr << "error: --max-tokens must be a positive integer\n";
+				return 1;
+			}
+			continue;
+		}
+		if (arg == "-s" || arg == "--system") {
+			if (i + 1 >= argc) {
+				std::cerr << "error: " << arg << " requires a value\n";
+				return 1;
+			}
+			custom_system = argv[++i];
+			continue;
+		}
+		parts.push_back(arg);
+	}
 
-    std::string message;
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (i > 0) message += ' ';
-        message += parts[i];
-    }
+	std::string message;
+	for (size_t i = 0; i < parts.size(); ++i) {
+		if (i > 0) message += ' ';
+		message += parts[i];
+	}
 
-    if (!interactive && !isatty(fileno(stdin))) {
-        // Only slurp stdin if data is actually ready. Without this
-        // check, fread blocks forever when stdin is an open-but-empty
-        // pipe (e.g. `ssh host 'claude hi'` without -t, or CI jobs
-        // that inherit a runner's idle stdin). 100ms is imperceptible
-        // for real pipelines like `cat file | claude "summarize"` but
-        // saves the invocation from hanging in non-interactive shells.
-        struct pollfd pfd;
-        pfd.fd      = STDIN_FILENO;
-        pfd.events  = POLLIN;
-        pfd.revents = 0;
-        const bool has_input =
-            poll(&pfd, 1, 100) > 0 && (pfd.revents & (POLLIN | POLLHUP));
-        if (has_input) {
-            std::string stdin_data;
-            char        buf[4096];
-            size_t      n;
-            while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0) {
-                stdin_data.append(buf, n);
-            }
-            while (!stdin_data.empty() && (stdin_data.back() == '\n' || stdin_data.back() == '\r')) {
-                stdin_data.pop_back();
-            }
-            if (!stdin_data.empty()) {
-                if (message.empty()) {
-                    message = std::move(stdin_data);
-                } else {
-                    message += "\n\n";
-                    message += stdin_data;
-                }
-            }
-        }
-    }
+	if (!interactive && !isatty(fileno(stdin))) {
+		// Only slurp stdin if data is actually ready. Without this
+		// check, fread blocks forever when stdin is an open-but-empty
+		// pipe (e.g. `ssh host 'claude hi'` without -t, or CI jobs
+		// that inherit a runner's idle stdin). 100ms is imperceptible
+		// for real pipelines like `cat file | claude "summarize"` but
+		// saves the invocation from hanging in non-interactive shells.
+		struct pollfd pfd;
+		pfd.fd      = STDIN_FILENO;
+		pfd.events  = POLLIN;
+		pfd.revents = 0;
+		const bool has_input =
+			poll(&pfd, 1, 100) > 0 && (pfd.revents & (POLLIN | POLLHUP));
+		if (has_input) {
+			std::string stdin_data;
+			char        buf[4096];
+			size_t      n;
+			while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0) {
+				stdin_data.append(buf, n);
+			}
+			while (!stdin_data.empty() && (stdin_data.back() == '\n' || stdin_data.back() == '\r')) {
+				stdin_data.pop_back();
+			}
+			if (!stdin_data.empty()) {
+				if (message.empty()) {
+					message = std::move(stdin_data);
+				} else {
+					message += "\n\n";
+					message += stdin_data;
+				}
+			}
+		}
+	}
 
-    if (!interactive && message.empty()) {
-        // With no message and no -i flag, default to interactive mode
-        // when stdin is a real terminal. Pipe/redirected cases still
-        // get the usage error so scripts fail loudly on empty input.
-        if (isatty(fileno(stdin))) {
-            interactive = true;
-        } else {
-            print_usage(argv[0], model, max_tokens);
-            return 1;
-        }
-    }
+	if (!interactive && message.empty()) {
+		// With no message and no -i flag, default to interactive mode
+		// when stdin is a real terminal. Pipe/redirected cases still
+		// get the usage error so scripts fail loudly on empty input.
+		if (isatty(fileno(stdin))) {
+			interactive = true;
+		} else {
+			PrintUsage(argv[0], model, max_tokens);
+			return 1;
+		}
+	}
 
-    // Resolve --attach arguments to absolute paths so Claude's Read
-    // tool doesn't depend on whatever cwd the REPL inherited. Missing
-    // paths fail loudly — a shell user wants to catch a typo at the
-    // door instead of silently announcing a non-existent file.
-    std::vector<std::string> resolved_attachments;
-    if (!attachments.empty()) {
-        resolved_attachments.reserve(attachments.size());
-        for (const auto& p : attachments) {
-            struct stat st;
-            if (stat(p.c_str(), &st) != 0) {
-                std::cerr << "error: --attach path not found: " << p << "\n";
-                return 1;
-            }
-            char abs[PATH_MAX];
-            const char* use = realpath(p.c_str(), abs) ? abs : p.c_str();
-            resolved_attachments.emplace_back(use);
-        }
-        std::cout << tui::meta(format_attached_line(resolved_attachments)) << "\n";
-    }
+	// Resolve --attach arguments to absolute paths so Claude's Read
+	// tool doesn't depend on whatever cwd the REPL inherited. Missing
+	// paths fail loudly — a shell user wants to catch a typo at the
+	// door instead of silently announcing a non-existent file.
+	std::vector<std::string> resolved_attachments;
+	if (!attachments.empty()) {
+		resolved_attachments.reserve(attachments.size());
+		for (const auto& p : attachments) {
+			struct stat st;
+			if (stat(p.c_str(), &st) != 0) {
+				std::cerr << "error: --attach path not found: " << p << "\n";
+				return 1;
+			}
+			char abs[PATH_MAX];
+			const char* use = realpath(p.c_str(), abs) ? abs : p.c_str();
+			resolved_attachments.emplace_back(use);
+		}
+		std::cout << tui::Meta(FormatAttachedLine(resolved_attachments)) << "\n";
+	}
 
-    const Auth auth = resolve_auth();
-    if (auth.kind == AuthKind::None) {
-        std::cerr << "error: no authentication configured.\n"
-                  << "Run '" << argv[0] << " login' to authenticate with your Claude account,\n"
-                  << "or set ANTHROPIC_API_KEY.\n";
-        return 1;
-    }
+	const Auth auth = ResolveAuth();
+	if (auth.kind == AuthKind::None) {
+		std::cerr << "error: no authentication configured.\n"
+				  << "Run '" << argv[0] << " login' to authenticate with your Claude account,\n"
+				  << "or set ANTHROPIC_API_KEY.\n";
+		return 1;
+	}
 
-    if (interactive) {
-        return interactive_loop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, resume_name, message, std::move(resolved_attachments));
-    }
+	if (interactive) {
+		return InteractiveLoop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, resume_name, message, std::move(resolved_attachments));
+	}
 
-    InterruptGuard interrupt_guard;
-    // One-shot: bake the attachment preamble into the single user
-    // turn. Interactive mode defers this to the first REPL turn and
-    // also accepts drops mid-session.
-    const std::string one_shot_content = compose_attachment_preamble(resolved_attachments) + message;
-    json messages = json::array({{{"role", "user"}, {"content", one_shot_content}}});
-    const std::string effective_system = compose_system(custom_system);
-    const auto result = send_with_tools(auth, model, max_tokens, messages, effective_system);
-    if (show_usage) {
-        print_usage_line(result);
-    }
-    return result.exit_code;
+	InterruptGuard interrupt_guard;
+	// One-shot: bake the attachment preamble into the single user
+	// turn. Interactive mode defers this to the first REPL turn and
+	// also accepts drops mid-session.
+	const std::string one_shot_content = ComposeAttachmentPreamble(resolved_attachments) + message;
+	json messages = json::array({{{"role", "user"}, {"content", one_shot_content}}});
+	const std::string effective_system = ComposeSystem(custom_system);
+	const auto result = SendWithTools(auth, model, max_tokens, messages, effective_system);
+	if (show_usage) {
+		PrintUsageLine(result);
+	}
+	return result.exit_code;
 }

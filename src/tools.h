@@ -13,27 +13,27 @@ namespace tools {
 using json = nlohmann::json;
 
 struct ToolResult {
-    std::string content;
-    bool        is_error = false;
+	std::string content;
+	bool        is_error = false;
 };
 
-// JSON array of tool definitions to send as the request's `tools`
+// JSON array of tool Definitions to send as the request's `tools`
 // parameter. Safe to call any number of times.
-json definitions();
+json Definitions();
 
 // Dispatch a tool_use block by name with its parsed input. Unknown
-// tool names return an is_error result.
-ToolResult run(const std::string& name, const json& input);
+// tool Names return an is_error result.
+ToolResult Run(const std::string& name, const json& input);
 
 // True when a tool must prompt the user for permission before its
 // first execution in a session. Currently Bash and Write.
-bool requires_permission(const std::string& name);
+bool RequiresPermission(const std::string& name);
 
 // Optional multi-line description of what the tool would do if the
 // caller approves it. Shown between the `[tool: Name ...]` notice and
 // the permission prompt. Empty for tools where the input dump is
 // already self-explanatory (Bash, Read, Glob, Grep).
-std::string preview(const std::string& name, const json& input);
+std::string Preview(const std::string& name, const json& input);
 
 } // namespace tools
 

@@ -25,24 +25,24 @@ namespace hooks {
 using json = nlohmann::json;
 
 enum class Event {
-    SessionStart,
-    UserPromptSubmit,
-    PreToolUse,
-    PostToolUse,
-    Stop,
+	SessionStart,
+	UserPromptSubmit,
+	PreToolUse,
+	PostToolUse,
+	Stop,
 };
 
 enum class Outcome {
-    Proceed,
-    Block,
+	Proceed,
+	Block,
 };
 
-void load(const json& config_hooks);
+void Load(const json& config_hooks);
 
 // Fire every matching hook for this event with `payload` enriched by
 // an "event" field (and "tool_name" when non-empty). `tool_name` is
 // used as the matcher filter for PreToolUse / PostToolUse entries.
-Outcome fire(Event event, const json& payload, const std::string& tool_name = {});
+Outcome Fire(Event event, const json& payload, const std::string& tool_name = {});
 
 } // namespace hooks
 

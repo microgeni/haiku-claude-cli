@@ -15,16 +15,16 @@
 // name. Command name is the filename without the .md extension.
 namespace commands {
 
-void load(const std::string& user_dir);
+void Load(const std::string& user_dir);
 
-std::vector<std::string> names();
+std::vector<std::string> Names();
 
 // Return the substituted body when `name` resolves to a known
 // command, or std::nullopt otherwise. An empty file body is also
 // treated as "not found" so the dispatcher falls through to the
 // built-in unknown-command error path.
-std::optional<std::string> expand(const std::string& name,
-                                  const std::string& args);
+std::optional<std::string> Expand(const std::string& name,
+								  const std::string& args);
 
 } // namespace commands
 
