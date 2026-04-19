@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Telegram bridge auto-starts** — the `claude telegram` subcommand is
+  removed. If a valid `telegram` block exists in `config.json`,
+  launching `claude` interactively now starts the full bridge
+  automatically. Users no longer need to remember a separate command.
+
+### Added
+- **Telegram thinking indicator for `/remote-control` mode** — when
+  `/remote-control` is active and a local REPL turn begins, the phone
+  side now sees an animated `⏳ thinking…` placeholder that updates
+  every 1.2 s. While idle it cycles through dot animation; once tokens
+  start streaming it shows accumulated text with a `▌` cursor. The
+  placeholder is edited in-place with the final reply, or marked
+  `❌ error — turn aborted` if the turn fails.
+
 ## [1.4.9] - 2026-06-17
 
 ### Added

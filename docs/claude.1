@@ -137,22 +137,13 @@ in green whenever the poller is running, plus
 .B "\(bu muted"
 in yellow when
 .B /mute
-(shared with the full
-.BR "claude telegram" )
 is toggled on.
-.IP
-This is a lean bridge — no streaming edits, no typing
-indicator, no inline-keyboard buttons, no local input mirroring.
-For the full experience run
-.B "claude telegram"
-as its own subcommand instead.
 .TP
 .B /exit, /quit
 Leave the REPL (Ctrl+D also works).
 .PP
-Additional slash commands in the Telegram bridge
-.RB ( "claude telegram" ),
-valid from both the local prompt and a Telegram chat:
+Additional slash commands valid from both the local prompt and
+a Telegram chat when the bridge is active:
 .TP
 .B /mute
 Suppress every outbound call to the Telegram Bot API

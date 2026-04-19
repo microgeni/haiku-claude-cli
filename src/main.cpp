@@ -2358,7 +2358,7 @@ extract_numbered_options(const std::string& text) {
 //
 // Fully bidirectional: streaming edits, typing indicator,
 // inline permission buttons, numbered-option buttons, and local
-// input mirroring — identical experience to `claude telegram`.
+// input mirroring — identical experience to the full Telegram bridge.
 //
 // Thread-safe: the poller thread grabs fReplMutex for the
 // duration of each SendWithTools call so it serializes cleanly
@@ -3383,7 +3383,7 @@ int RunTelegramBridge(const Config& cfg) {
 	Auth auth = ResolveAuth();
 	if (auth.kind == AuthKind::None) {
 		std::cerr << "error: no authentication configured. Run `claude login` "
-					 "or set ANTHROPIC_API_KEY before `claude telegram`.\n";
+					 "or set ANTHROPIC_API_KEY before starting the Telegram bridge.\n";
 		return 1;
 	}
 
@@ -4152,10 +4152,6 @@ int main(int argc, char* argv[]) {
 	}
 #endif
 
-	if (argc >= 2 && std::string(argv[1]) == "telegram") {
-		return RunTelegramBridge(cfg);
-	}
-
 	std::string              model         = cfg.model;
 	int                      max_tokens    = cfg.max_tokens;
 	bool                     interactive   = false;
@@ -4332,6 +4328,11 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (interactive) {
+		// If a telegram block is present and valid, run the full
+		// bridge loop automatically — no need for a separate
+		// `claude telegram` subcommand.
+		if (RemoteControl::config_is_valid(cfg, nullptr))
+			return RunTelegramBridge(cfg);
 		return InteractiveLoop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, resume_name, message, std::move(resolved_attachments));
 	}
 

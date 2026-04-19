@@ -46,12 +46,13 @@ project size.
 
 ### Telegram remote control — Claude in your pocket
 
-Run `claude telegram` to open a bidirectional bridge between the CLI and
-a Telegram bot. From your phone you can send prompts, approve or deny
-tool-use requests (via inline keyboard buttons), mute/unmute the bridge,
-and receive streamed replies — all while the same session stays open
-locally on your Haiku machine. A background `/remote-control` poller
-can also be toggled mid-REPL without restarting the session.
+Add a `telegram` block to `config.json` and the bridge starts
+automatically whenever you launch `claude` interactively. From your
+phone you can send prompts, approve or deny tool-use requests (via
+inline keyboard buttons), mute/unmute the bridge, and receive streamed
+replies — all while the same session stays open locally on your Haiku
+machine. A background `/remote-control` poller can also be toggled
+mid-REPL without restarting the session.
 
 ### Ludicrous mode — all permission prompts, gone
 
@@ -341,15 +342,11 @@ Add a `telegram` key to `~/config/settings/claude-cli/config.json`:
 The `allowed_user_ids` list is the security boundary — messages from
 any other Telegram user are silently ignored.
 
-### 3. Full bridge mode — `claude telegram`
+### 3. Full bridge mode — auto-start
 
-Starts a dedicated Telegram bridge session. Claude runs on your Haiku
-machine; you (and anyone else in `allowed_user_ids`) talk to it from
-any Telegram client.
-
-```
-claude telegram
-```
+When the `telegram` block is present and valid in `config.json`, running
+`claude` interactively automatically starts the full Telegram bridge —
+no separate subcommand needed.
 
 What you get on the phone:
 
@@ -398,7 +395,7 @@ Toggle full bidirectional Telegram control from inside any REPL session:
 ```
 
 The poller runs in a background thread and offers the same experience
-as `claude telegram`: streaming edits with a thinking placeholder,
+as the full bridge: streaming edits with a thinking placeholder,
 inline permission buttons for destructive tools, numbered-option
 buttons, and local-turn mirroring to the primary Telegram chat.
 Each Telegram user gets their own independent rolling history.
@@ -414,12 +411,12 @@ will tell you exactly what to add instead of silently failing:
   See the Telegram setup section in README.md.
 ```
 
-**`claude telegram` vs `/remote-control`** — both give the full
-bidirectional experience. `claude telegram` is a dedicated session
-with no local REPL; use it when you want to hand the machine to
-Claude and walk away. `/remote-control` layers Telegram on top of
-your existing REPL session; use it when you want to stay at the
-keyboard and also take questions from your phone.
+**Full bridge vs `/remote-control`** — both give the full
+bidirectional experience. The full bridge (auto-started when telegram
+is configured) is a dedicated session with no local REPL; use it when
+you want to hand the machine to Claude and walk away. `/remote-control`
+layers Telegram on top of your existing REPL session; use it when you
+want to stay at the keyboard and also take questions from your phone.
 
 ## Environment
 
