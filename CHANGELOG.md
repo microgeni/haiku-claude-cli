@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-04-19
+
+### Fixed
+- **`terminate()` crash on invalid UTF-8 in system prompt** — CLAUDE.md
+  files and the BFS snapshot are read as raw bytes; a non-UTF-8 byte
+  (e.g. a Latin-1 em-dash `0x97`) anywhere in the composed system prompt
+  caused `nlohmann::json::dump()` to throw `type_error.316`, which
+  propagated uncaught to `terminate()`. Fixed by running
+  `sanitize_utf8()` over the system prompt before building the JSON
+  request body (consistent with how tool results are already handled),
+  and by wrapping `body.dump()` in a `try/catch` so any missed bad byte
+  produces a clean error message instead of a crash.
+
 ## [1.4.7] - 2026-04-19
 
 ### Fixed
