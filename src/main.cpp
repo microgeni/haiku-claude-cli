@@ -2471,26 +2471,79 @@ private:
 			std::cout << "\x1b""8" << std::flush;
 			return;
 		}
-		if (u.text == "/new" || u.text == "/clear") {
+		// /new is a Telegram-friendly alias for /clear.
+		if (u.text == "/new") {
 			fUserMessages.erase(u.user_id);
 			tg_send(u.chat_id, "(history cleared)");
 			std::cout << "\x1b""8" << std::flush;
 			return;
 		}
-		if (u.text == "/help" || u.text == "/start") {
-			tg_send(u.chat_id,
-				"claude remote-control\n"
-				"\n"
-				"Send a message and I'll run it through Claude on the "
-				"local machine.\n"
-				"\n"
-				"Commands:\n"
-				"  /new     reset this chat's rolling history\n"
-				"  /mute    stop sending replies until /unmute\n"
-				"  /unmute  resume sending replies\n"
-				"  /help    this message");
-			std::cout << "\x1b""8" << std::flush;
-			return;
+
+		// All other slash commands go through DispatchSlash.
+		// /exit, /quit, and /remote-control are not meaningful here.
+		if (!u.text.empty() && u.text.front() == '/') {
+			const std::string cmd_word = u.text.substr(0, u.text.find(' '));
+			if (cmd_word == "/exit" || cmd_word == "/quit"
+					|| cmd_word == "/remote-control") {
+				tg_send(u.chat_id, "(" + cmd_word + " is not available from Telegram)");
+				std::cout << "\x1b""8" << std::flush;
+				return;
+			}
+			const std::string dispatched = (u.text == "/start") ? "/help" : u.text;
+
+			std::ostringstream capture;
+			std::streambuf* old_buf = std::cout.rdbuf(capture.rdbuf());
+
+			json& messages_ref = fUserMessages[u.user_id];
+			if (!messages_ref.is_array()) messages_ref = json::array();
+			// RemoteControl doesn't track session totals or URLs per
+			// user; use local throwaway vars for the LoopCtx fields
+			// that DispatchSlash may update (/model, /compact, etc.).
+			int    rc_turn   = 0;
+			int    rc_in     = 0;
+			int    rc_out    = 0;
+			bool   rc_notify = false;
+			double rc_thresh = 60.0;
+			std::vector<std::string> rc_urls;
+			json   rc_prices = json::object();
+			LoopCtx ctx{fAuth, fCfgMaxTokens, fCustomSystem, rc_prices,
+						fCfgModel, rc_turn, rc_in, rc_out,
+						messages_ref, rc_urls, rc_notify, rc_thresh,
+						{}};
+			std::string passthrough;
+			const SlashAction action = DispatchSlash(dispatched, ctx, passthrough);
+
+			std::cout.rdbuf(old_buf);
+			const std::string output = capture.str();
+
+			// Strip ANSI escape sequences before sending to Telegram.
+			std::string plain;
+			plain.reserve(output.size());
+			for (size_t i = 0; i < output.size(); ) {
+				if (output[i] == '\x1b' && i + 1 < output.size() && output[i+1] == '[') {
+					i += 2;
+					while (i < output.size()
+							&& output[i] != 'm' && output[i] != 'K'
+							&& output[i] != 'H' && output[i] != 'A'
+							&& output[i] != 'B' && output[i] != 'J') ++i;
+					if (i < output.size()) ++i;
+				} else {
+					plain += output[i++];
+				}
+			}
+			while (!plain.empty() && (plain.front() == '\n' || plain.front() == ' '))
+				plain.erase(plain.begin());
+			while (!plain.empty() && (plain.back() == '\n' || plain.back() == ' '))
+				plain.pop_back();
+
+			if (action == SlashAction::Passthrough) {
+				const_cast<telegram::Update&>(u).text = passthrough;
+				// Fall through to normal prompt handling below.
+			} else {
+				if (!plain.empty()) tg_send(u.chat_id, plain);
+				std::cout << "\x1b""8" << std::flush;
+				return;
+			}
 		}
 
 		json& messages = fUserMessages[u.user_id];
@@ -3463,24 +3516,84 @@ int RunTelegramBridge(const Config& cfg) {
 			}
 			return;
 		}
-		if (u.text == "/new" || u.text == "/clear") {
+		// /new is a Telegram-friendly alias for /clear (history wipe).
+		// Handle it before DispatchSlash so the per-user map entry
+		// is erased rather than the shared bridge history.
+		if (u.text == "/new") {
 			user_messages.erase(u.user_id);
 			tg_send(u.chat_id, "(history cleared)");
 			return;
 		}
-		if (u.text == "/help" || u.text == "/start") {
-			tg_send(u.chat_id,
-				"haiku-claude-cli bridge\n"
-				"\n"
-				"Send any message and I'll run it through Claude on the "
-				"local machine.\n"
-				"\n"
-				"Commands:\n"
-				"  /new     reset this chat's rolling history\n"
-				"  /mute    stop sending replies until /unmute\n"
-				"  /unmute  resume sending replies\n"
-				"  /help    this message");
-			return;
+
+		// All other slash commands are dispatched through the shared
+		// DispatchSlash handler so the Telegram user gets the same
+		// set of commands as the local REPL. /exit, /quit, and
+		// /remote-control are bridge-meaningless and rejected.
+		if (!u.text.empty() && u.text.front() == '/') {
+			const std::string cmd_word = u.text.substr(0, u.text.find(' '));
+			if (cmd_word == "/exit" || cmd_word == "/quit"
+					|| cmd_word == "/remote-control") {
+				tg_send(u.chat_id, "(" + cmd_word + " is not available from Telegram)");
+				return;
+			}
+			// /start is a Telegram convention — treat as /help.
+			const std::string dispatched = (u.text == "/start") ? "/help" : u.text;
+
+			// Capture stdout so the DispatchSlash output can be
+			// forwarded to the Telegram chat instead of being printed
+			// to the local terminal only.
+			std::ostringstream capture;
+			std::streambuf* old_buf = std::cout.rdbuf(capture.rdbuf());
+
+			json& messages_ref  = user_messages[u.user_id];
+			if (!messages_ref.is_array()) messages_ref = json::array();
+			LoopCtx ctx{auth, cfg.max_tokens, cfg.system, cfg.prices,  // flawfinder: ignore
+						fActivemodel, turn_count, session_input, session_output,
+						messages_ref, telegram_session_urls,
+						telegram_notify_enabled, telegram_notify_min_duration,
+						[&]() { tui::SetStatusBar(compose_bridge_status()); }};
+			std::string passthrough;
+			const SlashAction action = DispatchSlash(dispatched, ctx, passthrough);
+
+			std::cout.rdbuf(old_buf);
+			const std::string output = capture.str();
+
+			// Strip ANSI escape sequences before sending to Telegram.
+			std::string plain;
+			plain.reserve(output.size());
+			for (size_t i = 0; i < output.size(); ) {
+				if (output[i] == '\x1b' && i + 1 < output.size() && output[i+1] == '[') {
+					i += 2;
+					while (i < output.size()
+							&& output[i] != 'm' && output[i] != 'K'
+							&& output[i] != 'H' && output[i] != 'A'
+							&& output[i] != 'B' && output[i] != 'J') ++i;
+					if (i < output.size()) ++i;
+				} else {
+					plain += output[i++];
+				}
+			}
+			// Trim leading/trailing blank lines.
+			while (!plain.empty() && (plain.front() == '\n' || plain.front() == ' '))
+				plain.erase(plain.begin());
+			while (!plain.empty() && (plain.back() == '\n' || plain.back() == ' '))
+				plain.pop_back();
+
+			if (action == SlashAction::Passthrough) {
+				// A custom command expanded to a real prompt — fall
+				// through to the normal process_turn path below with
+				// the expanded text, not the original slash command.
+				// Rewrite u.text in a local copy so process_turn sees
+				// the expansion. We can't reach this block from the
+				// return below since Passthrough falls through.
+				const_cast<telegram::Update&>(u).text = passthrough;
+				// Intentional fall-through to normal prompt handling.
+			} else {
+				if (!plain.empty()) tg_send(u.chat_id, plain);
+				// Reflect state-changing commands to the local terminal.
+				if (!output.empty()) std::cout << output << std::flush;
+				return;
+			}
 		}
 
 		json& messages = user_messages[u.user_id];

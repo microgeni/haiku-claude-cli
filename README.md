@@ -366,12 +366,24 @@ What you get on the phone:
 
 Bot commands available from Telegram:
 
-| Command    | Effect                                                            |
-|------------|-------------------------------------------------------------------|
-| `/mute`    | Stop sending replies (incoming prompts still run locally).        |
-| `/unmute`  | Resume sending replies.                                           |
-| `/new`     | Clear this user's rolling conversation history.                   |
-| `/help`    | Show the command list.                                            |
+| Command              | Effect                                                            |
+|----------------------|-------------------------------------------------------------------|
+| `/mute`              | Stop sending replies (incoming prompts still run locally).        |
+| `/unmute`            | Resume sending replies.                                           |
+| `/new`               | Clear this user's rolling conversation history.                   |
+| `/clear`             | Same as `/new`.                                                   |
+| `/model [name]`      | Show current model, or swap to a different one.                   |
+| `/compact`           | Summarize and replace the running conversation history.           |
+| `/usage`             | Session token count and subscription window utilisation.          |
+| `/cost`              | Same as `/usage`.                                                 |
+| `/todos`             | Print the current in-session todo list.                           |
+| `/stats`             | Lifetime token usage and tool stats.                              |
+| `/ludicrous`         | Toggle ludicrous mode (auto-approve all tool permissions).        |
+| `/help` or `/start`  | Show the full command list.                                       |
+
+`/exit`, `/quit`, and `/remote-control` are not available from Telegram.
+Custom commands (`.claude/commands/*.md`) work too — send `/commandname args`
+just as you would in the local REPL.
 
 The status bar on the Haiku machine shows **Remote Control active**
 in green, with **· muted** appended in yellow when muted.
