@@ -26,6 +26,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up SSH key
+        env:
+          DEVOPS_SSH_KEY: ${{ secrets.DEVOPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEVOPS_SSH_KEY" > ~/.ssh/ci_ed25519
+          chmod 600 ~/.ssh/ci_ed25519
+          printf 'Host taurus\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/ci_ed25519\n  StrictHostKeyChecking no\n  IdentitiesOnly yes\n' \
+            "$HAIKU_HOST" "$HAIKU_USER" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
       - name: Sync to Haiku
         env:
           REF: ${{ github.ref_name }}
@@ -33,12 +45,12 @@ jobs:
 
       - name: Build on Haiku
         run: |
-          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+          ssh -n taurus \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh </dev/null"
 
       - name: Test on Haiku
         run: |
-          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+          ssh -n taurus \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/test.sh </dev/null"
 
       - name: Summary
@@ -58,6 +70,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set up SSH key
+        env:
+          DEVOPS_SSH_KEY: ${{ secrets.DEVOPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEVOPS_SSH_KEY" > ~/.ssh/ci_ed25519
+          chmod 600 ~/.ssh/ci_ed25519
+          printf 'Host taurus\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/ci_ed25519\n  StrictHostKeyChecking no\n  IdentitiesOnly yes\n' \
+            "$HAIKU_HOST" "$HAIKU_USER" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
       - name: Build HPKG on Haiku
         id: hpkg
