@@ -6,7 +6,55 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.4.8] - 2026-04-19
+## [1.4.9] - 2026-06-17
+
+### Added
+- **`make lint`** — cppcheck static analysis (warning, performance,
+  portability categories); exits non-zero on any finding so it can gate CI.
+- **`make security`** — flawfinder CWE security audit at level 3+; zero
+  hits on clean tree.
+- **`make security-full`** — flawfinder full scan at level 2+.
+- **`make check`** — runs lint + security in sequence; intended as the
+  pre-release gate.
+- **Bracketed paste mode** — `repl::Init()` sends `\e[?2004h` on TTY
+  startup. Pasted multi-line text is now received atomically via the
+  `\e[200~…\e[201~` markers, transformed into backslash-continuation
+  lines, and fed to `ReadMessage()`'s existing loop. `repl::Deinit()`
+  restores the terminal on exit and signal teardown.
+- **`select_option` heading** — the menu now accepts an optional heading
+  string. On selection the entire block (heading + all option rows) is
+  erased and replaced with a single compact summary line
+  (`allow bash? → Yes, allow once`) so scroll history stays informative
+  without the full menu lingering. Applied to all four call sites:
+  permission prompt, `/model`, `/memory`, and `/compact`.
+
+### Changed
+- **Haiku Coding Guidelines conformance** — full codebase refactor:
+  - Indentation converted from 4-space to tabs across all 23 source files
+    (~7,400 lines).
+  - ~95 public namespace functions and class methods renamed from
+    `snake_case` to `PascalCase` (`send_conversation` →
+    `SendConversation`, `terminal_width` → `TerminalWidth`, etc.).
+    Internal anonymous-namespace helpers retain `snake_case` per the
+    documented exception.
+  - Member variables renamed from trailing-underscore to `f`-prefix style
+    (`label_` → `fLabel`, `thread_` → `fThread`, etc.) across all five
+    classes: `MarkdownRenderer`, `Spinner`, `EscInterruptGuard`,
+    `RemoteControl`, `telegram::Client`.
+
+### Fixed
+- **TOCTOU file permission race (CWE-362)** — `SaveHistory()` and
+  `SaveTokens()` called `chmod()` after closing an `ofstream`, leaving
+  a window where credential files were world-readable. Fixed by opening
+  with `open(O_WRONLY|O_CREAT|O_TRUNC, 0600)` + `fdopen()` so the
+  correct mode is set atomically at creation time.
+- **`snprintf` buffer too small** — the `/open` URL list used a 16-byte
+  buffer for `"  %zu. "` which can require up to 25 bytes on 64-bit;
+  widened to 32 bytes, eliminating the `-Wformat-truncation` warning.
+- **`uselessCallsSubstr` performance** — seven sites of
+  `x = x.substr(0, n) [+ suffix]` replaced with `x.resize(n); x += suffix`
+  to avoid an unnecessary heap allocation and copy.
+
 
 ### Fixed
 - **`terminate()` crash on invalid UTF-8 in system prompt** — CLAUDE.md
