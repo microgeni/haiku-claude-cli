@@ -41,11 +41,9 @@ project size.
 - **Desktop notifications**: when a long-running response finishes,
   `claude-cli` fires a native `BNotification` via Haiku's
   `notification_server`. The alert shows the first sentence of the
-  reply, uses the Claude icon (HVIF vector format), and includes a
-  rotating playful title so repeated notifications stay readable. The
-  notification is sent from a detached child process so it never
-  interferes with the terminal's scroll region or `termios` state.
-
+  reply, uses the Claude icon and includes a rotating playful title 
+  so repeated notifications stay readable.
+ 
 ### Telegram remote control — Claude in your pocket
 
 Add a `telegram` block to `config.json` and the bridge starts
