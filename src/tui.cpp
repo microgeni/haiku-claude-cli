@@ -299,7 +299,8 @@ void ShowCursor() {
 
 int SelectOption(const std::vector<std::string>& options,
 				  const std::string& heading,
-				  std::atomic<bool>* cancel) {
+				  std::atomic<bool>* cancel,
+				  int                pre_lines) {
 	if (options.empty()) return 0;
 	const int n = static_cast<int>(options.size());
 
@@ -332,7 +333,7 @@ int SelectOption(const std::vector<std::string>& options,
 	// Total rows owned by this widget: 1 heading row (if any) + n option rows.
 	// We track this so the teardown erase loop knows how far up to reach.
 	const int heading_rows = heading.empty() ? 0 : 1;
-	const int total_rows   = heading_rows + n;
+
 
 	// Render the menu. Each option takes one line. We'll use ANSI
 	// cursor-up to redraw in-place on each keystroke.
@@ -346,8 +347,13 @@ int SelectOption(const std::vector<std::string>& options,
 		// correctly regardless of where the previous render left the cursor.
 		std::cout << "\r";
 		if (first_render && !heading.empty()) {
+			// First render: print heading and move to first option row.
 			std::cout << "\x1b[2K" << Bold(heading) << "\x1b[1B\r";
 			first_render = false;
+		} else if (!heading.empty()) {
+			// Subsequent renders: cursor is at heading row; skip down to
+			// the first option row so we don't overwrite the heading text.
+			std::cout << "\x1b[1B\r";
 		}
 		for (int i = 0; i < n; ++i) {
 			std::cout << "\x1b[2K"; // erase line
@@ -367,16 +373,81 @@ int SelectOption(const std::vector<std::string>& options,
 				std::cout << "\x1b[1B\r";
 			}
 		}
-		// Move cursor back to the first option line so the next render
-		// overwrites from the same position.  When a heading is present
-		// the first option is one row below it, so add heading_rows to
-		// the cursor-up count.  \r resets column to 0.
-		const int rows_up = (n - 1) + (first_render ? 0 : heading_rows);
+		// Move cursor back to the heading row (or first option row if no
+		// heading) so the next render overwrites from the same position.
+		// Cursor is currently at the last option row (H + heading_rows + n - 1).
+		// We want to return to H (heading row), so move up (heading_rows + n - 1).
+		const int rows_up = heading_rows + n - 1;
 		if (rows_up > 0) std::cout << "\x1b[" << rows_up << "A";
 		std::cout << "\r" << std::flush;
 	};
 
+	// If the cancel flag is already set before we even render (e.g. a
+	// Telegram hook answered while we were setting up raw mode), skip
+	// drawing the menu entirely and return immediately so no flash occurs.
+	if (cancel && cancel->load()) {
+		tcsetattr(fileno(stdin), TCSANOW, &orig);
+		return -1;
+	}
+
+	// Hide the cursor while the menu is on screen to reduce visual noise.
+	std::cout << "\x1b[?25l" << std::flush;
+
 	render();
+
+	// After the first render the cursor is at the heading row.  If the
+	// terminal is small, printing the preview + heading + options may
+	// have caused the DECSTBM scroll region to scroll, pushing some
+	// pre_lines rows off the top.  In that case \x1b[nA is clamped to
+	// row 1 and the teardown erase starts from the wrong position,
+	// leaving stale option lines on screen.
+	//
+	// Fix: query the actual cursor row (DSR \x1b[6n → CPR \x1b[r;cR).
+	// The scroll-region bottom is (TerminalRows() - kStatusBarRows).
+	// The heading row is (cursor_row); at most (cursor_row - 1) rows
+	// exist above it inside the scroll region, so cap pre_lines.
+	{
+		// Flush the render first, then query cursor position.
+		// We read on stdin which is already in raw mode (set above).
+		std::cout << "\x1b[6n" << std::flush;
+		// Read the CPR response: ESC [ row ; col R
+		char buf[32] = {};
+		int  pos     = 0;
+		// Give the terminal up to 500 ms total; each read() uses VMIN=1
+		// so it blocks until a byte arrives (stdin is still in raw mode
+		// with VMIN=1/VTIME=0 at this point).
+		bool got_r = false;
+		while (pos < 31 && !got_r) {
+			unsigned char ch = 0;
+			if (read(fileno(stdin), &ch, 1) != 1) break;
+			buf[pos++] = static_cast<char>(ch);
+			if (ch == 'R') got_r = true;
+		}
+		// Parse \x1b[row;colR
+		if (got_r) {
+			int cur_row = 0, cur_col = 0;
+			// buf starts with ESC [ or just [
+			const char* p = buf;
+			while (*p && *p != '[') ++p;
+			if (*p == '[') {
+				++p;
+				cur_row = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
+				if (*p == ';') {
+					++p;
+					cur_col = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
+				}
+				(void)cur_col;
+			}
+			if (cur_row > 0) {
+				// Rows available above the heading row (1-indexed): cur_row - 1.
+				// But row 1 is the scroll region top, so we can move at most
+				// cur_row - 1 rows upward before hitting the top of the screen.
+				const int rows_above = cur_row - 1;
+				if (pre_lines > rows_above)
+					pre_lines = rows_above;
+			}
+		}
+	}
 
 	// When a cancel flag is supplied, use VMIN=0/VTIME=1 so read()
 	// returns after ~100 ms even with no keypress, letting us check
@@ -394,6 +465,7 @@ int SelectOption(const std::vector<std::string>& options,
 	while (!done) {
 		// Check the cancel flag before each read attempt.
 		if (cancel && cancel->load()) {
+			std::cout << "\x1b[?25h" << std::flush; // restore cursor
 			tcsetattr(fileno(stdin), TCSANOW, &orig);
 			return -1;
 		}
@@ -460,32 +532,53 @@ int SelectOption(const std::vector<std::string>& options,
 		}
 	}
 
-	// Erase the entire owned block (heading + all option rows) and
-	// replace it with a single compact summary line so scroll history
-	// stays informative without the full menu cluttering it.
+	// Collapse the entire owned block (pre_lines + heading + all option rows)
+	// down to a single compact summary line.
 	//
-	// Cursor is currently at the first option row (render() left it
-	// there).  We need to go up by heading_rows more to reach the very
-	// top of the block, then erase downward, then print the summary.
-	if (heading_rows > 0)
-		std::cout << "\x1b[" << heading_rows << "A"; // up to heading row
-	// Erase each owned row from top to bottom using cursor-down between
-	// them (same \x1b[1B\r trick as render() to avoid DECSTBM scrolling).
-	for (int i = 0; i < total_rows; ++i) {
-		std::cout << "\x1b[2K"; // erase current line
-		if (i < total_rows - 1) std::cout << "\x1b[1B\r";
+	// After any render() call the cursor is parked at the heading row H
+	// (render() consistently moves up to H after drawing all options).
+	//
+	// The menu block spans physical rows that may be OUTSIDE the DECSTBM
+	// scroll region (options are drawn below scroll_bottom using \x1b[1B\r
+	// which moves physically without scrolling).  DL (\x1b[nM) only
+	// operates within the scroll region, so it cannot clean up option rows.
+	// Instead we use \x1b[1B\r to visit each row and \x1b[2K to erase it,
+	// then cursor-up to position for the summary.
+	//
+	// Total block rows: pre_lines + heading_rows + n.
+	// We erase all of them, then return to the top to write the summary.
+
+	const int block_rows = pre_lines + heading_rows + n;
+
+	// Step 1: move up pre_lines rows to reach the first row of the block.
+	if (pre_lines > 0)
+		std::cout << "\x1b[" << pre_lines << "A\r";
+
+	// Step 2: erase all block rows from top to bottom (using \x1b[1B\r to
+	// move down without triggering a DECSTBM scroll at the region boundary).
+	for (int i = 0; i < block_rows; ++i) {
+		std::cout << "\x1b[2K"; // erase this row
+		if (i < block_rows - 1)
+			std::cout << "\x1b[1B\r"; // move to next row (no scroll)
 	}
-	// Back to the top of the block: move up (total_rows - 1) lines.
-	if (total_rows > 1) std::cout << "\x1b[" << (total_rows - 1) << "A";
+
+	// Step 3: return to the first row of the block.
+	if (block_rows > 1)
+		std::cout << "\x1b[" << (block_rows - 1) << "A";
 	std::cout << "\r";
-	// Print summary: "heading → chosen label" (or just chosen label if
-	// no heading was given, to keep the fallback behaviour the same).
+
+	// Step 4: write the compact summary on the first (now blank) row.
 	if (!heading.empty()) {
 		std::cout << Dim(heading + " \xe2\x86\x92 " + options[chosen]);
 	} else {
 		std::cout << Dim("  -> " + options[chosen]);
 	}
-	std::cout << "\n" << std::flush;
+
+	// Step 5: leave cursor on the row after the summary, ready for output.
+	// Use \x1b[1B\r (not \n) to avoid scrolling within DECSTBM.
+	std::cout << "\x1b[1B\r";
+
+	std::cout << "\x1b[?25h" << std::flush; // restore cursor
 
 	tcsetattr(fileno(stdin), TCSANOW, &orig);
 	return chosen;

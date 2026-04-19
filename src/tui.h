@@ -140,9 +140,15 @@ void ShowCursor();
 // If cancel is non-null, SelectOption polls it roughly every 100 ms via
 // VMIN=0/VTIME=1 and returns -1 immediately when *cancel becomes true,
 // leaving the menu block intact so the caller can erase it.
+//
+// pre_lines: number of lines already printed above the menu (e.g. a tool
+// preview) that should be erased together with the menu block when the
+// user makes a selection. Those lines are scrolled up into the erase pass
+// so the entire question disappears and is replaced by the compact summary.
 int SelectOption(const std::vector<std::string>& options,
 				  const std::string& heading = {},
-				  std::atomic<bool>* cancel  = nullptr);
+				  std::atomic<bool>* cancel  = nullptr,
+				  int                pre_lines = 0);
 
 std::string Bold(const std::string& s);
 std::string Dim(const std::string& s);

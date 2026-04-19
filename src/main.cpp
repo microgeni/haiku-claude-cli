@@ -1395,10 +1395,18 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		};
 		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
 		if (g_active_esc_guard) g_active_esc_guard->pause();
+		// Count preview lines printed above the menu so SelectOption can
+		// erase them together with the menu block on selection.
+		// extra_pre: the tool preview/summary line(s) + the Telegram hint line.
+		const int race_pre_lines =
+			(extra.empty()
+				? 1
+				: static_cast<int>(std::count(extra.begin(), extra.end(), '\n')) + 1)
+			+ 1; // the "[also awaiting Telegram]" line
 		// Pass &tg_answered so SelectOption polls it every ~100 ms and
 		// returns -1 immediately when the Telegram side wins the race.
 		const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
-											 &tg_answered);
+											 &tg_answered, race_pre_lines);
 		if (g_active_esc_guard) g_active_esc_guard->resume();
 		tui::PositionCursorForChat();
 
@@ -1466,16 +1474,23 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 	// the history shows what was asked. Each piece ends with a
 	// newline so the cursor advances cleanly.
 	const std::string extra = tools::Preview(tool_name, input);
+	int pre_lines = 0; // lines printed above the menu (to be erased with it)
 	if (!extra.empty()) {
 		std::cout << tui::Dim(extra) << "\n";
+		// Count the lines occupied by the preview block: one per '\n' in
+		// the string, plus the trailing '\n' we just emitted above.
+		pre_lines = static_cast<int>(std::count(extra.begin(), extra.end(), '\n')) + 1;
 	} else {
 		std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
+		pre_lines = 1;
 	}
 
 	// Render the three choices as a vertical arrow-key menu.
 	// tui::SelectOption puts stdin into raw mode, draws the list,
 	// and returns a 0-based index.  Passing the heading lets it own
 	// the full block and replace it with a compact summary on selection.
+	// pre_lines tells it to erase the preview above the menu too so the
+	// entire question block is replaced by the single summary line.
 	tui::PositionCursorForChat();
 	const std::vector<std::string> choices = {
 		"Yes, allow once",
@@ -1489,7 +1504,8 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 	// split across both readers — causing ↑/↓ to misbehave or register
 	// as a "no" answer.
 	if (g_active_esc_guard) g_active_esc_guard->pause();
-	const int picked = tui::SelectOption(choices, "allow " + tool_name + "?");
+	const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
+										 nullptr, pre_lines);
 	if (g_active_esc_guard) g_active_esc_guard->resume();
 	tui::PositionCursorForChat();
 
