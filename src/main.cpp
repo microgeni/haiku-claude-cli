@@ -936,6 +936,15 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
         return {1, {}, 0, 0, {}, {}};
     }
 
+    // Sanitize the system prompt once before entering the retry loop.
+    // CLAUDE.md files and the BFS snapshot are read as raw bytes and may
+    // contain non-UTF-8 sequences (e.g. a file with a Latin-1 em-dash, a
+    // BFS attribute written by an older tool, etc.). nlohmann::json::dump()
+    // throws type_error.316 on any invalid byte, terminating the process if
+    // uncaught. sanitize_utf8 replaces bad bytes with U+FFFD so the string
+    // is always safe to serialize.
+    const std::string safe_system = sanitize_utf8(custom_system);
+
     for (int attempt = 1; /* break/return inside */; ++attempt) {
     // Reset per-request state on the reused handle so stale
     // headers / callbacks from the previous call don't leak.
@@ -995,21 +1004,28 @@ SendResult send_conversation(const Auth& auth, const std::string& model, int max
     if (auth.kind == AuthKind::OAuth) {
         json system_array = json::array();
         system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
-        if (!custom_system.empty()) {
-            system_array.push_back({{"type", "text"}, {"text", custom_system}});
+        if (!safe_system.empty()) {
+            system_array.push_back({{"type", "text"}, {"text", safe_system}});
         }
         system_array.back()["cache_control"] = {{"type", "ephemeral"}};
         body["system"] = system_array;
-    } else if (!custom_system.empty()) {
+    } else if (!safe_system.empty()) {
         body["system"] = json::array({
             {
                 {"type", "text"},
-                {"text", custom_system},
+                {"text", safe_system},
                 {"cache_control", {{"type", "ephemeral"}}},
             },
         });
     }
-    const std::string body_str = body.dump();
+    std::string body_str;
+    try {
+        body_str = body.dump();
+    } catch (const json::exception& e) {
+        std::cerr << "\nerror: failed to serialize request body: " << e.what() << "\n"
+                  << "  (hint: a system prompt or message may contain invalid UTF-8)\n";
+        return {1, {}, 0, 0, {}, {}};
+    }
 
     curl_slist* headers = nullptr;
     if (auth.kind == AuthKind::OAuth) {
