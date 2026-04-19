@@ -329,8 +329,9 @@ int select_option(const std::vector<std::string>& options) {
     // Render the menu. Each option takes one line. We'll use ANSI
     // cursor-up to redraw in-place on each keystroke.
     auto render = [&]() {
-        // On first call we're already positioned in the scroll region.
-        // Erase and reprint each option line.
+        // Always start from column 0 so erased+reprinted text aligns
+        // correctly regardless of where the previous render left the cursor.
+        std::cout << "\r";
         for (int i = 0; i < n; ++i) {
             std::cout << "\x1b[2K"; // erase line
             const std::string num = std::to_string(i + 1) + ". ";
@@ -340,12 +341,20 @@ int select_option(const std::vector<std::string>& options) {
             } else {
                 std::cout << "  " << dim(num) << dim(options[i]);
             }
-            if (i < n - 1) std::cout << "\n"; // no trailing newline after last
+            if (i < n - 1) {
+                // Use \x1b[1B\r (cursor-down + CR) instead of \n.
+                // The cursor starts at the bottom of the DECSTBM scroll
+                // region; emitting \n there causes the terminal to scroll
+                // the region up, shifting the menu's absolute row on every
+                // redraw and breaking highlight updates on arrow keypresses.
+                std::cout << "\x1b[1B\r";
+            }
         }
-        // Move cursor back to the first option line so the next
-        // render overwrites from the same position.
+        // Move cursor back to the first option line so the next render
+        // overwrites from the same position. \r resets column to 0 since
+        // \x1b[NA is a vertical-only move and preserves the current column.
         if (n > 1) std::cout << "\x1b[" << (n - 1) << "A";
-        std::cout << std::flush;
+        std::cout << "\r" << std::flush;
     };
 
     render();
@@ -359,11 +368,15 @@ int select_option(const std::vector<std::string>& options) {
         if (c == 0x1b) {
             // Escape sequence or bare Esc.
             unsigned char seq[2] = {};
-            // Try to read [ and then the final byte (non-blocking).
-            // If nothing follows within a short window it's a bare Esc.
+            // Use VMIN=1 VTIME=1: block until a byte arrives or 100 ms
+            // elapses.  VMIN=0 VTIME=1 is a polling read — on a real
+            // terminal it can return 0 immediately even when the rest of
+            // the CSI sequence ([ A/B) is already in the kernel buffer,
+            // because tcsetattr flushes the old settings before the bytes
+            // land.  VMIN=1 guarantees we wait for the byte.
             struct termios nb = raw;
-            nb.c_cc[VMIN]  = 0;
-            nb.c_cc[VTIME] = 1; // 100 ms
+            nb.c_cc[VMIN]  = 1;
+            nb.c_cc[VTIME] = 1; // 100 ms inter-byte timeout
             tcsetattr(fileno(stdin), TCSANOW, &nb);
             const int r1 = read(fileno(stdin), &seq[0], 1);
             const int r2 = (r1 == 1 && seq[0] == '[')
@@ -431,7 +444,14 @@ std::string user_prompt() {
 }
 
 std::string claude_prompt() {
-    return wrap("\x1b[1;35m", "claude> ");
+    // Prepend DECTCEM show-cursor (\e[?25h) so that printing the
+    // prompt always restores cursor visibility — no matter which
+    // code path arrives here after a Spinner or streaming output
+    // may have hidden it with \e[?25l.  The escape is only emitted
+    // when color/TTY mode is active (same guard as hide_cursor /
+    // show_cursor), so non-TTY / pipe output is unaffected.
+    const std::string show = g_color_enabled ? "\x1b[?25h" : "";
+    return show + wrap("\x1b[1;35m", "claude> ");
 }
 
 std::string continuation_prompt() {

@@ -13,7 +13,7 @@ set -euo pipefail
 : "${GITEA_REPO_URL:?GITEA_REPO_URL required}"
 : "${REF:?REF required}"
 
-ssh -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
+ssh taurus \
     bash -s "$HAIKU_PROJECT_PATH" "$GITEA_REPO_URL" "$REF" <<'REMOTE'
 set -euo pipefail
 project_path="$1"
