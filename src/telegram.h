@@ -2,9 +2,20 @@
 #define HAIKU_CLAUDE_CLI_TELEGRAM_H
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_set>
 #include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "config.h"
 
 // Tiny Telegram Bot API client over libcurl. Enough for the v1.1
 // remote-control bridge: long-polling getUpdates and sending text
@@ -13,6 +24,14 @@
 // Does NOT own an event loop; callers are expected to call poll()
 // in their own loop. Thread-unsafe — one client per thread.
 namespace telegram {
+
+// Remote-control mute toggle. When true, every outbound call to the
+// bot API (sendMessage / editMessageText / sendChatAction) is
+// suppressed by the RemoteControl wrappers. Incoming messages still
+// process locally; nothing leaves the machine until /unmute. Lives
+// here rather than inside RemoteControl so the REPL's status bar can
+// read it to show the "muted" label.
+extern std::atomic<bool> g_muted;
 
 struct Button {
 	std::string text;          // label rendered on the button
@@ -107,6 +126,96 @@ private:
 
 	std::string fToken;
 	int64_t     fNextOffset = 0;
+};
+
+// Self-contained background Telegram poller spawned on demand by
+// the /remote-control slash command inside the REPL. Runs in its
+// own thread, polls Telegram for incoming messages from allowed
+// users, and hands each one to api::SendWithTools on the local
+// machine. Each Telegram user gets an independent rolling history
+// (not shared with the REPL's own messages, but local turns are
+// mirrored to the primary chat).
+//
+// Fully bidirectional: streaming edits, typing indicator, inline
+// permission buttons, numbered-option buttons, and local input
+// mirroring.
+class RemoteControl {
+public:
+	// Validate config.telegram has the required bot_token and at
+	// least one allowed_user_id. On failure, populates *reason
+	// with a user-friendly explanation and returns false.
+	static bool ConfigIsValid(const config::Config& cfg, std::string* reason);
+
+	RemoteControl(const config::Config& cfg, const config::Auth& auth,
+				  const std::string& custom_system);
+	~RemoteControl();
+	RemoteControl(const RemoteControl&) = delete;
+	RemoteControl& operator=(const RemoteControl&) = delete;
+
+	bool Start();
+	void Stop();
+	bool Running() const;
+
+	// Serialise turns between the local REPL and the Telegram
+	// worker. AcquireTurn() blocks until no other turn is in
+	// progress; ReleaseTurn() clears the token.
+	void AcquireTurn();
+	void ReleaseTurn();
+
+	// Mirror a locally-initiated turn to the primary Telegram chat.
+	// Call order: MirrorPrompt() before api::SendWithTools starts,
+	// then MirrorToPrimary() after it returns, or MirrorCancel() if
+	// the turn was aborted.
+	void MirrorPrompt(const std::string& user_text);
+	void MirrorToPrimary(const std::string& assistant_text);
+	void MirrorCancel();
+
+	// Animate the primary chat's "thinking" placeholder while a
+	// local turn is in progress. StartThinkingUpdater is called
+	// from MirrorPrompt; StopThinkingUpdater from the terminating
+	// MirrorToPrimary / MirrorCancel.
+	void StartThinkingUpdater();
+	void StopThinkingUpdater();
+
+private:
+	void PollLoop();
+	void WorkLoop();
+	void TgSend(int64_t chat, const std::string& text);
+	void ProcessUpdate(const Update& u);
+
+	Client                       fClient;
+	std::unordered_set<int64_t>  fAllowed;
+	int64_t                      fPrimaryUserId = 0;
+	int64_t                      fPrimaryThinkingMsgId = 0;
+	// Chat ID that the persistent permission/status hooks target.
+	// Set to the sender's chat_id at the start of each Telegram-
+	// origin turn; reset to fPrimaryUserId when that turn ends.
+	std::atomic<int64_t>         fActiveChatId { 0 };
+	std::atomic<bool>            fUpdaterRunning { false };
+	std::thread                  fUpdaterThread;
+	bool                         fAllowDestructive = false;
+	config::Auth                 fAuth;
+	std::string                  fCustomSystem;
+	std::string                  fCfgModel;
+	int                          fCfgMaxTokens;
+	std::map<int64_t, nlohmann::json> fUserMessages;
+	std::atomic<bool>            fRunning { false };
+	std::thread                  fPoller;
+	// Turn-token: serialises local and Telegram-origin turns
+	// without holding a mutex across SendWithTools.
+	std::mutex                   fTurnMu;
+	std::condition_variable      fTurnCv;
+	bool                         fTurnInProgress = false;
+	// Worker thread for Telegram-origin turns.
+	std::deque<Update>           fWorkQueue;
+	std::mutex                   fWorkMu;
+	std::condition_variable      fWorkCv;
+	std::atomic<bool>            fWorkerRunning { false };
+	std::thread                  fWorker;
+	// Shared queue for perm:* callback taps.
+	std::deque<Update>           fPermQueue;
+	std::mutex                   fPermMu;
+	std::condition_variable      fPermCv;
 };
 
 } // namespace telegram
