@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-04-19
+
+### Fixed
+- **`stats.json` silently wiped on crash or corrupt file** — three
+  co-operating bugs could reset all lifetime stats to zero:
+  (1) `stats.json` was opened with `std::ofstream` which truncates the
+  file to zero immediately; a crash or kill mid-write left an empty file
+  that loaded as `fresh()`, which was then saved over the real data.
+  Fixed by writing to `stats.json.tmp` first and promoting it with
+  `rename(2)`, which is atomic on POSIX — the previous file survives any
+  mid-write failure.
+  (2) A JSON parse error (corrupt file, half-written file) silently
+  returned a zeroed `fresh()` blob which was immediately saved over the
+  real data. Fixed by falling back to `stats.json.bak` (the previous
+  successful save) before resorting to `fresh()`.
+  (3) Input/output token counters were stored as 32-bit JSON integers;
+  overflow at ~2 billion tokens would produce a negative value, trigger
+  the parse-error path above, and wipe all history. Fixed by using
+  `long long` (`int64`) throughout.
+
 ## [1.4.6] - 2026-04-19
 
 ### Fixed

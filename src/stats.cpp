@@ -1,8 +1,10 @@
 #include "stats.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -19,35 +21,86 @@ std::string stats_path() {
     return paths::config_dir() + "/stats.json";
 }
 
+std::string stats_tmp_path() {
+    return paths::config_dir() + "/stats.json.tmp";
+}
+
+std::string stats_bak_path() {
+    return paths::config_dir() + "/stats.json.bak";
+}
+
 // Default stats blob returned when the file is missing or unreadable.
 // Kept as a free function so load() doesn't have to repeat the literal
 // twice (missing-file and parse-error cases both want the same shape).
 json fresh() {
     return {
         {"first_session", ""},
-        {"sessions",      0},
-        {"turns",         0},
-        {"input_tokens",  0},
-        {"output_tokens", 0},
+        {"sessions",      0LL},
+        {"turns",         0LL},
+        {"input_tokens",  0LL},
+        {"output_tokens", 0LL},
         {"tool_calls",    json::object()},
     };
 }
 
-json load() {
-    std::ifstream f(stats_path());
-    if (!f.is_open()) return fresh();
+// Parse a JSON file at `path`. Returns an empty optional on any error.
+std::optional<json> parse_file(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return std::nullopt;
     try {
         return json::parse(f);
     } catch (const json::exception&) {
-        return fresh();
+        return std::nullopt;
     }
 }
 
+json load() {
+    // 1. Try the live file.
+    if (auto j = parse_file(stats_path())) return *j;
+
+    // 2. Live file missing or corrupt — try the last-good backup.
+    if (auto j = parse_file(stats_bak_path())) {
+        // Restore it so future crashes recover the same way.
+        std::ifstream src(stats_bak_path(), std::ios::binary);
+        std::ofstream dst(stats_path(),     std::ios::binary);
+        if (src && dst) dst << src.rdbuf();
+        return *j;
+    }
+
+    // 3. Nothing salvageable — start fresh.
+    return fresh();
+}
+
+// Atomic save: write to a .tmp file then rename over the live path.
+// rename(2) is guaranteed atomic on POSIX so a crash mid-write leaves
+// the previous live file intact.  After a successful rename we also
+// copy the live file to .bak so there is always a last-known-good
+// backup one generation behind the live data.
 void save(const json& s) {
     paths::mkdir_p(paths::config_dir());
-    std::ofstream f(stats_path());
-    if (f.is_open()) {
+    const std::string tmp  = stats_tmp_path();
+    const std::string live = stats_path();
+    const std::string bak  = stats_bak_path();
+
+    // Write to .tmp first.
+    {
+        std::ofstream f(tmp);
+        if (!f.is_open()) return;
         f << s.dump(2) << "\n";
+        if (!f.good()) { std::remove(tmp.c_str()); return; }
+    }
+
+    // Promote .tmp → live (atomic on POSIX).
+    if (std::rename(tmp.c_str(), live.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return;
+    }
+
+    // Copy live → .bak (best-effort; never clobber live on failure).
+    {
+        std::ifstream src(live, std::ios::binary);
+        std::ofstream dst(bak,  std::ios::binary);
+        if (src && dst) dst << src.rdbuf();
     }
 }
 
@@ -55,7 +108,7 @@ void save(const json& s) {
 // "654229" renders as "654,229" in the stats table. Keeps the
 // numbers scannable — the difference between 6,600 and 66,000
 // saved tokens is the whole story of /stats.
-std::string thousands(long n) {
+std::string thousands(long long n) {
     if (n < 0) return "-" + thousands(-n);
     std::string s = std::to_string(n);
     for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) {
@@ -68,7 +121,7 @@ std::string thousands(long n) {
 
 void record_session() {
     json s = load();
-    s["sessions"] = s.value("sessions", 0) + 1;
+    s["sessions"] = s.value("sessions", 0LL) + 1LL;
     if (s.value("first_session", std::string{}).empty()) {
         const std::time_t t = std::time(nullptr);
         std::tm tm{};
@@ -82,9 +135,9 @@ void record_session() {
 
 void record_turn(int input_tokens, int output_tokens) {
     json s = load();
-    s["turns"]         = s.value("turns", 0) + 1;
-    s["input_tokens"]  = s.value("input_tokens", 0) + input_tokens;
-    s["output_tokens"] = s.value("output_tokens", 0) + output_tokens;
+    s["turns"]         = s.value("turns",         0LL) + 1LL;
+    s["input_tokens"]  = s.value("input_tokens",  0LL) + static_cast<long long>(input_tokens);
+    s["output_tokens"] = s.value("output_tokens", 0LL) + static_cast<long long>(output_tokens);
     save(s);
 }
 
@@ -94,13 +147,13 @@ void record_tool(const std::string& tool_name, int result_bytes,
     auto& tc = s["tool_calls"];
     if (!tc.is_object()) tc = json::object();
     if (!tc.contains(tool_name)) {
-        tc[tool_name] = {{"count", 0}, {"bytes", 0}, {"saved_bytes", 0}};
+        tc[tool_name] = {{"count", 0LL}, {"bytes", 0LL}, {"saved_bytes", 0LL}};
     }
-    tc[tool_name]["count"] = tc[tool_name].value("count", 0) + 1;
-    tc[tool_name]["bytes"] = tc[tool_name].value("bytes", 0) + result_bytes;
+    tc[tool_name]["count"] = tc[tool_name].value("count", 0LL) + 1LL;
+    tc[tool_name]["bytes"] = tc[tool_name].value("bytes", 0LL) + static_cast<long long>(result_bytes);
     if (saved_bytes > 0) {
         tc[tool_name]["saved_bytes"] =
-            tc[tool_name].value("saved_bytes", static_cast<long>(0)) + saved_bytes;
+            tc[tool_name].value("saved_bytes", 0LL) + static_cast<long long>(saved_bytes);
     }
     save(s);
 }
@@ -108,10 +161,10 @@ void record_tool(const std::string& tool_name, int result_bytes,
 std::string format_display() {
     const json s = load();
     const std::string since = s.value("first_session", std::string{"(unknown)"});
-    const int  sessions = s.value("sessions", 0);
-    const int  turns    = s.value("turns", 0);
-    const long in_tok   = s.value("input_tokens",  static_cast<long>(0));
-    const long out_tok  = s.value("output_tokens", static_cast<long>(0));
+    const int  sessions = s.value("sessions", 0LL);
+    const int  turns    = s.value("turns", 0LL);
+    const long long in_tok   = s.value("input_tokens",  0LL);
+    const long long out_tok  = s.value("output_tokens", 0LL);
 
     // Ballpark lifetime cost using Sonnet rates ($3 / M input,
     // $15 / M output). Stats are cross-model but Sonnet is the
@@ -121,28 +174,28 @@ std::string format_display() {
 
     // BFS counters — computed first so the summary block can
     // lead with the savings number.
-    long read_attr_saved = 0, read_attr_used = 0;
+    long long read_attr_saved = 0, read_attr_used = 0;
     int  read_attr_calls = 0;
-    long query_saved     = 0, query_used    = 0;
+    long long query_saved     = 0, query_used    = 0;
     int  query_calls     = 0;
     if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
         const auto& tc = s["tool_calls"];
         if (tc.contains("ReadAttr")) {
-            read_attr_saved = tc["ReadAttr"].value("saved_bytes", static_cast<long>(0));
-            read_attr_used  = tc["ReadAttr"].value("bytes",       static_cast<long>(0));
-            read_attr_calls = tc["ReadAttr"].value("count",       0);
+            read_attr_saved = tc["ReadAttr"].value("saved_bytes", 0LL);
+            read_attr_used  = tc["ReadAttr"].value("bytes",       0LL);
+            read_attr_calls = tc["ReadAttr"].value("count",       0LL);
         }
         if (tc.contains("Query")) {
-            query_saved = tc["Query"].value("saved_bytes", static_cast<long>(0));
-            query_used  = tc["Query"].value("bytes",       static_cast<long>(0));
-            query_calls = tc["Query"].value("count",       0);
+            query_saved = tc["Query"].value("saved_bytes", 0LL);
+            query_used  = tc["Query"].value("bytes",       0LL);
+            query_calls = tc["Query"].value("count",       0LL);
         }
     }
-    const long total_saved_bytes = read_attr_saved + query_saved;
-    const long total_used_bytes  = read_attr_used  + query_used;
-    const long saved_tokens      = total_saved_bytes / 4;
-    const long used_tokens       = total_used_bytes  / 4;
-    const long full_tokens       = saved_tokens + used_tokens;
+    const long long total_saved_bytes = read_attr_saved + query_saved;
+    const long long total_used_bytes  = read_attr_used  + query_used;
+    const long long saved_tokens      = total_saved_bytes / 4;
+    const long long used_tokens       = total_used_bytes  / 4;
+    const long long full_tokens       = saved_tokens + used_tokens;
     const int  bfs_pct           = full_tokens > 0
         ? static_cast<int>((saved_tokens * 100) / full_tokens)
         : 0;
