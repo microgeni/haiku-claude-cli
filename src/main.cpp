@@ -5,11 +5,13 @@
 #include <cerrno>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
@@ -382,8 +384,18 @@ struct StreamProgress {
 	std::mutex        mu;
 	std::string       text;
 	std::atomic<int>  version {0};
+	// Non-empty while a tool is actively running. The updater thread
+	// shows this string instead of the "thinking…" animation so the
+	// Telegram user sees e.g. "🔧 running Bash…" during tool execution.
+	std::string       tool_phase;
 };
 StreamProgress* g_stream_progress = nullptr;
+
+// Optional hook installed by Telegram bridge contexts to forward tool
+// lifecycle notices (start, result, denial) as separate Telegram
+// messages so the remote user has the same visibility as the local
+// operator. Signature: (notice_text). Cleared to nullptr after each turn.
+std::function<void(const std::string&)> g_tool_status_hook;
 
 std::map<std::string, std::string> g_last_rate_headers;
 
@@ -1274,6 +1286,12 @@ bool g_non_interactive_allow_destructive = false;
 // always visible on the Telegram side.
 std::atomic<bool> g_telegram_muted { false };
 
+// Pauses the Telegram thinking-updater threads while a permission
+// prompt is in flight so the bot doesn't spam EditMessageText and
+// hit Telegram rate limits that would delay (or drop) the inline-
+// keyboard "allow Bash?" message the user needs to tap.
+std::atomic<bool> g_telegram_updater_paused { false };
+
 // Set at startup from Config::fAllowDestructivetools or the -y/--yes
 // flag. Grants destructive-tool permission without prompting whenever
 // stdin isn't usable for a y/a/n dialog (piped stdin, closed stdin,
@@ -1304,24 +1322,28 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		return Permission::Allow;
 	}
 
+	// Telegram remote-control hook: fires for ALL turns (local or
+	// Telegram-origin) when /remote-control is active.  Checked
+	// before the g_non_interactive_tools gate so a local turn that
+	// triggers Bash still asks the Telegram user for approval.
+	if (g_telegram_permission_hook) {
+		const std::string extra = tools::Preview(tool_name, input);
+		const std::string preview = extra.empty()
+			? (tool_name + " " + ShortInputSummary(input))
+			: extra;
+		// Mirror the question on the local terminal so the operator
+		// sitting at the keyboard also sees what is being asked.
+		if (!extra.empty()) std::cout << tui::Dim(extra) << "\n";
+		else std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
+		std::cout << tui::Bold("allow " + tool_name + "? ")
+				  << tui::Dim("[awaiting Telegram response]") << "\n" << std::flush;
+		const Permission p = g_telegram_permission_hook(tool_name, preview);
+		const char* lbl = (p == Permission::Allow) ? "yes" : "no";
+		std::cout << tui::Dim(std::string("  -> ") + lbl) << "\n";
+		return p;
+	}
+
 	if (g_non_interactive_tools) {
-		// If the Telegram bridge has installed a permission hook,
-		// use it: send a message with inline buttons and block until
-		// the user taps one, rather than silently allowing/denying.
-		if (g_telegram_permission_hook) {
-			const std::string extra = tools::Preview(tool_name, input);
-			const std::string preview = extra.empty()
-				? (tool_name + " " + ShortInputSummary(input))
-				: extra;
-			// Also show on local terminal so operator sees the prompt.
-			if (!extra.empty()) std::cout << tui::Dim(extra) << "\n";
-			else std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
-			std::cout << tui::Bold("allow " + tool_name + "? ") << tui::Dim("[awaiting Telegram response]") << "\n" << std::flush;
-			const Permission p = g_telegram_permission_hook(tool_name, preview);
-			const char* lbl = (p == Permission::Allow) ? "yes" : "no";
-			std::cout << tui::Dim(std::string("  -> ") + lbl) << "\n";
-			return p;
-		}
 		if (g_non_interactive_allow_destructive) return Permission::Allow;
 		if (denial_reason) {
 			*denial_reason =
@@ -1528,22 +1550,38 @@ SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tok
 			const std::string tid   = block.value("id",   std::string{});
 			const json        tinput = block.value("input", json::object());
 
-			std::cout << tui::Meta("[tool: " + tname + " " + ShortInputSummary(tinput) + "]") << "\n";
+			const std::string tool_notice = "[tool: " + tname + " " + ShortInputSummary(tinput) + "]";
+			std::cout << tui::Meta(tool_notice) << "\n";
 			LogLine("tool " + tname + " input=" + ShortInputSummary(tinput));
+			// Notify Telegram: tool about to run. Include the rich
+			// preview (diff, file header, etc.) when available so the
+			// remote user sees what they are about to approve, just like
+			// the local preview printed above PromptPermission.
+			if (g_tool_status_hook) {
+				const std::string preview = tools::Preview(tname, tinput);
+				const std::string notice  = preview.empty()
+					? tool_notice
+					: tool_notice + "\n" + preview;
+				g_tool_status_hook(notice);
+			}
 
 			tools::ToolResult tres;
 			const json pre_payload = { {"tool_input", tinput} };
 			if (hooks::Fire(hooks::Event::PreToolUse, pre_payload, tname) == hooks::Outcome::Block) {
 				tres.content  = "hook blocked " + tname;
 				tres.is_error = true;
-				std::cout << tui::Meta("[tool: " + tname + " -> blocked by hook]") << "\n";
+				const std::string blocked_notice = "[tool: " + tname + " -> blocked by hook]";
+				std::cout << tui::Meta(blocked_notice) << "\n";
+				if (g_tool_status_hook) g_tool_status_hook(blocked_notice);
 			} else if (std::string denial;
 					   PromptPermission(tname, tinput, &denial) == Permission::Deny) {
 				tres.content  = denial.empty()
 								? "user denied permission to run " + tname
 								: denial;
 				tres.is_error = true;
-				std::cout << tui::Meta("[tool: " + tname + " -> denied]") << "\n";
+				const std::string denied_notice = "[tool: " + tname + " -> denied]";
+				std::cout << tui::Meta(denied_notice) << "\n";
+				if (g_tool_status_hook) g_tool_status_hook(denied_notice);
 			} else if (tname == "Task") {
 				// Spawn a no-tools sub-agent: fresh messages array,
 				// single round-trip via SendConversation. Streams to
@@ -1573,10 +1611,11 @@ SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tok
 						aggregate.output_tokens += sub.output_tokens;
 					}
 				}
-				std::cout << tui::Meta(tres.is_error
-									   ? "[tool: Task -> error]"
-									   : "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]")
-						  << "\n";
+				const std::string task_result_notice = tres.is_error
+					? "[tool: Task -> error]"
+					: "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]";
+				std::cout << tui::Meta(task_result_notice) << "\n";
+				if (g_tool_status_hook) g_tool_status_hook(task_result_notice);
 				const json post_payload = {
 					{"tool_input",  tinput},
 					{"tool_result", tres.content},
@@ -1588,17 +1627,28 @@ SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tok
 				// tool run so the user sees continuous feedback
 				// instead of a frozen cursor during multi-step
 				// turns. Especially matters for Bash commands that
-				// can take many seconds.
+				// can take many seconds. Also update tool_phase so
+				// the Telegram updater thread shows the tool name
+				// instead of "thinking…" while it runs.
+				if (g_stream_progress) {
+					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
+					g_stream_progress->tool_phase = "\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6"; // 🔧 running ToolName…
+				}
 				{
 					tui::Spinner tool_spinner("running " + tname);
 					tres = tools::Run(tname, tinput);
 					tool_spinner.Stop();
 				}
+				if (g_stream_progress) {
+					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
+					g_stream_progress->tool_phase.clear();
+				}
 				const std::string rsize = std::to_string(tres.content.size());
-				std::cout << tui::Meta(tres.is_error
-									   ? "[tool: " + tname + " -> error]"
-									   : "[tool: " + tname + " -> " + rsize + " bytes]")
-						  << "\n";
+				const std::string result_notice = tres.is_error
+					? "[tool: " + tname + " -> error]"
+					: "[tool: " + tname + " -> " + rsize + " bytes]";
+				std::cout << tui::Meta(result_notice) << "\n";
+				if (g_tool_status_hook) g_tool_status_hook(result_notice);
 				const json post_payload = {
 					{"tool_input",  tinput},
 					{"tool_result", tres.content},
@@ -2385,13 +2435,12 @@ public:
 	}
 
 	RemoteControl(const Config& cfg, const Auth& auth,
-				  const std::string& custom_system, std::mutex& repl_mutex)
+				  const std::string& custom_system)
 		: fClient(cfg.telegram.value("bot_token", std::string{})),
 		  fAuth(auth),
 		  fCustomSystem(custom_system),
 		  fCfgModel(cfg.model),
-		  fCfgMaxTokens(cfg.max_tokens),
-		  fReplMutex(repl_mutex) {
+		  fCfgMaxTokens(cfg.max_tokens) {
 		for (const auto& v : cfg.telegram["allowed_user_ids"]) {
 			if (v.is_number_integer()) fAllowed.insert(v.get<int64_t>());
 		}
@@ -2410,17 +2459,112 @@ public:
 		for (const auto& id : fAllowed) {
 			if (fPrimaryUserId == 0 || id < fPrimaryUserId) fPrimaryUserId = id;
 		}
+		// Default the active perm chat to the primary user so that
+		// a locally-initiated turn can send permission prompts to
+		// Telegram before any Telegram message has arrived.
+		fActiveChatId = fPrimaryUserId;
+		// Clear the always-allowed tool set so "Always allow this session"
+		// approvals from a previous session don't silently carry over and
+		// skip permission prompts in this new one.
+		always_allowed().clear();
 		fRunning.store(true);
+		fWorkerRunning.store(true);
+		fWorker = std::thread(&RemoteControl::work_loop, this);
 		fPoller = std::thread(&RemoteControl::poll_loop, this);
+
+		// Install global hooks once for the lifetime of this
+		// RemoteControl session.  Both local REPL turns and
+		// Telegram-origin turns will share these hooks; the active
+		// chat ID (fActiveChatId) is updated by process_update()
+		// before each Telegram-origin SendWithTools call, and
+		// reset to fPrimaryUserId for local turns so permission
+		// prompts always reach the right chat.
+		g_telegram_permission_hook = [this](const std::string& tool_name,
+											const std::string& preview) -> Permission {
+			const int64_t chat = fActiveChatId.load();
+			if (chat == 0) return Permission::Deny;
+			const std::string question =
+				"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
+			const std::vector<std::vector<telegram::Button>> kb = {
+				{{ "1. Yes, allow once",          "perm:yes"    }},
+				{{ "2. Always allow this session", "perm:always" }},
+				{{ "3. No, deny",                 "perm:no"     }},
+			};
+			g_telegram_updater_paused.store(true);
+			fClient.SendMessage(chat, question, kb);
+			while (!g_interrupted) {
+				std::unique_lock<std::mutex> lk(fPermMu);
+				fPermCv.wait_for(lk, std::chrono::seconds(2),
+					[&]{ return !fPermQueue.empty() || g_interrupted; });
+				while (!fPermQueue.empty()) {
+					const telegram::Update upd = fPermQueue.front();
+					fPermQueue.pop_front();
+					lk.unlock();
+					g_telegram_updater_paused.store(false);
+					fClient.AnswerCallback(upd.callback_query_id);
+					if (upd.text == "perm:always") {
+						always_allowed().insert(tool_name);
+						return Permission::Allow;
+					}
+					if (upd.text == "perm:yes")  return Permission::Allow;
+					if (upd.text == "perm:no")   return Permission::Deny;
+					lk.lock();
+				}
+			}
+			g_telegram_updater_paused.store(false);
+			return Permission::Deny;
+		};
+
+		g_tool_status_hook = [this](const std::string& notice) {
+			const int64_t chat = fActiveChatId.load();
+			if (chat != 0 && !g_telegram_muted.load())
+				fClient.SendMessage(chat, notice);
+		};
+
 		return true;
 	}
 
 	void Stop() {
 		if (!fRunning.exchange(false)) return;
+		g_telegram_permission_hook = nullptr;
+		g_tool_status_hook         = nullptr;
+		// Wake any thread blocked in AcquireTurn() so it sees
+		// fRunning == false and unblocks cleanly.
+		fTurnCv.notify_all();
 		if (fPoller.joinable()) fPoller.join();
+		// Stop the worker thread so it doesn't dangle after the
+		// poller exits. Wake it so it unblocks from the empty
+		// work_queue wait and sees fWorkerRunning == false.
+		fWorkerRunning.store(false);
+		fWorkCv.notify_one();
+		if (fWorker.joinable()) fWorker.join();
 	}
 
 	bool running() const { return fRunning.load(); }
+
+	// Serialise turns: both the local REPL and the Telegram worker
+	// call AcquireTurn() before starting SendWithTools and
+	// ReleaseTurn() when done.  This replaces the old scheme where
+	// work_loop held fReplMutex across the entire SendWithTools
+	// call, which blocked ReadMessage() and froze the local prompt
+	// for the full duration of a Telegram-origin turn.
+	//
+	// AcquireTurn() blocks until no other turn is in progress, then
+	// sets the token.  ReleaseTurn() clears it and wakes waiters.
+	// Neither call holds a mutex across SendWithTools itself.
+	void AcquireTurn() {
+		std::unique_lock<std::mutex> lk(fTurnMu);
+		fTurnCv.wait(lk, [this]{ return !fTurnInProgress || !fRunning.load(); });
+		fTurnInProgress = true;
+	}
+
+	void ReleaseTurn() {
+		{
+			std::lock_guard<std::mutex> lk(fTurnMu);
+			fTurnInProgress = false;
+		}
+		fTurnCv.notify_all();
+	}
 
 	// Mirror a local REPL turn to the primary Telegram chat so
 	// the phone-side user sees what was typed locally. Called from
@@ -2505,6 +2649,8 @@ public:
 			while (fUpdaterRunning.load()) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 				if (!fUpdaterRunning.load()) break;
+				// Paused while a permission prompt is in flight.
+				if (g_telegram_updater_paused.load()) continue;
 				const int64_t ph = fPrimaryThinkingMsgId;
 				if (ph == 0) break;
 				if (g_stream_progress) {
@@ -2552,9 +2698,53 @@ private:
 					LogLine("remote-control reject user=" + std::to_string(u.user_id));
 					continue;
 				}
-				std::lock_guard<std::mutex> lk(fReplMutex);
-				process_update(u);
+				// Route perm:* button taps to the permission queue so
+				// the hook's wait loop sees them instead of the outer
+				// poll consuming them first.
+				if (u.is_callback && u.text.rfind("perm:", 0) == 0) {
+					{
+						std::lock_guard<std::mutex> lk(fPermMu);
+						fPermQueue.push_back(u);
+					}
+					fPermCv.notify_one();
+					continue;
+				}
+				// Push to the work queue so the worker thread processes
+				// the turn. This keeps the poller free to long-poll
+				// getUpdates and deliver perm:* callbacks while a turn
+				// is in flight — fixing the deadlock where the
+				// permission hook blocked waiting for a callback that
+				// the poller couldn't receive.
+				{
+					std::lock_guard<std::mutex> lk(fWorkMu);
+					fWorkQueue.push_back(u);
+				}
+				fWorkCv.notify_one();
 			}
+		}
+	}
+
+	void work_loop() {
+		while (fWorkerRunning.load()) {
+			telegram::Update job;
+			{
+				std::unique_lock<std::mutex> lk(fWorkMu);
+				fWorkCv.wait(lk, [&]{
+					return !fWorkQueue.empty() || !fWorkerRunning.load();
+				});
+				if (!fWorkerRunning.load()) break;
+				job = fWorkQueue.front();
+				fWorkQueue.pop_front();
+			}
+			// Serialise against local REPL turns via the turn-token
+			// rather than holding fReplMutex across SendWithTools.
+			// This keeps the local prompt responsive even when a
+			// Telegram turn is running: ReadMessage() never blocks,
+			// and only the moment the user hits Enter do they wait
+			// (briefly) in AcquireTurn() for the current turn to end.
+			AcquireTurn();
+			process_update(job);
+			ReleaseTurn();
 		}
 	}
 
@@ -2676,6 +2866,10 @@ private:
 		json& msgs = fUserMessages[u.user_id];
 		if (!msgs.is_array()) msgs = json::array();
 
+		// Point the persistent permission and status hooks at this
+		// Telegram user's chat for the duration of this turn.
+		fActiveChatId.store(u.chat_id);
+
 		// Post a placeholder and start a streaming-edit updater
 		// thread — identical to the full bridge.
 		const int64_t placeholder_id = [&]() -> int64_t {
@@ -2692,7 +2886,21 @@ private:
 			while (updater_running.load()) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 				if (!updater_running.load()) break;
+				// Paused while a permission prompt is in flight.
+				if (g_telegram_updater_paused.load()) continue;
 				if (placeholder_id == 0) continue;
+
+				// While a tool is actively running, show its name.
+				std::string tool_ph;
+				{
+					std::lock_guard<std::mutex> lk(progress.mu);
+					tool_ph = progress.tool_phase;
+				}
+				if (!tool_ph.empty()) {
+					fClient.EditMessageText(u.chat_id, placeholder_id, tool_ph);
+					continue;
+				}
+
 				const int v = progress.version.load(std::memory_order_relaxed);
 				if (v == last_version) {
 					static const char* kDots[] = {
@@ -2721,43 +2929,15 @@ private:
 		g_non_interactive_tools             = true;
 		g_non_interactive_allow_destructive = fAllowDestructive;
 
-		// Install inline-keyboard permission hook so destructive
-		// tool approvals come back as button taps, not silent denials.
-		g_telegram_permission_hook = [&](const std::string& tool_name,
-										 const std::string& preview) -> Permission {
-			const std::string question =
-				"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
-			const std::vector<std::vector<telegram::Button>> kb = {
-				{{ "1. Yes, allow once",          "perm:yes"    }},
-				{{ "2. Always allow this session", "perm:always" }},
-				{{ "3. No, deny",                 "perm:no"     }},
-			};
-			fClient.SendMessage(u.chat_id, question, kb);
-			std::atomic<bool> keep_going { true };
-			while (!g_interrupted) {
-				const auto updates = fClient.poll(2, &keep_going);
-				for (const auto& upd : updates) {
-					if (!upd.is_callback) continue;
-					if (upd.chat_id != u.chat_id) continue;
-					fClient.AnswerCallback(upd.callback_query_id);
-					if (upd.text == "perm:always") {
-						always_allowed().insert(tool_name);
-						return Permission::Allow;
-					}
-					if (upd.text == "perm:yes")  return Permission::Allow;
-					if (upd.text == "perm:no")   return Permission::Deny;
-				}
-			}
-			return Permission::Deny;
-		};
-
 		std::cout << tui::ClaudePrompt();
 		const std::string effective_system = ComposeSystem(fCustomSystem);
 		const auto result = SendWithTools(fAuth, fCfgModel, fCfgMaxTokens,
 											msgs, effective_system);
 		std::cout << "\n";
-		g_non_interactive_tools    = false;
-		g_telegram_permission_hook = nullptr;
+		g_non_interactive_tools = false;
+		// Restore active chat to primary so any local-turn permission
+		// prompts (after this Telegram turn) go to the right place.
+		fActiveChatId.store(fPrimaryUserId);
 
 		updater_running.store(false);
 		if (updater.joinable()) updater.join();
@@ -2804,6 +2984,11 @@ private:
 	std::unordered_set<int64_t>  fAllowed;
 	int64_t                      fPrimaryUserId = 0;
 	int64_t                      fPrimaryThinkingMsgId = 0;
+	// Chat ID that the persistent permission/status hooks target.
+	// Set to the sender's chat_id at the start of each Telegram-origin
+	// turn; reset to fPrimaryUserId when that turn ends so that local
+	// REPL turns still route their permission prompts to Telegram.
+	std::atomic<int64_t>         fActiveChatId { 0 };
 	std::atomic<bool>            fUpdaterRunning { false };
 	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
@@ -2811,10 +2996,31 @@ private:
 	std::string                  fCustomSystem;
 	std::string                  fCfgModel;
 	int                          fCfgMaxTokens;
-	std::mutex&                  fReplMutex;
 	std::map<int64_t, json>      fUserMessages;
 	std::atomic<bool>            fRunning { false };
 	std::thread                  fPoller;
+	// Turn-token: serialises local and Telegram-origin turns without
+	// holding a mutex across SendWithTools.  AcquireTurn() blocks
+	// until fTurnInProgress is false, then sets it; ReleaseTurn()
+	// clears it and wakes all waiters.
+	std::mutex                   fTurnMu;
+	std::condition_variable      fTurnCv;
+	bool                         fTurnInProgress = false;
+	// Worker thread for Telegram-origin turns. The poller pushes
+	// non-perm updates to fWorkQueue; the worker pulls and processes
+	// them one at a time, keeping the poller free to deliver perm:*
+	// callbacks.
+	std::deque<telegram::Update> fWorkQueue;
+	std::mutex                   fWorkMu;
+	std::condition_variable      fWorkCv;
+	std::atomic<bool>            fWorkerRunning { false };
+	std::thread                  fWorker;
+	// Shared queue for perm:* callback taps. The poll_loop feeds it;
+	// the permission hook drains it via fPermCv so they don't race
+	// on fClient.poll() advancing the update offset.
+	std::deque<telegram::Update> fPermQueue;
+	std::mutex                   fPermMu;
+	std::condition_variable      fPermCv;
 };
 
 // Break a libedit line into shell-style tokens so a drop of one
@@ -2980,14 +3186,6 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
 				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
 
-	// Shared mutex between the REPL main thread and an optional
-	// RemoteControl poller thread. When /remote-control is toggled
-	// on, the poller grabs this before each SendWithTools call
-	// so it can't run concurrently with whatever the REPL is
-	// doing. The REPL itself doesn't lock it (there's no other
-	// thread to race with when /remote-control is off), but the
-	// lock is cheap to acquire the rare times it matters.
-	std::mutex remote_mutex;
 	std::unique_ptr<RemoteControl> remote;
 
 	// Compose the status row including a green "Remote Control
@@ -3149,7 +3347,7 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 							try {
 								if (!remote) {
 									remote = std::make_unique<RemoteControl>(
-										cfg, auth, custom_system, remote_mutex);
+										cfg, auth, custom_system);
 								}
 								if (remote->start()) {
 									std::cout << tui::Meta("[remote control: telegram poller started]") << "\n";
@@ -3235,14 +3433,28 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 		if (remote && remote->running())
 			g_stream_progress = &stream_progress;
 
-		// Hold remote_mutex for the full duration of the local
-		// turn so the RemoteControl poller (if running) can't
-		// interleave its own SendWithTools mid-stream. When
-		// /remote-control is off this is an uncontended lock and
-		// costs effectively nothing.
+		// Serialise against any concurrent Telegram-origin turn
+		// via the turn-token.  AcquireTurn() blocks only until the
+		// current Telegram turn finishes (if one is running), then
+		// marks us as the active turn.  Unlike the old lock_guard
+		// approach, ReadMessage() above was never blocked — only
+		// this post-Enter path waits, so the terminal stays live.
+		//
+		// Re-check running() after AcquireTurn() in case Stop()
+		// woke us via fTurnCv but /remote-control was toggled off
+		// while we were waiting — in that case just run without
+		// the turn-token bookkeeping.
 		SendResult result;
-		{
-			std::lock_guard<std::mutex> lk(remote_mutex);
+		if (remote && remote->running()) {
+			remote->AcquireTurn();
+			if (remote->running()) {
+				result = SendWithTools(auth, model, max_tokens, messages, system_for_turn);
+				remote->ReleaseTurn();
+			} else {
+				remote->ReleaseTurn();
+				result = SendWithTools(auth, model, max_tokens, messages, system_for_turn);
+			}
+		} else {
 			result = SendWithTools(auth, model, max_tokens, messages, system_for_turn);
 		}
 
@@ -3447,11 +3659,22 @@ int RunTelegramBridge(const Config& cfg) {
 
 	std::mutex              process_mutex;
 	std::map<int64_t, json> user_messages;
+	// Shared queue for perm:* callback taps. The background poller
+	// feeds it; both permission hooks drain it via perm_cv so neither
+	// races on client.poll() advancing the update offset.
+	std::deque<telegram::Update> perm_queue;
+	std::mutex                   perm_mu;
+	std::condition_variable      perm_cv;
 
 	// Start every bridge session unmuted — the flag is process-scoped
 	// so a previous in-process toggle could otherwise leak into the
 	// next RunTelegramBridge invocation if we ever call it twice.
 	g_telegram_muted.store(false);
+
+	// Clear the always-allowed tool set so "Always allow this session"
+	// approvals from a previous bridge or /remote-control session don't
+	// silently carry over and skip permission prompts in this new one.
+	always_allowed().clear();
 
 	// Compose and install the fixed-bottom status row for the
 	// bridge. Right label is "Remote Control active" in green so
@@ -3521,6 +3744,8 @@ int RunTelegramBridge(const Config& cfg) {
 		// 3. Updater thread: thinking indicator + streaming text edits.
 		//    Before first token: cycles "⏳ thinking…" with animated dots
 		//    so the user sees immediate feedback.
+		//    While a tool is running: shows "🔧 running ToolName…" so the
+		//    user knows exactly what is happening.
 		//    Once text arrives: edits the placeholder every ~1 s with the
 		//    accumulated text and a ▌ cursor so it looks like live typing.
 		StreamProgress    progress;
@@ -3534,7 +3759,21 @@ int RunTelegramBridge(const Config& cfg) {
 				while (updater_running.load()) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 					if (!updater_running.load()) break;
+					// Paused while a permission prompt is in flight.
+					if (g_telegram_updater_paused.load()) continue;
 					if (placeholder_id == 0) continue;
+
+					// While a tool is actively running, show its name
+					// instead of the generic thinking animation.
+					std::string tool_ph;
+					{
+						std::lock_guard<std::mutex> lk(progress.mu);
+						tool_ph = progress.tool_phase;
+					}
+					if (!tool_ph.empty()) {
+						tg_edit(chat_id, placeholder_id, tool_ph);
+						continue;
+					}
 
 					const int v = progress.version.load(std::memory_order_relaxed);
 					if (v == last_version) {
@@ -3570,15 +3809,23 @@ int RunTelegramBridge(const Config& cfg) {
 		if (!messages.is_array()) messages = json::array();
 		messages.push_back({{"role", "user"}, {"content", prompt_text}});
 
-		g_non_interactive_tools             = non_interactive;
+		// When a Telegram chat is in scope the permission hook must be
+		// active regardless of whether the turn originated locally or
+		// from Telegram.  Setting g_non_interactive_tools=true ensures
+		// PromptPermission enters the hook branch; the hook then sends
+		// the inline-keyboard question to the chat and blocks until the
+		// user taps a button.  For pure local runs (chat_id==0) we fall
+		// back to the caller-supplied non_interactive flag so the
+		// behaviour is unchanged.
+		g_non_interactive_tools             = (chat_id != 0) ? true : non_interactive;
 		g_non_interactive_allow_destructive = allow_destructive;
 
 		// Install a Telegram permission hook so PromptPermission can
 		// ask the user via inline keyboard buttons instead of silently
 		// denying. The hook sends a message with three buttons and
-		// mini-polls getUpdates until a callback or "always" comes
-		// back from this chat.
-		if (non_interactive && chat_id != 0) {
+		// waits on perm_cv until the background poller delivers the
+		// callback tap via the shared perm_queue.
+		if (chat_id != 0) {
 			g_telegram_permission_hook = [&](const std::string& tool_name,
 											 const std::string& preview) -> Permission {
 				// Build the question message.
@@ -3590,26 +3837,47 @@ int RunTelegramBridge(const Config& cfg) {
 					{{ "2. Always allow this session", "perm:always" }},
 					{{ "3. No, deny",                 "perm:no"     }},
 				};
+				// Pause the thinking-updater so it stops hammering
+				// EditMessageText — Telegram rate-limits would
+				// otherwise delay (or silently drop) this message.
+				g_telegram_updater_paused.store(true);
 				client.SendMessage(chat_id, question, kb);
-				// Mini-poll loop: short-poll (2 s) until we get one of
-				// our perm:* callbacks from this user/chat.
-				std::atomic<bool> keep_going { true };
+				// Drain the shared perm queue instead of calling
+				// poll() again — the background poller already
+				// consumed the update and forwarded it here so we
+				// don't race on the getUpdates offset.
 				while (!g_interrupted) {
-					const auto updates = client.poll(2, &keep_going);
-					for (const auto& u : updates) {
-						if (!u.is_callback) continue;
-						if (u.chat_id != chat_id) continue;
-						client.AnswerCallback(u.callback_query_id);
-						if (u.text == "perm:always") {
+					std::unique_lock<std::mutex> lk(perm_mu);
+					perm_cv.wait_for(lk, std::chrono::seconds(2),
+						[&]{ return !perm_queue.empty() || g_interrupted; });
+					while (!perm_queue.empty()) {
+						const telegram::Update upd = perm_queue.front();
+						perm_queue.pop_front();
+						lk.unlock();
+						g_telegram_updater_paused.store(false);
+						client.AnswerCallback(upd.callback_query_id);
+						if (upd.text == "perm:always") {
 							always_allowed().insert(tool_name);
 							return Permission::Allow;
 						}
-						if (u.text == "perm:yes")  return Permission::Allow;
-						if (u.text == "perm:no")   return Permission::Deny;
-						// Tap on some unrelated button — keep waiting.
+						if (upd.text == "perm:yes")  return Permission::Allow;
+						if (upd.text == "perm:no")   return Permission::Deny;
+						lk.lock();
 					}
 				}
+				g_telegram_updater_paused.store(false);
 				return Permission::Deny; // interrupted
+			};
+		}
+
+		// Install a tool status hook so Telegram gets the same tool
+		// lifecycle notices ([tool: Bash ...], [tool: Bash -> N bytes],
+		// denials, etc.) that appear on the local terminal. Each notice
+		// is sent as a separate message so it doesn't interfere with
+		// the streaming placeholder.
+		if (chat_id != 0) {
+			g_tool_status_hook = [&](const std::string& notice) {
+				tg_send(chat_id, notice);
 			};
 		}
 
@@ -3619,7 +3887,10 @@ int RunTelegramBridge(const Config& cfg) {
 		if (auth.kind == AuthKind::None) {
 			updater_running.store(false);
 			if (updater.joinable()) updater.join();
-			g_stream_progress = nullptr;
+			g_stream_progress          = nullptr;
+			g_non_interactive_tools    = false;
+			g_telegram_permission_hook = nullptr;
+			g_tool_status_hook         = nullptr;
 			messages = snapshot;
 			const std::string err = "(error: authentication expired — run `claude logout && claude login`)";
 			if (chat_id != 0) {
@@ -3636,6 +3907,7 @@ int RunTelegramBridge(const Config& cfg) {
 		std::cout << "\n";
 		g_non_interactive_tools    = false;
 		g_telegram_permission_hook = nullptr;
+		g_tool_status_hook         = nullptr;
 
 		++turn_count;
 		session_input  += result.input_tokens;
@@ -3834,7 +4106,20 @@ int RunTelegramBridge(const Config& cfg) {
 			while (updater_running.load()) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 				if (!updater_running.load()) break;
+				// Paused while a permission prompt is in flight.
+				if (g_telegram_updater_paused.load()) continue;
 				if (placeholder_id == 0) continue;
+
+				// While a tool is actively running, show its name.
+				std::string tool_ph;
+				{
+					std::lock_guard<std::mutex> lk(progress.mu);
+					tool_ph = progress.tool_phase;
+				}
+				if (!tool_ph.empty()) {
+					tg_edit(chat_id, placeholder_id, tool_ph);
+					continue;
+				}
 
 				const int v = progress.version.load(std::memory_order_relaxed);
 				if (v == last_version) {
@@ -3869,13 +4154,68 @@ int RunTelegramBridge(const Config& cfg) {
 
 		g_non_interactive_tools              = true;
 		g_non_interactive_allow_destructive  = allow_destructive;
+
+		// Install inline-keyboard permission hook so PromptPermission
+		// sends the "allow Bash?" question to the Telegram chat instead
+		// of silently denying (or allowing) based on the config flag.
+		g_telegram_permission_hook = [&](const std::string& tool_name,
+										 const std::string& preview) -> Permission {
+			const std::string question =
+				"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
+			const std::vector<std::vector<telegram::Button>> kb = {
+				{{ "1. Yes, allow once",          "perm:yes"    }},
+				{{ "2. Always allow this session", "perm:always" }},
+				{{ "3. No, deny",                 "perm:no"     }},
+			};
+			// Pause the thinking-updater so it stops hammering
+			// EditMessageText — Telegram rate-limits would otherwise
+			// delay (or silently drop) this permission message.
+			g_telegram_updater_paused.store(true);
+			client.SendMessage(chat_id, question, kb);
+			// Drain the shared perm queue instead of calling poll()
+			// again — the background poller already consumed the
+			// update and forwarded it here so we don't race on the
+			// getUpdates offset.
+			while (!g_interrupted) {
+				std::unique_lock<std::mutex> lk(perm_mu);
+				perm_cv.wait_for(lk, std::chrono::seconds(2),
+					[&]{ return !perm_queue.empty() || g_interrupted; });
+				while (!perm_queue.empty()) {
+					const telegram::Update upd = perm_queue.front();
+					perm_queue.pop_front();
+					lk.unlock();
+					g_telegram_updater_paused.store(false);
+					client.AnswerCallback(upd.callback_query_id);
+					if (upd.text == "perm:always") {
+						always_allowed().insert(tool_name);
+						return Permission::Allow;
+					}
+					if (upd.text == "perm:yes")  return Permission::Allow;
+					if (upd.text == "perm:no")   return Permission::Deny;
+					lk.lock();
+				}
+			}
+			g_telegram_updater_paused.store(false);
+			return Permission::Deny;
+		};
+
+		// Install a tool status hook so Telegram gets the same tool
+		// lifecycle notices ([tool: Bash ...], [tool: Bash -> N bytes],
+		// denials, etc.) that appear on the local terminal.
+		g_tool_status_hook = [&](const std::string& notice) {
+			tg_send(chat_id, notice);
+		};
+
 		// Refresh OAuth token before each call so long-running
 		// bridge sessions don't hit 401 after the token expires.
 		auth = ResolveAuth();
 		if (auth.kind == AuthKind::None) {
 			updater_running.store(false);
 			if (updater.joinable()) updater.join();
-			g_stream_progress = nullptr;
+			g_stream_progress          = nullptr;
+			g_non_interactive_tools    = false;
+			g_telegram_permission_hook = nullptr;
+			g_tool_status_hook         = nullptr;
 			messages = snapshot;
 			const std::string err = "(error: authentication expired — run `claude logout && claude login` on the server)";
 			if (placeholder_id) tg_edit(chat_id, placeholder_id, err);
@@ -3890,6 +4230,7 @@ int RunTelegramBridge(const Config& cfg) {
 		std::cout << "\n";
 		g_non_interactive_tools    = false;
 		g_telegram_permission_hook = nullptr;
+		g_tool_status_hook         = nullptr;
 
 		++turn_count;
 		session_input  += result.input_tokens;
@@ -3929,9 +4270,38 @@ int RunTelegramBridge(const Config& cfg) {
 				 + " out=" + std::to_string(result.output_tokens));
 	};
 
-	// Background Telegram poller. Long-polls getUpdates; when
-	// messages arrive, grabs process_mutex and hands off to
-	// process_telegram.
+	// Work queue for Telegram-origin turns. The poller pushes
+	// non-perm updates here; a dedicated worker thread processes
+	// them one at a time under process_mutex. This keeps the poller
+	// free to long-poll getUpdates and deliver perm:* callback taps
+	// while a turn is in flight — fixing the deadlock where the
+	// permission hook blocked waiting for a callback that the poller
+	// couldn't receive because it was stuck inside process_telegram.
+	std::deque<telegram::Update> work_queue;
+	std::mutex                   work_mu;
+	std::condition_variable      work_cv;
+	std::atomic<bool>            worker_running { true };
+
+	std::thread worker([&]() {
+		while (worker_running.load()) {
+			telegram::Update job;
+			{
+				std::unique_lock<std::mutex> lk(work_mu);
+				work_cv.wait(lk, [&]{
+					return !work_queue.empty() || !worker_running.load();
+				});
+				if (!worker_running.load()) break;
+				job = work_queue.front();
+				work_queue.pop_front();
+			}
+			std::lock_guard<std::mutex> lk(process_mutex);
+			process_telegram(job);
+		}
+	});
+
+	// Background Telegram poller. Long-polls getUpdates; routes
+	// perm:* callback taps to the perm queue and everything else
+	// to the work queue for the worker thread.
 	std::thread poller([&]() {
 		while (!g_interrupted) {
 			const auto updates = client.poll(10);
@@ -3943,8 +4313,22 @@ int RunTelegramBridge(const Config& cfg) {
 					LogLine("telegram reject user=" + std::to_string(u.user_id));
 					continue;
 				}
-				std::lock_guard<std::mutex> lk(process_mutex);
-				process_telegram(u);
+				// Route perm:* button taps to the permission queue so
+				// the hook's wait loop sees them instead of the outer
+				// poll consuming them first.
+				if (u.is_callback && u.text.rfind("perm:", 0) == 0) {
+					{
+						std::lock_guard<std::mutex> lk(perm_mu);
+						perm_queue.push_back(u);
+					}
+					perm_cv.notify_one();
+					continue;
+				}
+				{
+					std::lock_guard<std::mutex> lk(work_mu);
+					work_queue.push_back(u);
+				}
+				work_cv.notify_one();
 			}
 		}
 	});
@@ -4064,6 +4448,12 @@ int RunTelegramBridge(const Config& cfg) {
 
 	g_interrupted = 1;
 	if (poller.joinable()) poller.join();
+	// Stop the worker thread so it doesn't dangle after the poller
+	// exits. Wake it with notify_one so it unblocks from the empty
+	// work_queue wait and sees worker_running == false.
+	worker_running.store(false);
+	work_cv.notify_one();
+	if (worker.joinable()) worker.join();
 
 	std::cout << tui::Meta("[telegram bridge stopped]") << "\n";
 	LogLine("telegram bridge stop");
@@ -4328,11 +4718,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (interactive) {
-		// If a telegram block is present and valid, run the full
-		// bridge loop automatically — no need for a separate
-		// `claude telegram` subcommand.
-		if (RemoteControl::config_is_valid(cfg, nullptr))
-			return RunTelegramBridge(cfg);
 		return InteractiveLoop(auth, cfg, model, max_tokens, custom_system, cfg.prices, resume, resume_name, message, std::move(resolved_attachments));
 	}
 
