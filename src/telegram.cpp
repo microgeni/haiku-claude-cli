@@ -303,4 +303,12 @@ bool Client::AnswerCallback(const std::string& callback_query_id,
 	return PostJson("answerCallbackQuery", body.dump(), nullptr, 10);
 }
 
+bool Client::DeleteMessage(int64_t chat_id, int64_t message_id) {
+	const json body = {
+		{"chat_id",    chat_id},
+		{"message_id", message_id},
+	};
+	return PostJson("deleteMessage", body.dump(), nullptr, 10);
+}
+
 } // namespace telegram

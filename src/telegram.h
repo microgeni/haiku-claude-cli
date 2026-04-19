@@ -90,6 +90,11 @@ public:
 	bool AnswerCallback(const std::string& callback_query_id,
 						 const std::string& notice = {});
 
+	// deleteMessage — remove a previously-sent message from the chat.
+	// Best-effort: returns false on failure but callers should not
+	// treat that as fatal (e.g. the message may already be gone).
+	bool DeleteMessage(int64_t chat_id, int64_t message_id);
+
 	const std::string& token() const { return fToken; }
 
 private:

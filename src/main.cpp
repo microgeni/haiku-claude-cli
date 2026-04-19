@@ -4024,8 +4024,13 @@ int RunTelegramBridge(const Config& cfg) {
 		// denials, etc.) that appear on the local terminal. Each notice
 		// is sent as a separate message so it doesn't interfere with
 		// the streaming placeholder.
+		// Track whether any notices were sent — if so, the placeholder
+		// is above them in the chat and must not be edited for the final
+		// answer (we delete it and send fresh instead).
+		bool had_tool_notices = false;
 		if (chat_id != 0) {
 			g_tool_status_hook = [&](const std::string& notice) {
+				had_tool_notices = true;
 				tg_send(chat_id, notice);
 			};
 		}
@@ -4102,12 +4107,20 @@ int RunTelegramBridge(const Config& cfg) {
 
 		// 7. Final edit with the complete text + buttons.
 		if (chat_id != 0) {
-			if (placeholder_id) {
+			if (placeholder_id && !had_tool_notices) {
+				// No tool-notice messages after the placeholder — safe
+				// to edit it in place (it's still the last message).
 				if (!client.EditMessageText(chat_id, placeholder_id, result.assistant_text, keyboard)) {
 					// edit failed (rate-limit, wrong message_id, etc.) — send fresh
 					tg_send(chat_id, result.assistant_text, keyboard);
 				}
 			} else {
+				// Tool notices were sent as new messages after the
+				// placeholder, so it sits above them. Delete it
+				// (best-effort) and send the answer fresh so it
+				// appears at the bottom of the chat.
+				if (placeholder_id && had_tool_notices)
+					client.DeleteMessage(chat_id, placeholder_id);
 				tg_send(chat_id, result.assistant_text, keyboard);
 			}
 		}
@@ -4411,7 +4424,13 @@ int RunTelegramBridge(const Config& cfg) {
 		// Install a tool status hook so Telegram gets the same tool
 		// lifecycle notices ([tool: Bash ...], [tool: Bash -> N bytes],
 		// denials, etc.) that appear on the local terminal.
+		// Track whether any notices were sent as new messages — if so,
+		// the placeholder is now above them in the chat timeline, and we
+		// must send the final answer as a fresh message (not an edit of
+		// the placeholder) so it appears below the tool notices.
+		bool had_tool_notices = false;
 		g_tool_status_hook = [&](const std::string& notice) {
+			had_tool_notices = true;
 			tg_send(chat_id, notice);
 		};
 
@@ -4487,12 +4506,21 @@ int RunTelegramBridge(const Config& cfg) {
 			b.callback_data = opt.first;
 			keyboard.push_back({ std::move(b) });
 		}
-		if (placeholder_id) {
+		if (placeholder_id && !had_tool_notices) {
+			// No tool-notice messages were sent after the placeholder,
+			// so it is still the last message — safe to edit in place.
 			if (!client.EditMessageText(chat_id, placeholder_id, result.assistant_text, keyboard)) {
 				// edit failed (rate-limit, wrong message_id, etc.) — send fresh
 				tg_send(chat_id, result.assistant_text, keyboard);
 			}
 		} else {
+			// Either there is no placeholder, or tool notices were sent
+			// as new messages after the placeholder, pushing it up in
+			// the chat timeline.  Delete the stale placeholder (best
+			// effort) and send the answer as a fresh message so it
+			// always appears at the bottom — after the tool notices.
+			if (placeholder_id && had_tool_notices)
+				client.DeleteMessage(chat_id, placeholder_id);
 			tg_send(chat_id, result.assistant_text, keyboard);
 		}
 		LogLine("telegram tx user=" + std::to_string(effective.user_id)
