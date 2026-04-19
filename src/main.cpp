@@ -2375,10 +2375,10 @@ public:
 			if (reason) *reason = "config.telegram.bot_token is not set";
 			return false;
 		}
-		if (!cfg.telegram.contains("fAlloweduser_ids")
-			|| !cfg.telegram["fAlloweduser_ids"].is_array()
-			|| cfg.telegram["fAlloweduser_ids"].empty()) {
-			if (reason) *reason = "config.telegram.fAlloweduser_ids must list at least one Telegram user ID";
+		if (!cfg.telegram.contains("allowed_user_ids")
+			|| !cfg.telegram["allowed_user_ids"].is_array()
+			|| cfg.telegram["allowed_user_ids"].empty()) {
+			if (reason) *reason = "config.telegram.allowed_user_ids must list at least one Telegram user ID";
 			return false;
 		}
 		return true;
@@ -2392,7 +2392,7 @@ public:
 		  fCfgModel(cfg.model),
 		  fCfgMaxTokens(cfg.max_tokens),
 		  fReplMutex(repl_mutex) {
-		for (const auto& v : cfg.telegram["fAlloweduser_ids"]) {
+		for (const auto& v : cfg.telegram["allowed_user_ids"]) {
 			if (v.is_number_integer()) fAllowed.insert(v.get<int64_t>());
 		}
 		fAllowDestructive = cfg.telegram.value("fAllowDestructivetools", false);
@@ -2425,14 +2425,116 @@ public:
 	// Mirror a local REPL turn to the primary Telegram chat so
 	// the phone-side user sees what was typed locally. Called from
 	// the main thread after each InteractiveLoop turn completes.
-	void mirror_to_primary(const std::string& user_text,
-						   const std::string& assistant_text) {
+	// Send the user's local prompt to the primary Telegram chat
+	// immediately — before Claude starts working — so the phone
+	// side sees what is being asked in real time. Follows up with
+	// a "⏳ thinking…" placeholder whose message_id is stored so
+	// mirror_to_primary() can edit it in-place with the real reply.
+	void mirror_prompt(const std::string& user_text) {
 		if (!fRunning.load()) return;
 		if (fPrimaryUserId == 0) return;
-		tg_send(fPrimaryUserId, "> " + user_text);
-		if (!assistant_text.empty()) {
-			tg_send(fPrimaryUserId, assistant_text);
+		if (g_telegram_muted.load()) return;
+		fClient.SendMessage(fPrimaryUserId, "> " + user_text);
+		// Post a "thinking" placeholder; store the id so the reply
+		// can edit it rather than sending a separate message.
+		fPrimaryThinkingMsgId = fClient.SendMessageWithId(
+			fPrimaryUserId,
+			"\xE2\x8F\xB3 thinking\xE2\x80\xA6"); // ⏳ thinking…
+		// Animate the placeholder in the background until
+		// mirror_to_primary() or mirror_cancel() is called.
+		StartThinkingUpdater();
+	}
+
+	// Send Claude's reply to the primary Telegram chat after the
+	// turn completes.  The prompt was already forwarded by
+	// mirror_prompt(), so we only send the assistant text here.
+	// If a "thinking" placeholder was posted it is edited in-place;
+	// otherwise a fresh message is sent.
+	void mirror_to_primary(const std::string& assistant_text) {
+		StopThinkingUpdater();
+		if (!fRunning.load()) return;
+		if (fPrimaryUserId == 0) return;
+		if (g_telegram_muted.load()) {
+			fPrimaryThinkingMsgId = 0;
+			return;
 		}
+		const int64_t ph = fPrimaryThinkingMsgId;
+		fPrimaryThinkingMsgId = 0;
+		if (!assistant_text.empty()) {
+			if (ph != 0) {
+				if (!fClient.EditMessageText(fPrimaryUserId, ph, assistant_text))
+					fClient.SendMessage(fPrimaryUserId, assistant_text);
+			} else {
+				fClient.SendMessage(fPrimaryUserId, assistant_text);
+			}
+		} else if (ph != 0) {
+			// Empty reply — remove the placeholder with a note.
+			fClient.EditMessageText(fPrimaryUserId, ph, "(no response)");
+		}
+	}
+
+	// Called when the turn aborts (auth error, etc.) so the
+	// "thinking" placeholder is cleaned up instead of left dangling.
+	void mirror_cancel() {
+		StopThinkingUpdater();
+		if (fPrimaryUserId == 0 || fPrimaryThinkingMsgId == 0) return;
+		fClient.EditMessageText(fPrimaryUserId, fPrimaryThinkingMsgId,
+								"\xE2\x9D\x8C error \xE2\x80\x94 turn aborted"); // ❌ error — turn aborted
+		fPrimaryThinkingMsgId = 0;
+	}
+
+	// Start a background thread that animates the "thinking"
+	// placeholder while SendWithTools is running. The thread edits
+	// the message every second: it shows a rotating "⏳ thinking…"
+	// dot animation until streaming starts, then shows the
+	// accumulated streamed text + a block cursor (▌) so the phone
+	// sees tokens arrive in near-real-time.
+	// Call StopThinkingUpdater() (or mirror_to_primary()) to stop it.
+	void StartThinkingUpdater() {
+		if (fPrimaryThinkingMsgId == 0) return;
+		fUpdaterRunning.store(true);
+		fUpdaterThread = std::thread([this]() {
+			int  dot_phase   = 0;
+			int  last_version = 0;
+			static const char* kDots[] = {
+				"\xE2\x8F\xB3 thinking\xE2\x80\xA6",          // ⏳ thinking…
+				"\xE2\x8F\xB3 thinking\xE2\x80\xA4",          // ⏳ thinking.
+				"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",       // ⏳ thinking..
+				"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4", // ⏳ thinking...
+			};
+			while (fUpdaterRunning.load()) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+				if (!fUpdaterRunning.load()) break;
+				const int64_t ph = fPrimaryThinkingMsgId;
+				if (ph == 0) break;
+				if (g_stream_progress) {
+					const int v = g_stream_progress->version.load(
+						std::memory_order_relaxed);
+					if (v != last_version) {
+						last_version = v;
+						std::string snap;
+						{
+							std::lock_guard<std::mutex> lk(g_stream_progress->mu);
+							snap = g_stream_progress->text;
+						}
+						if (!snap.empty()) {
+							fClient.EditMessageText(fPrimaryUserId, ph,
+								snap + " \xE2\x96\x8C"); // ▌ streaming cursor
+							continue;
+						}
+					}
+				}
+				// No streaming text yet — animate the dots.
+				fClient.EditMessageText(fPrimaryUserId, ph,
+					kDots[dot_phase % 4]);
+				++dot_phase;
+			}
+		});
+	}
+
+	void StopThinkingUpdater() {
+		fUpdaterRunning.store(false);
+		if (fUpdaterThread.joinable()) fUpdaterThread.join();
 	}
 
 private:
@@ -2701,6 +2803,9 @@ private:
 	telegram::Client             fClient;
 	std::unordered_set<int64_t>  fAllowed;
 	int64_t                      fPrimaryUserId = 0;
+	int64_t                      fPrimaryThinkingMsgId = 0;
+	std::atomic<bool>            fUpdaterRunning { false };
+	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
 	Auth                         fAuth;
 	std::string                  fCustomSystem;
@@ -3117,6 +3222,19 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 			messages = snapshot;
 			continue;
 		}
+		// Echo the user's local prompt to Telegram immediately so
+		// the phone side sees what is being asked before Claude
+		// starts working on it.
+		if (remote && remote->running()) {
+			remote->mirror_prompt(line);
+		}
+
+		// Set up stream progress so the remote-control thinking
+		// updater can show live streaming text on the phone side.
+		StreamProgress stream_progress;
+		if (remote && remote->running())
+			g_stream_progress = &stream_progress;
+
 		// Hold remote_mutex for the full duration of the local
 		// turn so the RemoteControl poller (if running) can't
 		// interleave its own SendWithTools mid-stream. When
@@ -3127,12 +3245,16 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 			std::lock_guard<std::mutex> lk(remote_mutex);
 			result = SendWithTools(auth, model, max_tokens, messages, system_for_turn);
 		}
+
+		g_stream_progress = nullptr;
 		const double elapsed = std::chrono::duration<double>(
 			std::chrono::steady_clock::now() - turn_start).count();
 		std::cout << "\n";
 
 		if (result.exit_code != 0) {
 			messages = snapshot;
+			if (remote && remote->running())
+				remote->mirror_cancel();
 			continue;
 		}
 
@@ -3219,7 +3341,7 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 		// the phone-side user sees the conversation in real time
 		// when /remote-control is active.
 		if (remote && remote->running()) {
-			remote->mirror_to_primary(line, result.assistant_text);
+			remote->mirror_to_primary(result.assistant_text);
 		}
 
 		SaveHistory(messages, model, resume_name);
@@ -3243,14 +3365,14 @@ int RunTelegramBridge(const Config& cfg) {
 	}
 
 	std::unordered_set<int64_t> allowed;
-	if (cfg.telegram.contains("fAlloweduser_ids")
-		&& cfg.telegram["fAlloweduser_ids"].is_array()) {
-		for (const auto& v : cfg.telegram["fAlloweduser_ids"]) {
+	if (cfg.telegram.contains("allowed_user_ids")
+		&& cfg.telegram["allowed_user_ids"].is_array()) {
+		for (const auto& v : cfg.telegram["allowed_user_ids"]) {
 			if (v.is_number_integer()) allowed.insert(v.get<int64_t>());
 		}
 	}
 	if (allowed.empty()) {
-		std::cerr << "error: config.telegram.fAlloweduser_ids must list "
+		std::cerr << "error: config.telegram.allowed_user_ids must list "
 					 "at least one Telegram user ID\n";
 		return 1;
 	}
