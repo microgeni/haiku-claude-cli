@@ -2597,7 +2597,7 @@ public:
 				{{ "3. No, deny",                 "perm:no"     }},
 			};
 			g_telegram_updater_paused.store(true);
-			fClient.SendMessage(chat, question, kb);
+			const int64_t perm_msg_id = fClient.SendMessageWithId(chat, question, kb);
 			while (!g_interrupted) {
 				// Bail early if the local user already answered.
 				if (local_answered && local_answered->load()) {
@@ -2619,12 +2619,28 @@ public:
 					lk.unlock();
 					g_telegram_updater_paused.store(false);
 					fClient.AnswerCallback(upd.callback_query_id);
+					// Replace the button message with a plain summary so
+					// the answered permission prompt doesn't linger above
+					// the final response with stale interactive buttons.
 					if (upd.text == "perm:always") {
 						always_allowed().insert(tool_name);
+						fClient.EditMessageText(chat, perm_msg_id,
+							"\xF0\x9F\x94\x90 allow " + tool_name
+							+ "? \xE2\x86\x92 \xE2\x9C\x85 always allowed this session", {});
 						return Permission::Allow;
 					}
-					if (upd.text == "perm:yes")  return Permission::Allow;
-					if (upd.text == "perm:no")   return Permission::Deny;
+					if (upd.text == "perm:yes") {
+						fClient.EditMessageText(chat, perm_msg_id,
+							"\xF0\x9F\x94\x90 allow " + tool_name
+							+ "? \xE2\x86\x92 \xE2\x9C\x85 allowed once", {});
+						return Permission::Allow;
+					}
+					if (upd.text == "perm:no") {
+						fClient.EditMessageText(chat, perm_msg_id,
+							"\xF0\x9F\x94\x90 allow " + tool_name
+							+ "? \xE2\x86\x92 \xF0\x9F\x9A\xAB denied", {});
+						return Permission::Deny;
+					}
 					lk.lock();
 				}
 			}
@@ -3990,7 +4006,7 @@ int RunTelegramBridge(const Config& cfg) {
 				// EditMessageText — Telegram rate-limits would
 				// otherwise delay (or silently drop) this message.
 				g_telegram_updater_paused.store(true);
-				client.SendMessage(chat_id, question, kb);
+				const int64_t perm_msg_id = client.SendMessageWithId(chat_id, question, kb);
 				// Drain the shared perm queue instead of calling
 				// poll() again — the background poller already
 				// consumed the update and forwarded it here so we
@@ -4005,12 +4021,28 @@ int RunTelegramBridge(const Config& cfg) {
 						lk.unlock();
 						g_telegram_updater_paused.store(false);
 						client.AnswerCallback(upd.callback_query_id);
+						// Replace the button message with a plain summary so
+						// the answered permission prompt doesn't linger above
+						// the final response with stale interactive buttons.
 						if (upd.text == "perm:always") {
 							always_allowed().insert(tool_name);
+							client.EditMessageText(chat_id, perm_msg_id,
+								"\xF0\x9F\x94\x90 allow " + tool_name
+								+ "? \xE2\x86\x92 \xE2\x9C\x85 always allowed this session", {});
 							return Permission::Allow;
 						}
-						if (upd.text == "perm:yes")  return Permission::Allow;
-						if (upd.text == "perm:no")   return Permission::Deny;
+						if (upd.text == "perm:yes") {
+							client.EditMessageText(chat_id, perm_msg_id,
+								"\xF0\x9F\x94\x90 allow " + tool_name
+								+ "? \xE2\x86\x92 \xE2\x9C\x85 allowed once", {});
+							return Permission::Allow;
+						}
+						if (upd.text == "perm:no") {
+							client.EditMessageText(chat_id, perm_msg_id,
+								"\xF0\x9F\x94\x90 allow " + tool_name
+								+ "? \xE2\x86\x92 \xF0\x9F\x9A\xAB denied", {});
+							return Permission::Deny;
+						}
 						lk.lock();
 					}
 				}
@@ -4393,7 +4425,7 @@ int RunTelegramBridge(const Config& cfg) {
 			// EditMessageText — Telegram rate-limits would otherwise
 			// delay (or silently drop) this permission message.
 			g_telegram_updater_paused.store(true);
-			client.SendMessage(chat_id, question, kb);
+			const int64_t perm_msg_id = client.SendMessageWithId(chat_id, question, kb);
 			// Drain the shared perm queue instead of calling poll()
 			// again — the background poller already consumed the
 			// update and forwarded it here so we don't race on the
@@ -4408,12 +4440,28 @@ int RunTelegramBridge(const Config& cfg) {
 					lk.unlock();
 					g_telegram_updater_paused.store(false);
 					client.AnswerCallback(upd.callback_query_id);
+					// Replace the button message with a plain summary so
+					// the answered permission prompt doesn't linger above
+					// the final response with stale interactive buttons.
 					if (upd.text == "perm:always") {
 						always_allowed().insert(tool_name);
+						client.EditMessageText(chat_id, perm_msg_id,
+							"\xF0\x9F\x94\x90 allow " + tool_name
+							+ "? \xE2\x86\x92 \xE2\x9C\x85 always allowed this session", {});
 						return Permission::Allow;
 					}
-					if (upd.text == "perm:yes")  return Permission::Allow;
-					if (upd.text == "perm:no")   return Permission::Deny;
+					if (upd.text == "perm:yes") {
+						client.EditMessageText(chat_id, perm_msg_id,
+							"\xF0\x9F\x94\x90 allow " + tool_name
+							+ "? \xE2\x86\x92 \xE2\x9C\x85 allowed once", {});
+						return Permission::Allow;
+					}
+					if (upd.text == "perm:no") {
+						client.EditMessageText(chat_id, perm_msg_id,
+							"\xF0\x9F\x94\x90 allow " + tool_name
+							+ "? \xE2\x86\x92 \xF0\x9F\x9A\xAB denied", {});
+						return Permission::Deny;
+					}
 					lk.lock();
 				}
 			}
