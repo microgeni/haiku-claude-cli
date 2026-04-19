@@ -54,9 +54,27 @@ std::optional<json> parse_file(const std::string& path) {
 	}
 }
 
+// Migrate a single tool_calls entry: rename the legacy "fSavedbytes"
+// key (written by an early buggy version) to "saved_bytes" so the
+// BFS savings counter survives across the schema change.
+void migrate_tool_entry(json& entry) {
+    if (entry.contains("fSavedbytes") && !entry.contains("saved_bytes")) {
+        entry["saved_bytes"] = entry["fSavedbytes"];
+        entry.erase("fSavedbytes");
+    }
+}
+
 json load() {
+	// Helper: run schema migrations on a freshly parsed stats blob.
+	auto migrate = [](json j) -> json {
+		if (j.contains("tool_calls") && j["tool_calls"].is_object())
+			for (auto& [name, val] : j["tool_calls"].items())
+				migrate_tool_entry(val);
+		return j;
+	};
+
 	// 1. Try the live file.
-	if (auto j = parse_file(stats_path())) return *j;
+	if (auto j = parse_file(stats_path())) return migrate(*j);
 
 	// 2. Live file missing or corrupt — try the last-good backup.
 	if (auto j = parse_file(stats_bak_path())) {
@@ -64,7 +82,7 @@ json load() {
 		std::ifstream src(stats_bak_path(), std::ios::binary);
 		std::ofstream dst(stats_path(),     std::ios::binary);
 		if (src && dst) dst << src.rdbuf();
-		return *j;
+		return migrate(*j);
 	}
 
 	// 3. Nothing salvageable — start fresh.
