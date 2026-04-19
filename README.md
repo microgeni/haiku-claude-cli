@@ -1,8 +1,72 @@
 # haiku-claude-cli
 
-A native Claude client for Haiku OS — everything you'd expect from an
-agentic CLI, in one C++17 binary with no runtime except libcurl,
-OpenSSL, libedit, and nlohmann/json.
+A native Claude client for Haiku OS. It runs as a single C++17 binary
+with no runtime dependencies beyond libcurl, OpenSSL, libedit, and
+nlohmann/json — and it treats Haiku as a first-class platform, not an
+afterthought.
+
+## What it does
+
+`claude` is an agentic coding assistant that can read and write files,
+run shell commands, search the web, spawn sub-agents, and hold a
+multi-turn conversation — all from your terminal. You ask it something,
+it plans the work, uses its tools, and streams the answer back token by
+token.
+
+Three things make the Haiku edition stand out from generic CLI clients:
+
+### BFS attribute cache — fewer tokens, faster context
+
+Haiku's Be File System stores arbitrary typed metadata alongside every
+file. `claude-cli` uses this to maintain a persistent one-line
+`claude:summary` attribute on every source file it reads. On the next
+session it reads the summary with `ReadAttr` (≈20 tokens) instead of
+opening the file (thousands of tokens). Summaries are auto-seeded after
+the first full read and can be enriched with `WriteAttr` at any time.
+
+The system prompt is automatically pre-populated with all existing
+summaries at startup, giving Claude instant project-wide context without
+consuming your token budget. A BFS index is created on first run so
+`Query("claude:summary == \"*\"")` resolves in O(1) regardless of
+project size.
+
+### Haiku desktop integration — drag, drop, notify
+
+- **Drag and drop**: drop any file from Tracker onto the Terminal window.
+  The CLI detects the pasted path, attaches the file's content to the
+  next message, and shows a confirmation line — no copy-paste of file
+  paths required.
+- **Desktop notifications**: when a long-running response finishes,
+  `claude-cli` fires a native `BNotification` via Haiku's
+  `notification_server`. The alert shows the first sentence of the
+  reply, uses the Claude icon (HVIF vector format), and includes a
+  rotating playful title so repeated notifications stay readable. The
+  notification is sent from a detached child process so it never
+  interferes with the terminal's scroll region or `termios` state.
+
+### Telegram remote control — Claude in your pocket
+
+Run `claude telegram` to open a bidirectional bridge between the CLI and
+a Telegram bot. From your phone you can send prompts, approve or deny
+tool-use requests (via inline keyboard buttons), mute/unmute the bridge,
+and receive streamed replies — all while the same session stays open
+locally on your Haiku machine. A background `/remote-control` poller
+can also be toggled mid-REPL without restarting the session.
+
+### Ludicrous mode — all permission prompts, gone
+
+Type `/ludicrous` in the REPL and the status bar lights up with a yellow
+⚡ **LUDICROUS** badge. Every subsequent tool call — `Bash`, `Write`,
+`Edit`, anything that would normally stop and ask — is auto-approved
+without a prompt, and a dim `⚡ ludicrous: auto-approved <tool>` line
+confirms each one in the transcript. Type `/ludicrous` again to disengage
+and restore normal permission prompts. It's session-scoped, so it resets
+automatically when you quit.
+
+Use it when you trust the task completely and the approval rhythm is
+getting in the way. Don't use it when you don't.
+
+---
 
 ## Features
 
@@ -238,6 +302,99 @@ Each server is spawned as a subprocess at startup. The CLI runs the
 `initialize` handshake, queries `tools/list`, and exposes each tool
 to Claude as `mcp__<server>__<tool>`. Every MCP tool prompts for
 permission before its first use.
+
+## Telegram setup
+
+`claude-cli` has two Telegram modes. Both use the same config block;
+the difference is in how you launch.
+
+### 1. Create a bot
+
+1. Open a chat with [@BotFather](https://t.me/BotFather) on Telegram.
+2. Send `/newbot`, follow the prompts, and copy the **bot token**
+   it gives you (looks like `123456789:AAF...`).
+3. Start a chat with your new bot, send it any message, then find
+   your **user ID** by opening
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser.
+   The `from.id` field in the response is your numeric user ID.
+
+### 2. Add the config block
+
+Add a `telegram` key to `~/config/settings/claude-cli/config.json`:
+
+```json
+{
+  "telegram": {
+    "bot_token":             "123456789:AAF...",
+    "allowed_user_ids":      [987654321],
+    "allow_destructive_tools": false
+  }
+}
+```
+
+| Key                       | Required | Description                                                   |
+|---------------------------|----------|---------------------------------------------------------------|
+| `bot_token`               | yes      | Token from BotFather.                                         |
+| `allowed_user_ids`        | yes      | Whitelist of numeric Telegram user IDs that may send prompts. |
+| `allow_destructive_tools` | no       | Set `true` to let remote callers run `Bash`, `Write`, `Edit`. |
+
+The `allowed_user_ids` list is the security boundary — messages from
+any other Telegram user are silently ignored.
+
+### 3. Full bridge mode — `claude telegram`
+
+Starts a dedicated Telegram bridge session. Claude runs on your Haiku
+machine; you (and anyone else in `allowed_user_ids`) talk to it from
+any Telegram client.
+
+```
+claude telegram
+```
+
+What you get on the phone:
+
+- **Streamed edits** — the bot posts a `⏳ thinking…` placeholder and
+  edits it roughly every second as tokens arrive, finishing with the
+  full response.
+- **Inline permission buttons** — when a destructive tool (`Bash`,
+  `Write`, `Edit`) needs approval you get three buttons:
+  *Yes, allow once* / *Always allow this session* / *No, deny*.
+- **Numbered option buttons** — when Claude lists numbered choices,
+  each becomes a tappable inline button.
+- **Local mirror** — everything typed at the laptop prompt is also
+  sent to your Telegram chat, so the conversation is unified.
+
+Bot commands available from Telegram:
+
+| Command    | Effect                                                            |
+|------------|-------------------------------------------------------------------|
+| `/mute`    | Stop sending replies (incoming prompts still run locally).        |
+| `/unmute`  | Resume sending replies.                                           |
+| `/new`     | Clear this user's rolling conversation history.                   |
+| `/help`    | Show the command list.                                            |
+
+The status bar on the Haiku machine shows **Remote Control active**
+in green, with **· muted** appended in yellow when muted.
+
+### 4. Remote-control mode — `/remote-control`
+
+A lighter alternative you can toggle without leaving your current REPL
+session:
+
+```
+> /remote-control
+[remote control: telegram poller started]
+```
+
+The poller runs in a background thread. Messages from allowed users are
+processed against a separate per-user history (not shared with the
+interactive REPL). Responses are sent as a single message at the end of
+each turn — no streaming edits, no inline permission buttons. Type
+`/remote-control` again to stop the poller.
+
+Use **remote-control** for quick queries from your phone while you work
+locally. Use **`claude telegram`** when you want the full bidirectional
+experience.
 
 ## Environment
 
