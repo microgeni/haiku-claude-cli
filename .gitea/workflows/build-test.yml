@@ -48,6 +48,11 @@ jobs:
           ssh -n taurus \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh </dev/null"
 
+      - name: Check on Haiku (lint + security)
+        run: |
+          ssh -n taurus \
+            "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/check.sh </dev/null"
+
       - name: Test on Haiku
         run: |
           ssh -n taurus \
