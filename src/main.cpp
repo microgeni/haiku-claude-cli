@@ -1964,7 +1964,7 @@ SlashAction DispatchSlash(const std::string& line, LoopCtx& ctx,
 				return SlashAction::Continue;
 			}
 			for (size_t i = 0; i < ctx.session_urls.size(); ++i) {
-				char idx[16];
+				char idx[32];
 				std::snprintf(idx, sizeof(idx), "  %zu. ", i + 1);
 				std::cout << tui::Meta(std::string(idx) + ctx.session_urls[i]) << "\n";
 			}
