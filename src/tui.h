@@ -136,8 +136,13 @@ void ShowCursor();
 // restoring it on return. Works inside the fixed-bottom status frame
 // (renders in the scroll region, reads at the input row) or standalone.
 // Falls back to a plain numbered prompt on non-TTY stdout.
+// Display an arrow-key selection menu and return the chosen 0-based index.
+// If cancel is non-null, SelectOption polls it roughly every 100 ms via
+// VMIN=0/VTIME=1 and returns -1 immediately when *cancel becomes true,
+// leaving the menu block intact so the caller can erase it.
 int SelectOption(const std::vector<std::string>& options,
-				  const std::string& heading = {});
+				  const std::string& heading = {},
+				  std::atomic<bool>* cancel  = nullptr);
 
 std::string Bold(const std::string& s);
 std::string Dim(const std::string& s);

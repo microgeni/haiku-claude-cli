@@ -298,7 +298,8 @@ void ShowCursor() {
 }
 
 int SelectOption(const std::vector<std::string>& options,
-				  const std::string& heading) {
+				  const std::string& heading,
+				  std::atomic<bool>* cancel) {
 	if (options.empty()) return 0;
 	const int n = static_cast<int>(options.size());
 
@@ -377,11 +378,30 @@ int SelectOption(const std::vector<std::string>& options,
 
 	render();
 
+	// When a cancel flag is supplied, use VMIN=0/VTIME=1 so read()
+	// returns after ~100 ms even with no keypress, letting us check
+	// *cancel between reads.  Without a cancel flag keep VMIN=1 for
+	// efficient blocking reads.
+	if (cancel) {
+		struct termios poll_raw = raw;
+		poll_raw.c_cc[VMIN]  = 0;
+		poll_raw.c_cc[VTIME] = 1; // 100 ms
+		tcsetattr(fileno(stdin), TCSANOW, &poll_raw);
+	}
+
 	int chosen = n - 1; // default: last option (deny)
 	bool done  = false;
 	while (!done) {
+		// Check the cancel flag before each read attempt.
+		if (cancel && cancel->load()) {
+			tcsetattr(fileno(stdin), TCSANOW, &orig);
+			return -1;
+		}
 		unsigned char c = 0;
-		if (read(fileno(stdin), &c, 1) != 1) break;
+		if (read(fileno(stdin), &c, 1) != 1) {
+			// VMIN=0 timeout or EOF — loop to re-check cancel.
+			continue;
+		}
 
 		if (c == 0x1b) {
 			// Escape sequence or bare Esc.
@@ -399,7 +419,16 @@ int SelectOption(const std::vector<std::string>& options,
 			const int r1 = read(fileno(stdin), &seq[0], 1);
 			const int r2 = (r1 == 1 && seq[0] == '[')
 						 ? read(fileno(stdin), &seq[1], 1) : 0;
-			tcsetattr(fileno(stdin), TCSANOW, &raw);
+			// Restore the correct mode: poll mode if cancel is set,
+			// blocking mode otherwise.
+			if (cancel) {
+				struct termios poll_raw = raw;
+				poll_raw.c_cc[VMIN]  = 0;
+				poll_raw.c_cc[VTIME] = 1;
+				tcsetattr(fileno(stdin), TCSANOW, &poll_raw);
+			} else {
+				tcsetattr(fileno(stdin), TCSANOW, &raw);
+			}
 
 			if (r1 <= 0) {
 				// Bare Esc → deny (last option).
