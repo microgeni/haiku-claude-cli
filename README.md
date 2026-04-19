@@ -390,23 +390,36 @@ in green, with **· muted** appended in yellow when muted.
 
 ### 4. Remote-control mode — `/remote-control`
 
-A lighter alternative you can toggle without leaving your current REPL
-session:
+Toggle full bidirectional Telegram control from inside any REPL session:
 
 ```
 > /remote-control
 [remote control: telegram poller started]
 ```
 
-The poller runs in a background thread. Messages from allowed users are
-processed against a separate per-user history (not shared with the
-interactive REPL). Responses are sent as a single message at the end of
-each turn — no streaming edits, no inline permission buttons. Type
-`/remote-control` again to stop the poller.
+The poller runs in a background thread and offers the same experience
+as `claude telegram`: streaming edits with a thinking placeholder,
+inline permission buttons for destructive tools, numbered-option
+buttons, and local-turn mirroring to the primary Telegram chat.
+Each Telegram user gets their own independent rolling history.
+Type `/remote-control` again (or `/remote-control off`) to stop.
 
-Use **remote-control** for quick queries from your phone while you work
-locally. Use **`claude telegram`** when you want the full bidirectional
-experience.
+If the `telegram` config block is missing or incomplete, `/remote-control`
+will tell you exactly what to add instead of silently failing:
+
+```
+[remote control: config.telegram.bot_token is not set]
+  Add a 'telegram' block to config.json with
+  bot_token and allowed_user_ids.
+  See the Telegram setup section in README.md.
+```
+
+**`claude telegram` vs `/remote-control`** — both give the full
+bidirectional experience. `claude telegram` is a dedicated session
+with no local REPL; use it when you want to hand the machine to
+Claude and walk away. `/remote-control` layers Telegram on top of
+your existing REPL session; use it when you want to stay at the
+keyboard and also take questions from your phone.
 
 ## Environment
 

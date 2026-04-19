@@ -1861,7 +1861,7 @@ SlashAction DispatchSlash(const std::string& line, LoopCtx& ctx,
 			"  /stats             lifetime token usage and tool stats\n"
 			"  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
 			"  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
-			"  /remote-control    toggle Telegram remote poller on/off\n"
+			"  /remote-control    toggle Telegram remote control on/off\n"
 			"  /ludicrous         toggle ludicrous mode (auto-approve all tool permissions)\n"
 			"  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
 				  << "\n";
@@ -2320,25 +2320,50 @@ std::string FormatStatusRow(const std::string& model,
 	return left + std::string(gap, ' ') + right_label + " ";
 }
 
+// Scan `text` for a numbered list at line start (`1. foo`, `2. bar`,
+// ...). If at least two consecutive options are found, return them
+// so the bridge can render inline-keyboard buttons. Each pair is
+// {number_string, item_label}; the label is trimmed to ~28 chars
+// so the buttons stay readable in Telegram.
+std::vector<std::pair<std::string, std::string>>
+extract_numbered_options(const std::string& text) {
+	std::vector<std::pair<std::string, std::string>> out;
+	std::istringstream iss(text);
+	std::string        line;
+	while (std::getline(iss, line)) {
+		size_t i = 0;
+		while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
+		if (i == 0 || i > 2)                            continue; // need 1-2 digits
+		if (i >= line.size() || line[i] != '.')         continue;
+		if (i + 1 >= line.size() || line[i + 1] != ' ') continue;
+		std::string number = line.substr(0, i);
+		std::string label  = line.substr(i + 2);
+		if (label.size() > 28) {
+			label.resize(27);
+			label += "\xE2\x80\xA6"; // …
+		}
+		out.emplace_back(std::move(number), std::move(label));
+	}
+	if (out.size() < 2) return {};
+	return out;
+}
+
 // Self-contained background Telegram poller spawned on demand by
 // the /remote-control slash command inside InteractiveLoop. Runs
 // in its own thread, polls Telegram for incoming messages from
 // allowed users, and hands each one to SendWithTools on the
 // local machine. Each Telegram user gets an independent rolling
-// history in fUserMessages (no sharing with the REPL's own
-// `messages` — /remote-control is purely additive, not a mirror).
+// history in fUserMessages (not shared with the REPL's own
+// `messages`, but local turns are mirrored to the primary chat).
 //
-// Deliberately thinner than RunTelegramBridge: no streaming
-// edits, no typing indicator, no inline-keyboard buttons, no
-// local input mirroring. The response is posted via a single
-// sendMessage at the end of each turn. If you want the full UX,
-// run `claude telegram` as its own subcommand.
+// Fully bidirectional: streaming edits, typing indicator,
+// inline permission buttons, numbered-option buttons, and local
+// input mirroring — identical experience to `claude telegram`.
 //
 // Thread-safe: the poller thread grabs fReplMutex for the
 // duration of each SendWithTools call so it serializes cleanly
 // against whatever the REPL's own main thread is doing. The REPL
-// loop provides the mutex; RemoteControl only reads the
-// reference.
+// loop provides the mutex; RemoteControl only reads the reference.
 class RemoteControl {
 public:
 	static bool config_is_valid(const Config& cfg, std::string* reason) {
@@ -2546,30 +2571,128 @@ private:
 			}
 		}
 
-		json& messages = fUserMessages[u.user_id];
-		if (!messages.is_array()) messages = json::array();
-		const json snapshot = messages;
-		messages.push_back({{"role", "user"}, {"content", u.text}});
+		json& msgs = fUserMessages[u.user_id];
+		if (!msgs.is_array()) msgs = json::array();
 
-		g_non_interactive_tools              = true;
-		g_non_interactive_allow_destructive  = fAllowDestructive;
+		// Post a placeholder and start a streaming-edit updater
+		// thread — identical to the full bridge.
+		const int64_t placeholder_id = [&]() -> int64_t {
+			if (g_telegram_muted.load()) return 0;
+			return fClient.SendMessageWithId(u.chat_id, "\xE2\x80\xA6"); // …
+		}();
+
+		StreamProgress    progress;
+		g_stream_progress = &progress;
+		std::atomic<bool> updater_running { true };
+		int               last_version = 0;
+		int               dot_phase    = 0;
+		std::thread updater([&]() {
+			while (updater_running.load()) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+				if (!updater_running.load()) break;
+				if (placeholder_id == 0) continue;
+				const int v = progress.version.load(std::memory_order_relaxed);
+				if (v == last_version) {
+					static const char* kDots[] = {
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA6",
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA4",
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",
+						"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4",
+					};
+					fClient.EditMessageText(u.chat_id, placeholder_id,
+											kDots[dot_phase % 4]);
+					++dot_phase;
+				} else {
+					last_version = v;
+					std::string snap;
+					{ std::lock_guard<std::mutex> lk(progress.mu); snap = progress.text; }
+					if (!snap.empty())
+						fClient.EditMessageText(u.chat_id, placeholder_id,
+												snap + " \xE2\x96\x8C"); // ▌
+				}
+			}
+		});
+
+		const json snapshot = msgs;
+		msgs.push_back({{"role", "user"}, {"content", u.text}});
+
+		g_non_interactive_tools             = true;
+		g_non_interactive_allow_destructive = fAllowDestructive;
+
+		// Install inline-keyboard permission hook so destructive
+		// tool approvals come back as button taps, not silent denials.
+		g_telegram_permission_hook = [&](const std::string& tool_name,
+										 const std::string& preview) -> Permission {
+			const std::string question =
+				"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
+			const std::vector<std::vector<telegram::Button>> kb = {
+				{{ "1. Yes, allow once",          "perm:yes"    }},
+				{{ "2. Always allow this session", "perm:always" }},
+				{{ "3. No, deny",                 "perm:no"     }},
+			};
+			fClient.SendMessage(u.chat_id, question, kb);
+			std::atomic<bool> keep_going { true };
+			while (!g_interrupted) {
+				const auto updates = fClient.poll(2, &keep_going);
+				for (const auto& upd : updates) {
+					if (!upd.is_callback) continue;
+					if (upd.chat_id != u.chat_id) continue;
+					fClient.AnswerCallback(upd.callback_query_id);
+					if (upd.text == "perm:always") {
+						always_allowed().insert(tool_name);
+						return Permission::Allow;
+					}
+					if (upd.text == "perm:yes")  return Permission::Allow;
+					if (upd.text == "perm:no")   return Permission::Deny;
+				}
+			}
+			return Permission::Deny;
+		};
+
 		std::cout << tui::ClaudePrompt();
 		const std::string effective_system = ComposeSystem(fCustomSystem);
 		const auto result = SendWithTools(fAuth, fCfgModel, fCfgMaxTokens,
-											messages, effective_system);
+											msgs, effective_system);
 		std::cout << "\n";
 		g_non_interactive_tools    = false;
 		g_telegram_permission_hook = nullptr;
 
+		updater_running.store(false);
+		if (updater.joinable()) updater.join();
+		g_stream_progress = nullptr;
+
 		if (result.exit_code != 0 || result.assistant_text.empty()) {
-			messages = snapshot;
-			tg_send(u.chat_id, "(error: Claude did not return a response)");
+			msgs = snapshot;
+			const std::string err = "(error: Claude did not return a response)";
+			if (placeholder_id)
+				fClient.EditMessageText(u.chat_id, placeholder_id, err);
+			else if (!g_telegram_muted.load())
+				fClient.SendMessage(u.chat_id, err);
 			LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
 			std::cout << "\x1b""8" << std::flush;
 			return;
 		}
 
-		tg_send(u.chat_id, result.assistant_text);
+		// Numbered options → inline keyboard buttons.
+		std::vector<std::vector<telegram::Button>> keyboard;
+		const auto options = extract_numbered_options(result.assistant_text);
+		for (const auto& opt : options) {
+			telegram::Button b;
+			b.text          = opt.first + ". " + opt.second;
+			b.callback_data = opt.first;
+			keyboard.push_back({ std::move(b) });
+		}
+
+		if (!g_telegram_muted.load()) {
+			if (placeholder_id) {
+				if (!fClient.EditMessageText(u.chat_id, placeholder_id,
+												result.assistant_text, keyboard)) {
+					fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
+				}
+			} else {
+				fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
+			}
+		}
 		LogLine("remote-control tx user=" + std::to_string(u.user_id)
 				 + " out=" + std::to_string(result.output_tokens));
 		std::cout << "\x1b""8" << std::flush;
@@ -2912,7 +3035,10 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 					} else {
 						std::string why;
 						if (!RemoteControl::config_is_valid(cfg, &why)) {
-							std::cout << tui::Meta("[remote control error: " + why + "]") << "\n";
+							std::cout << tui::Meta("[remote control: " + why + "]") << "\n"
+									  << tui::Dim("  Add a 'telegram' block to config.json with\n"
+												  "  bot_token and allowed_user_ids.\n"
+												  "  See the Telegram setup section in README.md.") << "\n";
 							LogLine("remote control config invalid: " + why);
 						} else {
 							try {
@@ -3104,35 +3230,6 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 }
 
 } // namespace
-
-// Scan `text` for a numbered list at line start (`1. foo`, `2. bar`,
-// ...). If at least two consecutive options are found, return them
-// so the bridge can render inline-keyboard buttons. Each pair is
-// {number_string, item_label}; the label is trimmed to ~24 chars
-// so the buttons stay readable in Telegram.
-std::vector<std::pair<std::string, std::string>>
-extract_numbered_options(const std::string& text) {
-	std::vector<std::pair<std::string, std::string>> out;
-	std::istringstream iss(text);
-	std::string        line;
-	while (std::getline(iss, line)) {
-		size_t i = 0;
-		while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
-		if (i == 0 || i > 2)                       continue;    // need 1-2 digits
-		if (i >= line.size() || line[i] != '.')    continue;
-		if (i + 1 >= line.size() || line[i + 1] != ' ') continue;
-		std::string number = line.substr(0, i);
-		std::string label  = line.substr(i + 2);
-		// Truncate the label to fit inside a Telegram button cleanly.
-		if (label.size() > 28) {
-			label.resize(27);
-			label += "\xE2\x80\xA6"; // …
-		}
-		out.emplace_back(std::move(number), std::move(label));
-	}
-	if (out.size() < 2) return {};
-	return out;
-}
 
 int RunTelegramBridge(const Config& cfg) {
 	if (!cfg.telegram.is_object()) {
