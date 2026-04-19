@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <editline/readline.h>
+#include "paths.h"
 #include "tui.h"
 
 // Soft-newline: accept the current line with a trailing backslash so
@@ -122,20 +123,6 @@ namespace {
 std::string              g_history_file;
 std::vector<std::string> g_slash_commands;
 
-void ensure_parent_dir(const std::string& path) {
-	const auto slash = path.rfind('/');
-	if (slash == std::string::npos) return;
-	const std::string dir = path.substr(0, slash);
-	std::string accum;
-	for (size_t i = 0; i < dir.size(); ++i) {
-		accum += dir[i];
-		const bool boundary = (dir[i] == '/') || (i + 1 == dir.size());
-		if (!boundary) continue;
-		if (accum.empty() || accum == "/") continue;
-		if (mkdir(accum.c_str(), 0700) != 0 && errno != EEXIST) return;
-	}
-}
-
 // Wrap ANSI escape sequences in \001..\002 so libedit knows to skip
 // them when counting visible column width.
 std::string wrap_for_readline(const std::string& prompt) {
@@ -201,7 +188,7 @@ extern "C" char** slash_completion(const char* text, int start, int /*end*/) {
 void Init(const std::string& history_file) {
 	g_history_file = history_file;
 	if (!g_history_file.empty()) {
-		ensure_parent_dir(g_history_file);
+		paths::EnsureParentDir(g_history_file);
 		read_history(g_history_file.c_str());
 	}
 	rl_attempted_completion_function = slash_completion;

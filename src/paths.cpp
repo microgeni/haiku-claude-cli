@@ -55,4 +55,10 @@ bool MkdirP(const std::string& path) {
 	return true;
 }
 
+bool EnsureParentDir(const std::string& filePath) {
+	const auto slash = filePath.rfind('/');
+	if (slash == std::string::npos) return true;
+	return MkdirP(filePath.substr(0, slash));
+}
+
 } // namespace paths

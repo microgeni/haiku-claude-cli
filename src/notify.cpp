@@ -50,12 +50,12 @@ std::vector<std::string> ExtractUrls(const std::string& text) {
 std::string FirstSentence(const std::string& text, size_t max_chars) {
 	std::string body;
 	body.reserve(text.size());
-	bool fPrevspace = true;
+	bool prevSpace = true;
 	for (char c : text) {
 		if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-		if (c == ' ' && fPrevspace) continue;
+		if (c == ' ' && prevSpace) continue;
 		body += c;
-		fPrevspace = (c == ' ');
+		prevSpace = (c == ' ');
 	}
 	while (!body.empty() && body.back() == ' ') body.pop_back();
 

@@ -10,11 +10,11 @@
 //   - stats::RecordSession() once at REPL startup
 //   - stats::RecordTurn()    after each assistant turn completes
 //   - stats::RecordTool()    after each tool invocation (BFS tools
-//                             also pass `fSavedbytes` so /stats can
+//                             also pass `savedBytes` so /stats can
 //                             show the Haiku-advantage savings)
 //   - stats::FormatDisplay() renders the /stats slash-command output
 //
-// The fSavedbytes channel is what powers the "BFS saved N tokens"
+// The savedBytes channel is what powers the "BFS saved N tokens"
 // block in /stats — it's the bytes a full Read would have cost
 // minus the bytes ReadAttr/Query actually returned.
 namespace stats {
@@ -22,7 +22,7 @@ namespace stats {
 void RecordSession();
 void RecordTurn(int input_tokens, int output_tokens);
 void RecordTool(const std::string& tool_name, int result_bytes,
-				 long fSavedbytes = 0);
+				 long savedBytes = 0);
 
 std::string FormatDisplay();
 

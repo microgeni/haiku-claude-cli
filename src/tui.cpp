@@ -876,6 +876,16 @@ int display_width(const std::string& s) {
 	return cols;
 }
 
+} // namespace (anonymous)
+
+// Public wrapper so external translation units can call
+// tui::DisplayWidth() without duplicating the ANSI-skip logic.
+int DisplayWidth(const std::string& s) {
+	return display_width(s);
+}
+
+namespace {
+
 // Strip the leading and trailing `|` from a table row, then split
 // on the remaining pipes. Cell text is trimmed of whitespace at
 // both ends. Escaped pipes (`\|`) are not handled — extremely rare

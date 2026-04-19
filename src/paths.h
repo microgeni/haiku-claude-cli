@@ -33,6 +33,12 @@ std::string ProjectMemoryPath();  // ./CLAUDE.md (cwd-relative)
 // than EEXIST. Existing directories are not an error.
 bool MkdirP(const std::string& path);
 
+// Create all parent directories required for `filePath` to be
+// written. Equivalent to `mkdir -p $(dirname filePath)`.
+// Returns false only if a mkdir(2) call fails for a reason other
+// than EEXIST. A no-op when the parent directory already exists.
+bool EnsureParentDir(const std::string& filePath);
+
 } // namespace paths
 
 #endif

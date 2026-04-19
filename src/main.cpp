@@ -54,7 +54,7 @@ volatile sig_atomic_t g_interrupted = 0;
 
 namespace {
 
-constexpr const char* kVersion      = "1.4.8";
+constexpr const char* kVersion      = "1.5.1";
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
 constexpr const char* kApiUrl       = "https://api.anthropic.com/v1/messages";
 constexpr const char* kApiVersion   = "2023-06-01";
@@ -110,7 +110,6 @@ std::string LoadOptionalFile(const std::string& path) {
 // filesystem. Claude sees the list as part of its system
 // prompt and prefers ReadAttr over Read for files that appear
 // here.
-namespace {
 bool        g_bfs_loaded = false;
 std::string g_bfs_snapshot;
 
@@ -120,6 +119,10 @@ std::string g_bfs_snapshot;
 // contain 0xFF / 0xFE bytes that nlohmann::json refuses to
 // serialize, so lines that fail this check get dropped from
 // the preload snapshot to keep the system prompt clean.
+// Note: used exclusively by PreloadBfsSummaries() as a line-level
+// pre-flight guard before appending to g_bfs_snapshot. SanitizeUtf8()
+// (below) is the complementary recovery path used at API request time —
+// it replaces bad bytes with U+FFFD rather than discarding the string.
 bool IsValidUtf8(const char* data, size_t len) {
 	size_t i = 0;
 	while (i < len) {
@@ -173,7 +176,6 @@ std::string SanitizeUtf8(const std::string& s) {
 		p += need + 1;
 	}
 	return out;
-}
 }
 
 #ifdef __HAIKU__
@@ -306,7 +308,7 @@ static json TrimToolResults(const json& messages) {
 	return out;
 }
 
-std::optional<json> load_history(const std::string& name = "") {
+std::optional<json> LoadHistory(const std::string& name = "") {
 	const std::string path = name.empty()
 		? paths::HistoryPath()
 		: paths::NamedHistoryPath(name);
@@ -344,7 +346,7 @@ bool SaveHistory(const json& messages, const std::string& model,
 	const json j = {
 		{"messages", TrimToolResults(messages)},
 		{"model",    model},
-		{"fSavedat", static_cast<long>(std::time(nullptr))},
+		{"saved_at", static_cast<long>(std::time(nullptr))},
 	};
 
 	// Atomic write: serialize to a tmp file alongside the real path,
@@ -567,7 +569,7 @@ struct Config {
 	std::string system;  // flawfinder: ignore
 	bool        show_usage              = false;
 	bool        logging_enabled         = false;
-	bool        fAllowDestructivetools = false;
+	bool        fAllowDestructiveTools = false;
 	bool        notify_enabled          = true;
 	double      notify_min_duration_sec = 60.0;
 	// Auto-compact fires `/compact` when a turn's input token
@@ -599,8 +601,12 @@ Config load_config() {
 		if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
 		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
 		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
-		if (j.contains("fAllowDestructivetools"))
-			cfg.fAllowDestructivetools = j["fAllowDestructivetools"].get<bool>();
+		// Accept both the current key and the legacy lowercase-t spelling
+		// so existing config.json files continue to work after the rename.
+		if (j.contains("fAllowDestructiveTools"))
+			cfg.fAllowDestructiveTools = j["fAllowDestructiveTools"].get<bool>();
+		else if (j.contains("fAllowDestructivetools"))
+			cfg.fAllowDestructiveTools = j["fAllowDestructivetools"].get<bool>();
 		if (j.contains("logging") && j["logging"].is_object()) {
 			cfg.logging_enabled = j["logging"].value("enabled", false);
 		}
@@ -840,7 +846,7 @@ void PrintUsage(const char* prog, const std::string& default_model, int default_
 			  << "\n"
 			  << "Config file: " << paths::ConfigPath() << "\n"
 			  << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
-			  << "  fAllowDestructivetools, prices. CLI flags override config values.\n"
+			  << "  fAllowDestructiveTools, prices. CLI flags override config values.\n"
 			  << "\n"
 			  << "Memory files (prepended to the system prompt, user before project):\n"
 			  << "  " << paths::UserMemoryPath() << "\n"
@@ -892,6 +898,11 @@ CURL* get_curl() {
 // Returns a vector of (id, display_name) pairs sorted by `created_at`
 // descending (newest first), matching the default API ordering.
 // On any error the returned vector is empty.
+//
+// Uses a private short-lived handle rather than the session handle
+// returned by get_curl(), because model listing is a one-shot request
+// (called from the /model picker) and must not disturb the persistent
+// streaming state of the main session handle.
 struct ModelEntry { std::string id; std::string display_name; };
 
 std::vector<ModelEntry> fetch_models(const Auth& auth) {
@@ -1292,7 +1303,7 @@ std::atomic<bool> g_telegram_muted { false };
 // keyboard "allow Bash?" message the user needs to tap.
 std::atomic<bool> g_telegram_updater_paused { false };
 
-// Set at startup from Config::fAllowDestructivetools or the -y/--yes
+// Set at startup from Config::fAllowDestructiveTools or the -y/--yes
 // flag. Grants destructive-tool permission without prompting whenever
 // stdin isn't usable for a y/a/n dialog (piped stdin, closed stdin,
 // etc.). Interactive TTY sessions still prompt normally.
@@ -1444,8 +1455,8 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		if (denial_reason) {
 			*denial_reason =
 				"destructive tool " + tool_name + " is blocked in non-interactive "
-				"mode. Set \"fAllowDestructivetools\": true in config.json "
-				"(or telegram.fAllowDestructivetools for the bridge) to allow it.";
+				"mode. Set \"fAllowDestructiveTools\": true in config.json "
+				"(or telegram.fAllowDestructiveTools for the bridge) to allow it.";
 		}
 		return Permission::Deny;
 	}
@@ -1462,7 +1473,7 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		const std::string msg =
 			"cannot prompt for " + tool_name + " permission: stdin is not a "
 			"terminal. Re-run with -y/--yes to auto-approve destructive tools "
-			"for this invocation, set \"fAllowDestructivetools\": true in "
+			"for this invocation, set \"fAllowDestructiveTools\": true in "
 			+ paths::ConfigPath() + ", or use -i/--interactive from a real terminal.";
 		std::cerr << tui::Meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
 				  << tui::Dim("  " + msg) << "\n";
@@ -1774,18 +1785,20 @@ SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tok
 					tres.content);
 			}
 
-			// For BFS-native tools, measure actual bytes saved
-			// by stat-ing the target file(s) and subtracting the
-			// tool's own output size. ReadAttr compares against
-			// one file; Query sums every path returned.
-			long fSavedbytes = 0;
+			// For BFS-native tools, measure actual bytes saved by
+			// stat-ing the target file(s) and subtracting the tool's
+			// own output size. ReadAttr compares against one file;
+			// Query sums every path returned. The result feeds
+			// stats::RecordTool so /stats can show the "BFS saved N
+			// tokens" block.
+			long savedBytes = 0;
 			if (tname == "ReadAttr") {
 				const std::string path = tinput.value("path", std::string{});
 				struct stat st;
 				if (!path.empty() && ::stat(path.c_str(), &st) == 0) {
 					const long s = static_cast<long>(st.st_size)
 								 - static_cast<long>(tres.content.size());
-					if (s > 0) fSavedbytes = s;
+					if (s > 0) savedBytes = s;
 				}
 			} else if (tname == "Query") {
 				long total = 0;
@@ -1797,9 +1810,9 @@ SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tok
 					if (::stat(p.c_str(), &st) == 0) total += st.st_size;
 				}
 				const long s = total - static_cast<long>(tres.content.size());
-				if (s > 0) fSavedbytes = s;
+				if (s > 0) savedBytes = s;
 			}
-			stats::RecordTool(tname, static_cast<int>(tres.content.size()), fSavedbytes);
+			stats::RecordTool(tname, static_cast<int>(tres.content.size()), savedBytes);
 
 			// Sanitize tool output before handing it to nlohmann::json.
 			// Binary tool output (e.g. `cat` on a driver blob, /dev node,
@@ -1824,6 +1837,9 @@ SendResult SendWithTools(const Auth& auth, const std::string& model, int max_tok
 	}
 }
 
+// Print a one-line token-usage summary to stderr. Called at the end of a
+// one-shot invocation when -u / --usage is set, mirroring the per-turn
+// [turn N in X/Y out X/Y] line that the interactive REPL always shows.
 void PrintUsageLine(const SendResult& result) {
 	std::cerr << "[usage] input: " << result.input_tokens
 			  << " tokens  output: " << result.output_tokens << " tokens\n";
@@ -2129,9 +2145,8 @@ SlashAction DispatchSlash(const std::string& line, LoopCtx& ctx,
 				return SlashAction::Continue;
 			}
 			for (size_t i = 0; i < ctx.session_urls.size(); ++i) {
-				char idx[32];
-				std::snprintf(idx, sizeof(idx), "  %zu. ", i + 1);
-				std::cout << tui::Meta(std::string(idx) + ctx.session_urls[i]) << "\n";
+				const std::string idx = "  " + std::to_string(i + 1) + ". ";
+				std::cout << tui::Meta(idx + ctx.session_urls[i]) << "\n";
 			}
 			std::cout << tui::Dim("  /open N to launch, or /open <url>") << "\n";
 			return SlashAction::Continue;
@@ -2462,30 +2477,11 @@ std::string FormatStatusRow(const std::string& model,
 
 	if (right_label.empty()) return left;
 
-	// Right-justify `right_label` on the same line. The helper
-	// counts display columns (skipping ANSI) via a quick inline
-	// walk so bold/color wraps don't break the math.
-	auto display_width = [](const std::string& s) {
-		int cols = 0;
-		bool in_esc = false;
-		for (size_t i = 0; i < s.size(); ++i) {
-			const unsigned char c = static_cast<unsigned char>(s[i]);
-			if (in_esc) { if (c == 'm') in_esc = false; continue; }
-			if (c == 0x1b) { in_esc = true; continue; }
-			if (c < 0x80) { ++cols; continue; }
-			++cols;
-			if      ((c & 0xE0) == 0xC0) i += 1;
-			else if ((c & 0xF0) == 0xE0) i += 2;
-			else if ((c & 0xF8) == 0xF0) i += 3;
-		}
-		return cols;
-	};
-
 	const int width = tui::TerminalWidth();
 	if (width <= 0) return left + "  " + right_label;
 
-	const int left_cols  = display_width(left);
-	const int right_cols = display_width(right_label);
+	const int left_cols  = tui::DisplayWidth(left);
+	const int right_cols = tui::DisplayWidth(right_label);
 	const int gap        = (width - 1) - left_cols - right_cols;
 	if (gap < 2) return left + "  " + right_label;
 	return left + std::string(gap, ' ') + right_label + " ";
@@ -2565,7 +2561,8 @@ public:
 		for (const auto& v : cfg.telegram["allowed_user_ids"]) {
 			if (v.is_number_integer()) fAllowed.insert(v.get<int64_t>());
 		}
-		fAllowDestructive = cfg.telegram.value("fAllowDestructivetools", false);
+		fAllowDestructive = cfg.telegram.value("fAllowDestructiveTools",
+			cfg.telegram.value("fAllowDestructivetools", false));
 	}
 
 	~RemoteControl() { Stop(); }
@@ -3208,13 +3205,10 @@ static std::vector<std::string> shell_tokenize(const std::string& s) {
 	return out;
 }
 
-// True if the line is a drop from Tracker: one or more tokens,
-// every one an absolute path that stat-resolves. Bare filenames
-// without a leading slash are NOT treated as drops so a user can
-// still type "main.cpp" as a literal question without the REPL
-// swallowing it.
-
 // Returns true when the process is running inside an SSH session.
+// Used to suppress the bracketed-paste multi-line input hint that is
+// unreliable over SSH — Ctrl+J / Alt+Enter often don't reach the app
+// when forwarded through an SSH multiplexer or basic client.
 // The SSH daemon always exports at least one of these variables.
 static bool IsSshSession() {
 	return std::getenv("SSH_CLIENT")     != nullptr  // flawfinder: ignore
@@ -3222,8 +3216,18 @@ static bool IsSshSession() {
 		|| std::getenv("SSH_CONNECTION") != nullptr;  // flawfinder: ignore
 }
 
-static bool LineIsPathDrop(const std::string& line,
-							  std::vector<std::string>& out_abs_paths) {
+// True if `line` is a drag-and-drop from Tracker: one or more tokens,
+// every one an absolute path that stat-resolves. Bare filenames without
+// a leading slash are NOT treated as drops so the user can still type
+// "main.cpp" as a literal question without the REPL swallowing it.
+//
+// __attribute__((noinline)): GCC 13 LTO loses track of the vector
+// element pointer across inlining into InteractiveLoop and emits a
+// spurious -Wfree-nonheap-object. Keeping this function out-of-line
+// gives the optimiser a clean boundary and silences the false positive.
+static __attribute__((noinline))
+bool line_is_path_drop(const std::string& line,
+					   std::vector<std::string>& out_abs_paths) {
 	auto tokens = shell_tokenize(line);
 	if (tokens.empty()) return false;
 	std::vector<std::string> resolved;
@@ -3312,7 +3316,7 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 	const int    compact_window_override = cfg.compact_context_window;
 
 	if (resume) {
-		if (auto loaded = load_history(resume_name); loaded && loaded->is_array()) {
+		if (auto loaded = LoadHistory(resume_name); loaded && loaded->is_array()) {
 			messages = *loaded;
 			const std::string hist_path = resume_name.empty()
 				? paths::HistoryPath()
@@ -3431,14 +3435,14 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 		// might type as a literal question.
 		{
 			std::vector<std::string> dropped;
-			if (LineIsPathDrop(line, dropped)) {
+			if (line_is_path_drop(line, dropped)) {
 				for (auto& p : dropped) pending_paths.push_back(std::move(p));
 				std::cout << tui::Meta(FormatAttachedLine(pending_paths)) << "\n";
 				continue;
 			}
 		}
 
-		bool already_recorded = false;
+		bool recordedBySlashCmd = false;
 		if (!line.empty() && line.front() == '/') {
 			// /remote-control toggles the background Telegram
 			// poller on and off. DispatchSlash doesn't know about
@@ -3532,7 +3536,7 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 			std::string expanded;
 			const SlashAction action = DispatchSlash(line, ctx, expanded);
 			repl::Record(line);
-			already_recorded = true;
+			recordedBySlashCmd = true;
 			if (action == SlashAction::Quit) break;
 			if (action == SlashAction::Continue) continue;
 			if (action == SlashAction::Passthrough) {
@@ -3542,7 +3546,7 @@ int InteractiveLoop(const Auth& initial_auth, const Config& cfg,
 			}
 		}
 
-		if (!already_recorded) repl::Record(line);
+		if (!recordedBySlashCmd) repl::Record(line);
 
 		if (hooks::Fire(hooks::Event::UserPromptSubmit, json{{"prompt", line}}) == hooks::Outcome::Block) {
 			std::cout << tui::Meta("[hook blocked prompt]") << "\n";
@@ -3827,7 +3831,7 @@ int main(int argc, char* argv[]) {
 	// Seed the destructive-tool flag from config. -y/--yes below can
 	// still flip it on for ad-hoc runs; there's no reason to flip it
 	// off mid-invocation so we don't expose a --no-yes counterpart.
-	if (cfg.fAllowDestructivetools) g_allow_destructive_tools = true;
+	if (cfg.fAllowDestructiveTools) g_allow_destructive_tools = true;
 
 	for (int i = 1; i < argc; ++i) {
 		const std::string arg = argv[i];

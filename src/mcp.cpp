@@ -201,19 +201,19 @@ void discover_tools(Client& c) {
 	}
 }
 
-Client* find_by_tool_name(const std::string& namespaced) {
+Client* find_by_tool_name(const std::string& qualifiedName) {
 	for (auto& c : g_clients) {
 		if (!c.alive) continue;
 		for (const auto& t : c.tools) {
-			if (t.namespaced == namespaced) return &c;
+			if (t.namespaced == qualifiedName) return &c;
 		}
 	}
 	return nullptr;
 }
 
-McpTool* find_tool(Client& c, const std::string& namespaced) {
+McpTool* find_tool(Client& c, const std::string& qualifiedName) {
 	for (auto& t : c.tools) {
-		if (t.namespaced == namespaced) return &t;
+		if (t.namespaced == qualifiedName) return &t;
 	}
 	return nullptr;
 }

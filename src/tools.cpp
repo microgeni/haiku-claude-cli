@@ -21,6 +21,7 @@ extern volatile sig_atomic_t g_interrupted;
 #include <curl/curl.h>
 
 #include "mcp.h"
+#include "paths.h"
 
 namespace tools {
 
@@ -59,28 +60,13 @@ ToolResult run_read(const json& input) {
 	return {out.str(), false};
 }
 
-bool ensure_parent_dir(const std::string& path) {
-	const auto slash = path.rfind('/');
-	if (slash == std::string::npos) return true;
-	const std::string dir = path.substr(0, slash);
-	if (dir.empty()) return true;
-	std::string accum;
-	for (size_t i = 0; i < dir.size(); ++i) {
-		accum += dir[i];
-		const bool boundary = (dir[i] == '/') || (i + 1 == dir.size());
-		if (!boundary) continue;
-		if (accum.empty() || accum == "/") continue;
-		if (mkdir(accum.c_str(), 0755) != 0 && errno != EEXIST) return false;
-	}
-	return true;
-}
-
 bool path_inside_cwd(const std::string& path) {
-	char cwd[4096];
-	if (!getcwd(cwd, sizeof(cwd))) return false;
+	char buf[4096];
+	if (!getcwd(buf, sizeof(buf))) return false;
 	if (path.empty()) return false;
 	if (path[0] == '/') {
-		return path.compare(0, std::strlen(cwd), cwd) == 0;
+		const std::string cwd(buf);
+		return path.compare(0, cwd.size(), cwd) == 0;
 	}
 	return true; // relative paths are always inside cwd
 }
@@ -95,7 +81,7 @@ ToolResult run_write(const json& input) {
 	}
 	const std::string content = input.value("content", std::string{});
 
-	if (!ensure_parent_dir(path)) {
+	if (!paths::EnsureParentDir(path)) {
 		return {"error: cannot create parent directory for " + path, true};
 	}
 

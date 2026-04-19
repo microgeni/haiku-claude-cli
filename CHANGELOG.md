@@ -6,20 +6,67 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-04-19
+
 ### Changed
-- **Telegram bridge auto-starts** — the `claude telegram` subcommand is
-  removed. If a valid `telegram` block exists in `config.json`,
-  launching `claude` interactively now starts the full bridge
-  automatically. Users no longer need to remember a separate command.
+- **Dead-code removal** — `tui::Gray()` removed from the public header
+  (zero external callers; remains an internal helper in `tui.cpp`).
+  Duplicate `ensure_parent_dir()` implementations in `repl.cpp` and
+  `tools.cpp` deleted; both now call `paths::EnsureParentDir()`.
+  Duplicate `display_width` lambda in `main.cpp::FormatStatusRow`
+  removed; now calls the new `tui::DisplayWidth()` public function.
+- **Naming convention fixes** (Haiku Coding Guidelines):
+  - `load_history` → `LoadHistory` (PascalCase for named-scope function).
+  - `Config::fAllowDestructivetools` → `fAllowDestructiveTools` (capital T).
+    JSON key reads both spellings for backward compatibility with existing
+    `config.json` files.
+  - `LineIsPathDrop` → `line_is_path_drop` (snake\_case, consistent with
+    sibling helpers `shell_single_quote` / `shell_tokenize`).
+  - `notify.cpp`: local variable `fPrevspace` → `prevSpace` (f-prefix is
+    for member variables only).
+  - `mcp.cpp`: `find_tool` / `find_by_tool_name` parameter `namespaced` →
+    `qualifiedName`.
+  - `already_recorded` → `recordedBySlashCmd` in `InteractiveLoop`.
+- **JSON field renames** — persisted keys `"fSavedat"` (history.json) and
+  `"fSavedbytes"` (stats.json) renamed to `"saved_at"` and `"saved_bytes"`.
+  Both files include backward-compatible fallback reads so existing data
+  is not silently discarded on upgrade. Local variables `fSavedtokens` /
+  `fSavedbytes` in `stats.cpp` / `main.cpp` renamed to `savedTokens` /
+  `savedBytes`.
+- **Nested anonymous namespace flattened** — a redundant inner
+  `namespace { }` wrapping `g_bfs_loaded`, `g_bfs_snapshot`,
+  `IsValidUtf8`, and `SanitizeUtf8` in `main.cpp` was removed; all four
+  are now in the single outer anonymous namespace.
+- **`path_inside_cwd`** in `tools.cpp` now uses `std::string` comparison
+  instead of mixing `getcwd` output with `std::strlen`.
+- **LTO false-positive silenced** — `line_is_path_drop` annotated with
+  `__attribute__((noinline))` to prevent GCC 13's LTO alias-analysis from
+  emitting a spurious `-Wfree-nonheap-object` warning during release builds.
+- **`/open` URL list** uses `std::to_string` instead of `snprintf` with a
+  `%zu` format, eliminating a `-Wformat-truncation` warning.
 
 ### Added
-- **Telegram thinking indicator for `/remote-control` mode** — when
-  `/remote-control` is active and a local REPL turn begins, the phone
-  side now sees an animated `⏳ thinking…` placeholder that updates
-  every 1.2 s. While idle it cycles through dot animation; once tokens
-  start streaming it shows accumulated text with a `▌` cursor. The
-  placeholder is edited in-place with the final reply, or marked
-  `❌ error — turn aborted` if the turn fails.
+- **`tui::DisplayWidth()`** — promoted from an anonymous-namespace helper
+  to a public function in `tui.h`. Counts visible terminal columns in a
+  string, skipping ANSI SGR escapes and handling UTF-8 multi-byte
+  sequences correctly. Eliminates a duplicate lambda that had been copied
+  into `main.cpp::FormatStatusRow`.
+- **`paths::EnsureParentDir(filePath)`** — new helper in `paths.h/cpp`
+  that creates all parent directories required for a file path to be
+  written. Wraps `paths::MkdirP` and replaces two identical local copies
+  that existed independently in `repl.cpp` and `tools.cpp`.
+
+### Fixed
+- **`IsSshSession` missing comment** — added a doc comment explaining
+  that it is used to suppress the bracketed-paste multi-line hint on SSH,
+  where Ctrl+J / Alt+Enter may not reach the application.
+- **`fetch_models` missing rationale** — added a comment explaining why it
+  uses a private short-lived `CURL*` handle rather than the session handle
+  from `get_curl()`.
+- **`IsValidUtf8` / `SanitizeUtf8` relationship undocumented** — comment
+  now cross-references both functions so it is clear that `IsValidUtf8` is
+  the line-level pre-flight guard in `PreloadBfsSummaries` and
+  `SanitizeUtf8` is the recovery path used at API request time.
 
 ## [1.4.9] - 2026-06-17
 

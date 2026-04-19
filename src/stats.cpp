@@ -142,18 +142,22 @@ void RecordTurn(int input_tokens, int output_tokens) {
 }
 
 void RecordTool(const std::string& tool_name, int result_bytes,
-				 long fSavedbytes) {
+				 long savedBytes) {
 	json s = load();
 	auto& tc = s["tool_calls"];
 	if (!tc.is_object()) tc = json::object();
 	if (!tc.contains(tool_name)) {
-		tc[tool_name] = {{"count", 0LL}, {"bytes", 0LL}, {"fSavedbytes", 0LL}};
+		tc[tool_name] = {{"count", 0LL}, {"bytes", 0LL}, {"saved_bytes", 0LL}};
 	}
 	tc[tool_name]["count"] = tc[tool_name].value("count", 0LL) + 1LL;
 	tc[tool_name]["bytes"] = tc[tool_name].value("bytes", 0LL) + static_cast<long long>(result_bytes);
-	if (fSavedbytes > 0) {
-		tc[tool_name]["fSavedbytes"] =
-			tc[tool_name].value("fSavedbytes", 0LL) + static_cast<long long>(fSavedbytes);
+	if (savedBytes > 0) {
+		tc[tool_name]["saved_bytes"] =
+			// Read the new key first; fall back to the legacy "fSavedbytes"
+			// key so existing stats.json files are not silently zeroed out.
+			tc[tool_name].value("saved_bytes",
+				tc[tool_name].value("fSavedbytes", 0LL))
+			+ static_cast<long long>(savedBytes);
 	}
 	save(s);
 }
@@ -181,25 +185,28 @@ std::string FormatDisplay() {
 	if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
 		const auto& tc = s["tool_calls"];
 		if (tc.contains("ReadAttr")) {
-			read_attr_saved = tc["ReadAttr"].value("fSavedbytes", 0LL);
+			// Read the new key; fall back to the legacy "fSavedbytes" spelling.
+			read_attr_saved = tc["ReadAttr"].value("saved_bytes",
+				tc["ReadAttr"].value("fSavedbytes", 0LL));
 			read_attr_used  = tc["ReadAttr"].value("bytes",       0LL);
 			read_attr_calls = tc["ReadAttr"].value("count",       0LL);
 		}
 		if (tc.contains("Query")) {
-			query_saved = tc["Query"].value("fSavedbytes", 0LL);
+			query_saved = tc["Query"].value("saved_bytes",
+				tc["Query"].value("fSavedbytes", 0LL));
 			query_used  = tc["Query"].value("bytes",       0LL);
 			query_calls = tc["Query"].value("count",       0LL);
 		}
 	}
-	const long long total_saved_bytes = read_attr_saved + query_saved;
-	const long long total_used_bytes  = read_attr_used  + query_used;
-	const long long fSavedtokens      = total_saved_bytes / 4;
-	const long long used_tokens       = total_used_bytes  / 4;
-	const long long full_tokens       = fSavedtokens + used_tokens;
-	const int  bfs_pct           = full_tokens > 0
-		? static_cast<int>((fSavedtokens * 100) / full_tokens)
+	const long long totalSavedBytes = read_attr_saved + query_saved;
+	const long long totalUsedBytes  = read_attr_used  + query_used;
+	const long long savedTokens     = totalSavedBytes / 4;
+	const long long usedTokens      = totalUsedBytes  / 4;
+	const long long fullTokens      = savedTokens + usedTokens;
+	const int  bfsPct           = fullTokens > 0
+		? static_cast<int>((savedTokens * 100) / fullTokens)
 		: 0;
-	const double bfs_cost_saved  = (fSavedtokens / 1'000'000.0) * 3.0;
+	const double bfsCostSaved  = (savedTokens / 1'000'000.0) * 3.0;
 
 	char buf[768];
 	std::string out;
@@ -226,7 +233,7 @@ std::string FormatDisplay() {
 	out += "\n";
 	out += "  \xE2\x94\x83 BFS — the Haiku advantage\n";
 	out += "  \xE2\x94\x83\n";
-	if (fSavedtokens > 0) {
+	if (savedTokens > 0) {
 		std::snprintf(buf, sizeof(buf),
 			"  \xE2\x94\x83  Saved %s tokens  (%d%% of full-read cost)\n"
 			"  \xE2\x94\x83  Cost avoided: $%.4f\n"
@@ -234,11 +241,11 @@ std::string FormatDisplay() {
 			"  \xE2\x94\x83  %d BFS calls  (%d ReadAttr + %d Query)\n"
 			"  \xE2\x94\x83  Tokens they used:     %8s\n"
 			"  \xE2\x94\x83  Tokens they avoided:  %8s\n",
-			thousands(fSavedtokens).c_str(), bfs_pct, bfs_cost_saved,
+			thousands(savedTokens).c_str(), bfsPct, bfsCostSaved,
 			read_attr_calls + query_calls,
 			read_attr_calls, query_calls,
-			thousands(used_tokens).c_str(),
-			thousands(fSavedtokens).c_str());
+			thousands(usedTokens).c_str(),
+			thousands(savedTokens).c_str());
 	} else {
 		std::snprintf(buf, sizeof(buf),
 			"  \xE2\x94\x83  Cache empty — builds itself as Claude\n"

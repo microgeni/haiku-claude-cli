@@ -160,7 +160,6 @@ std::string Yellow(const std::string& s);
 std::string Blue(const std::string& s);
 std::string Magenta(const std::string& s);
 std::string Cyan(const std::string& s);
-std::string Gray(const std::string& s);
 // Muted() = dim + bright-black, the consistent "darker gray" used
 // on the rule lines framing the input row and on the status-row
 // fields (except the model name and the Remote-Control label,
@@ -174,6 +173,12 @@ std::string ClaudePrompt();            // "claude> "
 std::string ContinuationPrompt();      // "... " for multi-line input
 std::string Meta(const std::string& s); // dim bracketed note
 std::string ErrorLabel();              // bold red "error:"
+
+// Count the visible terminal columns occupied by s, skipping ANSI SGR
+// escape sequences (which are zero-width) and handling UTF-8 multi-byte
+// sequences. Used by FormatStatusRow (main.cpp) and table-cell padding
+// (tui.cpp) so the same logic applies everywhere without duplication.
+int DisplayWidth(const std::string& s);
 
 // Forward declaration so MarkdownRenderer can reference Spinner.
 class Spinner;
