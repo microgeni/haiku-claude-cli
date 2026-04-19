@@ -26,17 +26,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add Haiku host key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.DEVOPS_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          echo "taurus.microgeni.synology.me ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICnfvfj1NfZYS9f9wDO1/uvjEt4xPI+JsKtTSdUJDoDD" >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
       - name: Sync to Haiku
         env:
           REF: ${{ github.ref_name }}
@@ -44,12 +33,12 @@ jobs:
 
       - name: Build on Haiku
         run: |
-          ssh -n "$HAIKU_USER@$HAIKU_HOST" \
+          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/build.sh </dev/null"
 
       - name: Test on Haiku
         run: |
-          ssh -n "$HAIKU_USER@$HAIKU_HOST" \
+          ssh -n -o StrictHostKeyChecking=no "$HAIKU_USER@$HAIKU_HOST" \
             "cd '$HAIKU_PROJECT_PATH' && ./ci_scripts/test.sh </dev/null"
 
       - name: Summary
@@ -58,3 +47,28 @@ jobs:
           echo "Status: ${{ job.status }}"
           echo "Ref:    ${{ github.ref_name }}"
           echo "Run:    ${{ github.run_number }}"
+
+  release:
+    name: Release
+    runs-on: macos-arm64
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build HPKG on Haiku
+        id: hpkg
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./ci_scripts/package_on_haiku.sh
+
+      - name: Upload release to Gitea
+        env:
+          VERSION: ${{ github.ref_name }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PKG_NAME: ${{ steps.hpkg.outputs.pkg_name }}
+        run: ./ci_scripts/upload_gitea_release.sh
