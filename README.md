@@ -1,3 +1,5 @@
+![haiku-claude-cli icon](assets/claude-icon-preview.png)
+
 # haiku-claude-cli
 
 A native Claude client for Haiku OS. It runs as a single C++17 binary

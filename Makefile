@@ -57,7 +57,7 @@ ICON_HVIF ?= assets/claude-icon.hvif
 APP_SIG   ?= application/x-vnd.Microgeni-claude-cli
 
 PKG_NAME    ?= claude_cli
-PKG_VERSION ?= 1.5.0
+PKG_VERSION ?= 1.4.9
 PKG_BUILD   ?= 1
 PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg

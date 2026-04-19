@@ -6,8 +6,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-04-19
-
 ### Changed
 - **Telegram bridge auto-starts** — the `claude telegram` subcommand is
   removed. If a valid `telegram` block exists in `config.json`,
@@ -22,25 +20,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start streaming it shows accumulated text with a `▌` cursor. The
   placeholder is edited in-place with the final reply, or marked
   `❌ error — turn aborted` if the turn fails.
-- **CI static analysis and security audit** — every push to `dev`/`main`
-  now runs `make check` (cppcheck + flawfinder level 3+) on Taurus via
-  `ci_scripts/check.sh`. Failures block the pipeline before functional
-  tests run.
-
-### Fixed
-- **Permission prompt erases preview block** — tool preview lines printed
-  above the allow-prompt menu are now erased together with the menu on
-  selection, collapsing the entire question to a single compact summary
-  line. Cursor row is queried via DSR/CPR after first render so the erase
-  is correct even on small terminals with DECSTBM scroll-region clamping.
-- **`SelectOption` cursor tracking** — cursor is hidden while the menu is
-  on screen; subsequent re-renders no longer overwrite the heading row;
-  teardown uses `\x1b[1B\r` instead of `\n` to avoid DECSTBM scroll.
-
-### Removed
-- **`RunTelegramBridge` dead code** — the standalone free function
-  (~1 080 lines) was never called; bridge logic lives entirely inside
-  `InteractiveLoop`. Removed to eliminate the `-Wunused-function` warning.
 
 ## [1.4.9] - 2026-06-17
 
