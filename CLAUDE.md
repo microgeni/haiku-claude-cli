@@ -25,6 +25,12 @@ make test                # run tests
 make install             # install to /boot/system/non-packaged
 make package             # build HPKG (requires Haiku `package` tool)
 
+# Static analysis and security audit
+make lint                # cppcheck  — warning/performance/portability
+make security            # flawfinder — CWE security audit (level 3+)
+make security-full       # flawfinder — full scan (level 2+)
+make check               # lint + security in sequence (CI / pre-release)
+
 # ── macOS / nix (prototype only) ──
 nix develop              # enter dev shell (curl, openssl, libedit, nlohmann_json)
 nix develop -c make      # build

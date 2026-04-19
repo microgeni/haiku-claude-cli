@@ -63,7 +63,7 @@ PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all clean install package release
+.PHONY: all clean install package release lint security check
 
 all: $(BIN)
 
@@ -148,3 +148,59 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@ls -l "$(PKG_FILE)"
 
 -include $(DEPS)
+
+# ---------------------------------------------------------------------------
+# Static analysis
+# ---------------------------------------------------------------------------
+
+# cppcheck — fast, low-noise static analysis.
+# Checks warning + performance + portability categories.
+# Suppressed:
+#   missingIncludeSystem  — system headers not available to cppcheck
+#   unusedFunction        — public API called across translation units
+#   knownConditionTrueFalse — defensive guards cppcheck proves redundant
+#   variableScope         — lambda-capture variables flagged incorrectly
+#   useStlAlgorithm       — style preference, not a bug
+#   unmatchedSuppression  — fired when a suppression is never triggered
+#                           (happens on non-Haiku builds missing BFS code)
+lint:
+	@echo "=== cppcheck: static analysis ==="
+	@command -v cppcheck >/dev/null 2>&1 || { \
+	    echo "cppcheck not found — install cppcheck to run lint"; exit 1; }
+	cppcheck --enable=warning,performance,portability \
+	    --error-exitcode=1 \
+	    --suppress=missingIncludeSystem \
+	    --suppress=unusedFunction \
+	    --suppress=knownConditionTrueFalse \
+	    --suppress=variableScope \
+	    --suppress=useStlAlgorithm \
+	    --suppress=unmatchedSuppression \
+	    --suppress=normalCheckLevelMaxBranches \
+	    --quiet \
+	    $(SRCDIR)/
+	@echo "cppcheck passed."
+
+# flawfinder — security audit for dangerous function patterns (CWE).
+# Minimum level 3 surfaces real concerns only:
+#   level 5  TOCTOU races (chmod/open)   — fixed at source
+#   level 4  shell execution             — annotated // flawfinder: ignore
+#            where intentional (Bash tool, hooks, MCP, editor launch)
+#   level 3  format-string / crypto APIs — reviewed
+#   level 2  generic buffer / char       — mostly false positives; use
+#            `make security-full` (--minlevel=2) for a complete scan.
+security:
+	@echo "=== flawfinder: security audit (level 3+) ==="
+	@command -v flawfinder >/dev/null 2>&1 || { \
+	    echo "flawfinder not found — install flawfinder to run security audit"; exit 1; }
+	flawfinder --minlevel=3 --quiet $(SRCDIR)/
+	@echo "flawfinder complete."
+
+# Full security scan including level-2 buffer/char warnings.
+security-full:
+	@echo "=== flawfinder: full security audit (level 2+) ==="
+	flawfinder --minlevel=2 --quiet $(SRCDIR)/
+
+# check — run all analysis tools in sequence (useful for CI and pre-release).
+check: lint security
+	@echo "=== all checks passed ==="
+

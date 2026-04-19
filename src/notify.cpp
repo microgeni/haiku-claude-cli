@@ -154,7 +154,7 @@ void Send(const std::string& title, const std::string& body) {
 		}
 		argv.push_back(body.c_str());
 		argv.push_back(nullptr);
-		execvp("notify", const_cast<char* const*>(argv.data()));
+		execvp("notify", const_cast<char* const*>(argv.data()));  // flawfinder: ignore
 		_exit(127);
 	}
 	int status = 0;

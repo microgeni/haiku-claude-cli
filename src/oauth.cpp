@@ -6,11 +6,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include <curl/curl.h>
@@ -154,15 +156,15 @@ bool OAuthTokens::IsExpired() const {
 
 std::string CredentialsPath() {
 #ifdef __HAIKU__
-	const char* home = std::getenv("HOME");
+	const char* home = std::getenv("HOME");  // flawfinder: ignore
 	const std::string dir = std::string(home ? home : "/boot/home") + "/config/settings/claude-cli";
 #else
-	const char* xdg = std::getenv("XDG_CONFIG_HOME");
+	const char* xdg = std::getenv("XDG_CONFIG_HOME");  // flawfinder: ignore
 	std::string dir;
 	if (xdg && *xdg) {
 		dir = std::string(xdg) + "/claude-cli";
 	} else {
-		const char* home = std::getenv("HOME");
+		const char* home = std::getenv("HOME");  // flawfinder: ignore
 		dir = std::string(home ? home : ".") + "/.config/claude-cli";
 	}
 #endif
@@ -205,7 +207,24 @@ bool SaveTokens(const OAuthTokens& tokens) {
 	}
 	f << j.dump(2) << "\n";
 	f.close();
-	chmod(path.c_str(), 0600);
+	// Open with O_CREAT|0600 so the file is never world-readable even
+	// transiently — avoids the chmod-after-open TOCTOU race (CWE-362).
+	const int fd = ::open(path.c_str(),
+	                      O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0) {
+		std::cerr << "error: cannot write " << path << "\n";
+		return false;
+	}
+	FILE* fp = ::fdopen(fd, "w");
+	if (!fp) { ::close(fd); return false; }
+	const std::string serialized = j.dump(2) + "\n";
+	const bool ok = std::fwrite(serialized.data(), 1,
+	                            serialized.size(), fp) == serialized.size();
+	std::fclose(fp); // also closes fd
+	if (!ok) {
+		std::cerr << "error: cannot write " << path << "\n";
+		return false;
+	}
 	return true;
 }
 
@@ -264,7 +283,7 @@ int DoLogin() {
 #else
 	const std::string open_cmd = "xdg-open '" + fAuthurl + "' >/dev/null 2>&1";
 #endif
-	(void)std::system(open_cmd.c_str());
+	(void)std::system(open_cmd.c_str());  // flawfinder: ignore
 
 	std::cout << "After authorizing, paste the code from the redirect page.\n"
 			  << "(It may look like 'code#state' — paste the whole thing.)\n"

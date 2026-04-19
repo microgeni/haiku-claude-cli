@@ -70,7 +70,7 @@ int run_one(const std::string& command, const std::string& stdin_payload) {
 		close(err_pipe[1]);
 
 		const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
-		execvp("sh", const_cast<char* const*>(argv));
+		execvp("sh", const_cast<char* const*>(argv));  // flawfinder: ignore
 		_exit(127);
 	}
 

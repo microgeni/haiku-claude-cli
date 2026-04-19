@@ -243,7 +243,8 @@ bool Client::EditMessageText(int64_t chat_id, int64_t message_id,
 	std::string body_text = text;
 	constexpr size_t kCap = 3800;
 	if (body_text.size() > kCap) {
-		body_text = body_text.substr(0, kCap) + "\n\n[... truncated]";
+		body_text.resize(kCap);
+		body_text += "\n\n[... truncated]";
 	}
 
 	json body = {

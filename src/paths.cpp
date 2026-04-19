@@ -9,12 +9,12 @@ namespace paths {
 
 std::string ConfigDir() {
 #ifdef __HAIKU__
-	const char* home = std::getenv("HOME");
+	const char* home = std::getenv("HOME");  // flawfinder: ignore
 	return std::string(home ? home : "/boot/home") + "/config/settings/claude-cli";
 #else
-	const char* xdg = std::getenv("XDG_CONFIG_HOME");
+	const char* xdg = std::getenv("XDG_CONFIG_HOME");  // flawfinder: ignore
 	if (xdg && *xdg) return std::string(xdg) + "/claude-cli";
-	const char* home = std::getenv("HOME");
+	const char* home = std::getenv("HOME");  // flawfinder: ignore
 	return std::string(home ? home : ".") + "/.config/claude-cli";
 #endif
 }

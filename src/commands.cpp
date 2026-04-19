@@ -30,7 +30,7 @@ bool ends_with(const std::string& s, const std::string& suffix) {
 void load_dir(const std::string& dir) {
 	DIR* d = opendir(dir.c_str());
 	if (!d) return;
-	struct dirent* ent;
+	const struct dirent* ent;
 	while ((ent = readdir(d)) != nullptr) {
 		const std::string name = ent->d_name;
 		if (!ends_with(name, ".md")) continue;

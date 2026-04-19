@@ -320,7 +320,7 @@ ToolResult run_websearch(const json& input) {
 	if (query.empty()) {
 		return {"error: WebSearch requires a `query` argument", true};
 	}
-	const char* key = std::getenv("BRAVE_SEARCH_API_KEY");
+	const char* key = std::getenv("BRAVE_SEARCH_API_KEY");  // flawfinder: ignore
 	if (!key || !*key) {
 		return {"error: BRAVE_SEARCH_API_KEY is not set; get a free key at "
 				"https://brave.com/search/api/", true};
@@ -422,7 +422,7 @@ ToolResult run_webfetch(const json& input) {
 
 	const bool truncated = static_cast<int>(body.size()) > max_bytes;
 	if (truncated) {
-		body = body.substr(0, static_cast<size_t>(max_bytes));
+		body.resize(static_cast<size_t>(max_bytes));
 	}
 
 	std::string out;
@@ -462,7 +462,7 @@ ToolResult run_bash(const json& input) {
 		if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
 		close(pipefd[1]);
 		const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
-		execvp("sh", const_cast<char* const*>(argv));
+		execvp("sh", const_cast<char* const*>(argv));  // flawfinder: ignore
 		_exit(127);
 	}
 
@@ -533,7 +533,8 @@ ToolResult run_bash(const json& input) {
 
 	constexpr size_t kMaxBytes = 32 * 1024;
 	if (output.size() > kMaxBytes) {
-		output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
+		output.resize(kMaxBytes);
+		output += "\n[... output truncated]";
 	}
 
 	if (!WIFEXITED(status)) {
@@ -630,7 +631,7 @@ ToolResult run_grep(const json& input) {
 		if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
 		if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
 		close(pipefd[1]);
-		execvp("grep", const_cast<char* const*>(argv.data()));
+		execvp("grep", const_cast<char* const*>(argv.data()));  // flawfinder: ignore
 		_exit(127);
 	}
 
@@ -688,7 +689,8 @@ ToolResult run_grep(const json& input) {
 
 	constexpr size_t kMaxBytes = 32 * 1024;
 	if (output.size() > kMaxBytes) {
-		output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
+		output.resize(kMaxBytes);
+		output += "\n[... output truncated]";
 	}
 	return {output, false};
 }
@@ -957,7 +959,7 @@ ToolResult exec_capture(const char* const argv[]) {
 		if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
 		if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
 		close(pipefd[1]);
-		execvp(argv[0], const_cast<char* const*>(argv));
+		execvp(argv[0], const_cast<char* const*>(argv));  // flawfinder: ignore
 		_exit(127);
 	}
 	close(pipefd[1]);
@@ -999,7 +1001,8 @@ ToolResult exec_capture(const char* const argv[]) {
 
 	constexpr size_t kMaxBytes = 32 * 1024;
 	if (output.size() > kMaxBytes) {
-		output = output.substr(0, kMaxBytes) + "\n[... output truncated]";
+		output.resize(kMaxBytes);
+		output += "\n[... output truncated]";
 	}
 	if (!WIFEXITED(status)) {
 		return {"error: command terminated abnormally\n" + output, true};
@@ -1218,7 +1221,7 @@ json haiku_definitions() {
 
 json Definitions() {
 	json out = builtin_definitions();
-	if (const char* key = std::getenv("BRAVE_SEARCH_API_KEY"); key && *key) {
+	if (const char* key = std::getenv("BRAVE_SEARCH_API_KEY"); key && *key) {  // flawfinder: ignore
 		out.push_back({
 			{"name", "WebSearch"},
 			{"description",

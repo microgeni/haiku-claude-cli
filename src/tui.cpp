@@ -30,11 +30,11 @@ std::string wrap(const char* on, const std::string& s, const char* off = "\x1b[0
 bool detect_color_support() {
 	if (!isatty(fileno(stdout))) return false;
 
-	if (const char* v = std::getenv("NO_COLOR"); v && *v) return false;
+	if (const char* v = std::getenv("NO_COLOR"); v && *v) return false;  // flawfinder: ignore
 
-	if (const char* v = std::getenv("CLICOLOR"); v && std::string(v) == "0") return false;
+	if (const char* v = std::getenv("CLICOLOR"); v && std::string(v) == "0") return false;  // flawfinder: ignore
 
-	if (const char* v = std::getenv("TERM"); v) {
+	if (const char* v = std::getenv("TERM"); v) {  // flawfinder: ignore
 		if (std::string(v) == "dumb") return false;
 	}
 	return true;

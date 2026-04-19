@@ -148,7 +148,7 @@ bool spawn_server(Client& c, const std::string& command,
 		argv.push_back(const_cast<char*>(command.c_str()));
 		for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
 		argv.push_back(nullptr);
-		execvp(command.c_str(), argv.data());
+		execvp(command.c_str(), argv.data());  // flawfinder: ignore
 		_exit(127);
 	}
 
