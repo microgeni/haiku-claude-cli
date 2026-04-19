@@ -6,6 +6,53 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-04-19
+
+### Fixed
+- **ESC cancel race — subsequent turns fired `[interrupted]` immediately** —
+  Two cooperating bugs caused every turn after an ESC-cancel to exit with
+  `[interrupted]` before ever hitting the API. (1) `EscInterruptGuard` was
+  constructed before `g_interrupted` was cleared, so a stale ESC byte
+  lingering in the tty buffer could re-set the flag after the clear.
+  Fix: call `tcflush(TCIFLUSH)` and reset `g_interrupted = 0` *before*
+  constructing the guard. (2) `send_with_tools` called `send_conversation`
+  which spawned a second `EscInterruptGuard` thread concurrently reading
+  the same stdin fd, racing with the outer guard. Fix: skip the inner guard
+  entirely when `g_active_esc_guard` is already set.
+- **Arrow keys in permission menu consumed by ESC guard** — the
+  `EscInterruptGuard` background thread held stdin in raw mode and raced
+  with `tui::select_option()`. Up/Down CSI sequences were swallowed by the
+  guard, leaving the menu unresponsive. Fix: added `pause()`/`resume()` to
+  `EscInterruptGuard`; `prompt_permission()` now pauses the guard for the
+  duration of `select_option()` so it has exclusive stdin ownership.
+- **`select_option` arrow keys didn't update the highlight** — `VMIN=0
+  VTIME=1` is a polling read; `read()` could return 0 immediately even with
+  CSI bytes already in the kernel buffer. Switched to `VMIN=1 VTIME=1` so
+  each read blocks until a byte arrives or the 100 ms timeout expires. Bare
+  ESC still times out correctly; arrow keys now reliably redraw.
+- **`select_option` option text garbled on every arrow keypress** —
+  `render()` used newline to step between option lines; starting at the
+  bottom of the DECSTBM scroll region each newline scrolled the region up,
+  shifting the menu's absolute position so subsequent erase+reprint landed
+  on wrong rows. Replaced with cursor-down + CR. Also added a leading CR in
+  `render()` to reset the cursor column to 0 before every draw.
+- **Continuation prompts appeared above the initial prompt** —
+  `position_cursor_for_chat()` was called before each continuation
+  `read_line()`, parking the cursor above the fixed input row. Fix: call
+  `position_cursor_for_input()` instead so every readline call draws in the
+  same fixed input row.
+- **Continuation `read_line()` overwrote the fixed status frame** — on
+  multiline entry, libedit's newline after the first accepted line moved the
+  cursor outside the scroll region. Subsequent continuation calls drew
+  there, clobbering the rule and status rows. Fix: call
+  `tui::position_cursor_for_chat()` before every inner `read_line()` in
+  `read_message()`.
+- **Cursor hidden at `claude>` prompt after multi-tool turns** — the last
+  hide-cursor escape from a tool spinner could leave the cursor hidden for
+  the entire input wait. Fix: embed show-cursor directly in
+  `claude_prompt()` so visibility is unconditionally restored at every
+  prompt callsite.
+
 ## [1.4.5] - 2026-04-19
 
 ### Added
