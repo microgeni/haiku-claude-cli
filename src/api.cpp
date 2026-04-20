@@ -410,7 +410,6 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 			race_cv.notify_one();
 		});
 
-		tui::PositionCursorForChat();
 		const std::vector<std::string> choices = {
 			"Yes",
 			"Yes, allow all " + tool_name + " this session  (shift+tab)",
@@ -522,7 +521,6 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 	    ? "Yes, allow all " + tool_name + " this session  (shift+tab)"
 	    : "Yes, allow all " + tool_name + " in " + dir_scope + " this session  (shift+tab)";
 
-	tui::PositionCursorForChat();
 	const std::vector<std::string> choices = {
 		"Yes",
 		allow_session_label,
