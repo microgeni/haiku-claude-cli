@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -72,6 +73,29 @@ static bool consume_until(FILE* f, const char* seq, std::string& buf) {
 
 // Custom rl_getc_function: intercepts \e[200~ and replays the paste
 // body with newlines converted to backslash-continuation sequences.
+//
+// Key design constraint: we must NOT speculatively over-read bytes from
+// any ESC[ sequence that turns out not to be a bracketed-paste start.
+// The old code read exactly 4 bytes after ESC[ and compared them to
+// "200~".  This caused two problems:
+//   1. Short sequences (e.g. \e[2h, 2 bytes after [) left the last
+//      raw_getc() blocking on user input.
+//   2. Long sequences (e.g. cursor-position reports \e[12;34R, 6 bytes
+//      after [) had their trailing bytes permanently lost — they were
+//      never stashed in g_paste_buf — which corrupted libedit's key
+//      FSM and caused it to swallow the user's first Enter keypress.
+//
+// Fix: read one byte at a time, matching against "200~" as a prefix.
+// Stop as soon as the accumulated bytes either:
+//   (a) fully match "200~"                   → handle paste
+//   (b) diverge from "200~" AND we hit a CSI → stash all bytes, return ESC
+//       final byte (0x40–0x7E per ECMA-48)
+//   (c) diverge from "200~" on a non-final   → keep reading until we
+//       byte (e.g. '1' in a CPR \e[12;34R)     hit a final byte, then
+//                                               stash everything & return ESC
+//
+// This ensures every byte of any CSI sequence that isn't \e[200~ is
+// faithfully preserved in g_paste_buf and replayed to libedit.
 extern "C" int bracketed_getc(FILE* f) {
     // If we have buffered paste characters, drain them first.
     if (g_paste_pos < g_paste_buf.size())
@@ -85,27 +109,51 @@ extern "C" int bracketed_getc(FILE* f) {
 
     // Peek at the next byte.
     const int c2 = raw_getc(f);
-    if (c2 == EOF) return c;  // lone ESC
+    if (c2 == EOF) return '\x1b';  // lone ESC
 
     if (c2 != '[') {
-        // Not a CSI sequence — return ESC now, stash c2 for next call
-        // by re-injecting into the paste buffer.
+        // Not a CSI sequence — return ESC now, stash c2 for next call.
         g_paste_buf.clear();
         g_paste_buf.push_back(static_cast<char>(c2));
         g_paste_pos = 0;
-        return c;   // return ESC
+        return '\x1b';
     }
 
-    // We have ESC '[' — check for "200~" (bracketed paste start).
-    // Read up to 4 more bytes to decide.
-    char trailer[5] = {};
-    for (int i = 0; i < 4; ++i) {
+    // We have ESC '['.  Read bytes one at a time, accumulating into
+    // `acc`, until we can determine whether this is \e[200~ or not.
+    // "200~" is the bracketed-paste opener; anything else is a CSI
+    // sequence we must replay verbatim (cursor-position reports,
+    // terminal responses, etc.).
+    static constexpr char kTarget[] = "200~";
+    static constexpr int  kTargetLen = 4;
+
+    std::string acc;
+    acc.reserve(8);
+    bool matched = false;
+
+    while (true) {
         const int cx = raw_getc(f);
         if (cx == EOF) break;
-        trailer[i] = static_cast<char>(cx);
+        acc.push_back(static_cast<char>(cx));
+
+        const int n = static_cast<int>(acc.size());
+
+        // Check prefix match against "200~".
+        if (n <= kTargetLen && strncmp(acc.data(), kTarget, n) == 0) {
+            if (n == kTargetLen) {
+                matched = true; // full match
+                break;
+            }
+            // Still a prefix — keep reading.
+            continue;
+        }
+
+        // Not a prefix of "200~".  Keep reading until we hit a CSI
+        // final byte (0x40–0x7E) so the full sequence is captured.
+        if (cx >= 0x40 && cx <= 0x7E) break;
     }
 
-    if (strcmp(trailer, "200~") == 0) {
+    if (matched) {
         // ── Bracketed paste start ──────────────────────────────────
         // Slurp everything up to \e[201~ into a temporary buffer,
         // then convert newlines to backslash-continuation sequences
@@ -120,7 +168,7 @@ extern "C" int bracketed_getc(FILE* f) {
         g_paste_buf.reserve(raw.size() + 16);
         for (size_t i = 0; i < raw.size(); ++i) {
             if (raw[i] == '\r') {
-                if (i + 1 < raw.size() && raw[i + 1] == '\n') ++i; // \r\n → skip \r
+                if (i + 1 < raw.size() && raw[i + 1] == '\n') ++i;
                 g_paste_buf.push_back('\\');
                 g_paste_buf.push_back('\n');
             } else if (raw[i] == '\n') {
@@ -132,19 +180,18 @@ extern "C" int bracketed_getc(FILE* f) {
         }
         g_paste_pos = 0;
 
-        // Return the first character of the paste (or, if paste was
-        // empty, loop by returning a NUL which libedit ignores).
+        // Return the first character of the paste (NUL if empty,
+        // which libedit ignores).
         if (g_paste_pos < g_paste_buf.size())
             return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
         return 0;
     }
 
-    // Not a bracketed-paste sequence — reconstruct ESC [ + trailer
-    // into g_paste_buf and return ESC.
+    // Not a bracketed-paste sequence — stash ESC '[' + everything we
+    // accumulated into g_paste_buf so libedit sees the full sequence.
     g_paste_buf.clear();
     g_paste_buf.push_back('[');
-    for (int i = 0; i < 4 && trailer[i]; ++i)
-        g_paste_buf.push_back(trailer[i]);
+    g_paste_buf.append(acc);
     g_paste_pos = 0;
     return '\x1b';
 }
@@ -330,13 +377,11 @@ void Init(const std::string& history_file) {
 	}
 	rl_attempted_completion_function = slash_completion;
 
-	// Enable bracketed paste mode so the terminal wraps pastes in
-	// \e[200~ ... \e[201~.  Our custom rl_getc_function intercepts
-	// those markers and converts embedded newlines to backslash-
-	// continuation sequences that ReadMessage() already understands.
+	// Install our custom getc function.  The bracketed-paste enable
+	// sequence (\e[?2004h) is sent later, after all keybindings are
+	// set up, via a single unbuffered ::write() call so there is no
+	// race between stdio-buffered and raw writes.
 	rl_getc_function = bracketed_getc;
-	if (isatty(fileno(stdin)))
-		fputs("\x1b[?2004h", stdout);
 
 	// Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
 	// ReadMessage() re-prompts via backslash-continuation.
@@ -384,9 +429,13 @@ void Init(const std::string& history_file) {
 	if (isatty(fileno(stdin))) {
 		rl_add_defun("handle-bracketed-paste", handle_bracketed_paste, -1);
 		rl_set_key("\x1b[200~", handle_bracketed_paste, rl_get_keymap());
-		// Tell the terminal to start sending bracketed-paste markers.
-		// Write directly to the terminal fd so the escape doesn't get
-		// buffered behind other stdout content.
+		// Flush any stdio-buffered output (welcome text, status bar)
+		// before enabling bracketed paste so the single ::write() below
+		// is not interleaved with buffered writes.  Sending \e[?2004h
+		// exactly once via an unbuffered write minimises the chance of
+		// the terminal emitting a spurious response sequence into stdin
+		// before the first readline() call.
+		fflush(stdout);
 		::write(fileno(stdout), "\x1b[?2004h", 8);
 	}
 }
@@ -466,6 +515,25 @@ bool ReadMessage(const std::string& prompt,
 
 	out = std::move(first);
 	return true;
+}
+
+void DrainStaleInput() {
+	if (!isatty(fileno(stdin))) return;
+
+	// Switch stdin to non-blocking so we can drain whatever bytes the
+	// terminal sent in response to our init sequences (bracketed-paste
+	// enable, DECSTBM, cursor-position requests) without hanging.
+	const int fd    = fileno(stdin);
+	const int flags = fcntl(fd, F_GETFL, 0);
+	if (flags == -1) return;
+	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return;
+
+	char discard[64];
+	while (::read(fd, discard, sizeof(discard)) > 0)
+		; // drain all available bytes
+
+	// Restore blocking mode before handing stdin to readline.
+	fcntl(fd, F_SETFL, flags);
 }
 
 void Record(const std::string& line) {

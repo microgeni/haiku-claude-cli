@@ -225,6 +225,14 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		~StatusFrameGuard() { tui::TeardownStatusBar(); }
 	} status_frame_guard;
 
+	// Drain any bytes the terminal sent in response to our init
+	// sequences (bracketed-paste enable, DECSTBM scroll-region setup,
+	// etc.) before handing stdin to readline.  Without this drain,
+	// bracketed_getc mis-parses the unsolicited escape sequences and
+	// effectively swallows the user's first Enter keypress, requiring
+	// two Enters to submit the first prompt.
+	repl::DrainStaleInput();
+
 	std::string pending = initial_message;
 
 	// Paths announced to Claude on the next outgoing user turn.

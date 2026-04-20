@@ -42,6 +42,15 @@ bool ReadMessage(const std::string& prompt,
 				  const std::string& ContinuationPrompt,
 				  std::string&       out);
 
+// Drain any bytes that may have accumulated in stdin between terminal
+// init (e.g. bracketed-paste enable, status bar drawing) and the first
+// readline() call. Some terminal emulators send unsolicited responses
+// (cursor-position reports, focus events) that would otherwise be
+// mis-parsed by bracketed_getc and cause the first Enter keypress to
+// be swallowed. Puts stdin into non-blocking mode briefly, reads until
+// the buffer is empty, then restores blocking mode. No-op on non-TTYs.
+void DrainStaleInput();
+
 // Append `line` to history and flush to disk. No-op on empty lines.
 void Record(const std::string& line);
 
