@@ -6,6 +6,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-04-21
+
+### Fixed
+- **Bracketed paste** — terminal paste events (`\e[200~`…`\e[201~`) are now
+  fully intercepted in a custom `rl_getc_function` (`bracketed_getc`). The
+  paste body is read in one shot, `\r\n`/`\n` converted to backslash-
+  continuation sequences, and replayed char-by-char to libedit. Eliminates
+  the `0~` artifact that appeared at the start of pasted text and correctly
+  reassembles multi-line pastes via the existing backslash-continuation path.
+  `repl::Deinit()` sends `\e[?2004l` on exit so the terminal is left clean.
+- **Stats migration** — `load()` now runs `migrate_tool_entry()` on every
+  `tool_calls` entry after parsing, renaming the legacy `fSavedbytes` key
+  (written by an early buggy version) to `saved_bytes`. The `/stats` BFS
+  savings block no longer shows "Cache empty" on existing installs.
+- **Overloaded-error retry** — stream-level `overloaded_error` events now
+  trigger the same exponential-backoff retry loop as HTTP 529, with clearer
+  "Claude is overloaded, retrying…" messaging.
+
 ## [1.5.2] - 2026-04-20
 
 ### Added
