@@ -180,6 +180,12 @@ public:
 private:
 	void PollLoop();
 	void WorkLoop();
+	// Try to handle a slash command immediately, without waiting for
+	// AcquireTurn().  Returns true if the command was fully serviced
+	// (so the caller can skip AcquireTurn / ProcessUpdate).  Returns
+	// false for plain prompts or Passthrough commands that still need
+	// to go through the full Claude turn.
+	bool TryHandleSlashImmediate(const Update& u);
 	void TgSend(int64_t chat, const std::string& text);
 	void ProcessUpdate(const Update& u);
 

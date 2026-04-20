@@ -602,6 +602,125 @@ void RemoteControl::PollLoop() {
 	}
 }
 
+// Handle slash commands that do NOT require a Claude turn — i.e. every
+// slash command that ProcessUpdate handles before the final "fall through
+// to SendWithTools" block.  Returns true when the command was fully
+// serviced here so the caller can skip AcquireTurn() / ProcessUpdate().
+// Returns false for plain prompts or passthrough-to-Claude commands so
+// the caller must still go through the normal (blocking) path.
+bool RemoteControl::TryHandleSlashImmediate(const Update& u_in) {
+	Update u = u_in;
+	if (u.is_callback) {
+		// Callback taps that reach WorkLoop are never slash commands.
+		return false;
+	}
+
+	const std::string who = u.username.empty()
+		? std::to_string(u.user_id) : u.username;
+
+	// Mirror the incoming command to the local terminal (same as
+	// ProcessUpdate does for every message).
+	std::cout << "\x1b""7";
+	tui::PositionCursorForChat();
+	std::cout << tui::Meta("[remote " + who + "] " + u.text) << "\n";
+	config::LogLine("remote-control rx user=" + std::to_string(u.user_id)
+			 + " text=" + u.text);
+
+	if (u.text == "/mute") {
+		if (!g_muted.exchange(true))
+			fClient.SendMessage(u.chat_id,
+				"Remote muted. No replies until /unmute.");
+		std::cout << "\x1b""8" << std::flush;
+		return true;
+	}
+	if (u.text == "/unmute") {
+		if (g_muted.exchange(false))
+			fClient.SendMessage(u.chat_id,
+				"Remote unmuted. Replies will be sent again.");
+		std::cout << "\x1b""8" << std::flush;
+		return true;
+	}
+	if (u.text == "/new") {
+		fUserMessages.erase(u.user_id);
+		TgSend(u.chat_id, "(history cleared)");
+		std::cout << "\x1b""8" << std::flush;
+		return true;
+	}
+
+	if (u.text.empty() || u.text.front() != '/') {
+		// Plain prompt — must go through AcquireTurn.
+		return false;
+	}
+
+	const std::string cmd_word = u.text.substr(0, u.text.find(' '));
+	if (cmd_word == "/exit" || cmd_word == "/quit"
+			|| cmd_word == "/remote-control") {
+		TgSend(u.chat_id, "(" + cmd_word + " is not available from Telegram)");
+		std::cout << "\x1b""8" << std::flush;
+		return true;
+	}
+
+	// All other slash commands: dispatch through commands::Dispatch.
+	// If the result is Passthrough the command resolves to a plain prompt
+	// and must still be handled by ProcessUpdate / AcquireTurn.
+	const std::string dispatched = (u.text == "/start") ? "/help" : u.text;
+
+	std::ostringstream capture;
+	std::streambuf* old_buf = std::cout.rdbuf(capture.rdbuf());
+
+	json& messages_ref = fUserMessages[u.user_id];
+	if (!messages_ref.is_array()) messages_ref = json::array();
+	int    rc_turn   = 0;
+	int    rc_in     = 0;
+	int    rc_out    = 0;
+	bool   rc_notify = false;
+	double rc_thresh = 60.0;
+	std::vector<std::string> rc_urls;
+	json   rc_prices = json::object();
+	commands::LoopCtx ctx{fAuth, fCfgMaxTokens, fCustomSystem, rc_prices,
+	                      fCfgModel, rc_turn, rc_in, rc_out,
+	                      messages_ref, rc_urls, rc_notify, rc_thresh,
+	                      {}};
+	std::string passthrough;
+	const commands::SlashAction action = commands::Dispatch(dispatched, ctx, passthrough);
+
+	std::cout.rdbuf(old_buf);
+	const std::string output = capture.str();
+
+	if (action == commands::SlashAction::Passthrough) {
+		// The command wants Claude to handle it — let WorkLoop proceed
+		// through AcquireTurn.  ProcessUpdate will re-run the full
+		// dispatch (including the passthrough rewrite) so we do NOT
+		// consume the update here; just tell the caller it needs the
+		// turn lock.
+		return false;
+	}
+
+	// Strip ANSI before sending to Telegram.
+	std::string plain;
+	plain.reserve(output.size());
+	for (size_t i = 0; i < output.size(); ) {
+		if (output[i] == '\x1b' && i + 1 < output.size() && output[i+1] == '[') {
+			i += 2;
+			while (i < output.size()
+					&& output[i] != 'm' && output[i] != 'K'
+					&& output[i] != 'H' && output[i] != 'A'
+					&& output[i] != 'B' && output[i] != 'J') ++i;
+			if (i < output.size()) ++i;
+		} else {
+			plain += output[i++];
+		}
+	}
+	while (!plain.empty() && (plain.front() == '\n' || plain.front() == ' '))
+		plain.erase(plain.begin());
+	while (!plain.empty() && (plain.back() == '\n' || plain.back() == ' '))
+		plain.pop_back();
+
+	if (!plain.empty()) TgSend(u.chat_id, plain);
+	std::cout << "\x1b""8" << std::flush;
+	return true;
+}
+
 void RemoteControl::WorkLoop() {
 	while (fWorkerRunning.load()) {
 		Update job;
@@ -614,6 +733,12 @@ void RemoteControl::WorkLoop() {
 			job = fWorkQueue.front();
 			fWorkQueue.pop_front();
 		}
+		// Slash commands that don't invoke Claude are handled here
+		// immediately — without waiting for AcquireTurn() — so the
+		// Telegram user can always use /help, /mute, /new, etc. even
+		// while a long Claude turn is in progress locally or via a
+		// prior Telegram message.
+		if (TryHandleSlashImmediate(job)) continue;
 		AcquireTurn();
 		ProcessUpdate(job);
 		ReleaseTurn();
