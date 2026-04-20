@@ -133,11 +133,14 @@ void RecordSession() {
 	save(s);
 }
 
-void RecordTurn(int input_tokens, int output_tokens) {
+void RecordTurn(int input_tokens, int output_tokens,
+				int cache_read_tokens, int cache_write_tokens) {
 	json s = load();
-	s["turns"]         = s.value("turns",         0LL) + 1LL;
-	s["input_tokens"]  = s.value("input_tokens",  0LL) + static_cast<long long>(input_tokens);
-	s["output_tokens"] = s.value("output_tokens", 0LL) + static_cast<long long>(output_tokens);
+	s["turns"]               = s.value("turns",               0LL) + 1LL;
+	s["input_tokens"]        = s.value("input_tokens",        0LL) + static_cast<long long>(input_tokens);
+	s["output_tokens"]       = s.value("output_tokens",       0LL) + static_cast<long long>(output_tokens);
+	s["cache_read_tokens"]   = s.value("cache_read_tokens",   0LL) + static_cast<long long>(cache_read_tokens);
+	s["cache_write_tokens"]  = s.value("cache_write_tokens",  0LL) + static_cast<long long>(cache_write_tokens);
 	save(s);
 }
 
@@ -167,14 +170,20 @@ std::string FormatDisplay() {
 	const std::string since = s.value("first_session", std::string{"(unknown)"});
 	const int  sessions = s.value("sessions", 0LL);
 	const int  turns    = s.value("turns", 0LL);
-	const long long in_tok   = s.value("input_tokens",  0LL);
-	const long long out_tok  = s.value("output_tokens", 0LL);
+	const long long in_tok     = s.value("input_tokens",       0LL);
+	const long long out_tok    = s.value("output_tokens",      0LL);
+	const long long c_read_tok = s.value("cache_read_tokens",  0LL);
+	const long long c_write_tok= s.value("cache_write_tokens", 0LL);
 
-	// Ballpark lifetime cost using Sonnet rates ($3 / M input,
-	// $15 / M output). Stats are cross-model but Sonnet is the
-	// default and gives an order-of-magnitude number.
-	const double est_cost = (in_tok  / 1'000'000.0) * 3.0
-						  + (out_tok / 1'000'000.0) * 15.0;
+	// Lifetime cost using Sonnet rates:
+	//   $3.00 / M input (uncached)
+	//   $15.00 / M output
+	//   $0.30 / M cache reads  (10% of input rate)
+	//   $3.75 / M cache writes (125% of input rate)
+	const double est_cost = (in_tok      / 1'000'000.0) * 3.0
+						  + (out_tok     / 1'000'000.0) * 15.0
+						  + (c_read_tok  / 1'000'000.0) * 0.30
+						  + (c_write_tok / 1'000'000.0) * 3.75;
 
 	// BFS counters — computed first so the summary block can
 	// lead with the savings number.
@@ -221,10 +230,14 @@ std::string FormatDisplay() {
 		"  Sessions:  %d\n"
 		"  Turns:     %d\n"
 		"  Input:     %s tokens\n"
+		"  Cache R:   %s tokens  (prompt cache hits)\n"
+		"  Cache W:   %s tokens  (prompt cache writes)\n"
 		"  Output:    %s tokens\n"
 		"  Est cost:  $%.2f  (Sonnet rates)\n",
 		sessions, turns,
 		thousands(in_tok).c_str(),
+		thousands(c_read_tok).c_str(),
+		thousands(c_write_tok).c_str(),
 		thousands(out_tok).c_str(),
 		est_cost);
 	out += buf;

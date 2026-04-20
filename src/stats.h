@@ -20,7 +20,8 @@
 namespace stats {
 
 void RecordSession();
-void RecordTurn(int input_tokens, int output_tokens);
+void RecordTurn(int input_tokens, int output_tokens,
+				int cache_read_tokens = 0, int cache_write_tokens = 0);
 void RecordTool(const std::string& tool_name, int result_bytes,
 				 long savedBytes = 0);
 

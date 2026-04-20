@@ -246,20 +246,21 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
-			tui::PositionCursorForChat();
+			// Echo the pending line (from a drag-drop or hook) as if
+			// the user had typed it, then advance past it.
 			std::cout << tui::UserPrompt() << line << "\n";
+			tui::PositionCursorForChat();
 		} else {
+			// libedit draws the prompt and the user's input inside the
+			// scroll region. After Enter the cursor is on a new line
+			// inside the chat area — no erase or re-echo needed.
 			if (!repl::ReadMessage(tui::UserPrompt(),
 									tui::ContinuationPrompt(),
 									line)) {
 				std::cout << "\n";
 				break;
 			}
-			tui::ClearInputRow();
 			tui::PositionCursorForChat();
-			if (!line.empty()) {
-				std::cout << tui::UserPrompt() << line << "\n";
-			}
 		}
 
 		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
@@ -445,7 +446,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		++turn_count;
 		session_input  += result.input_tokens;
 		session_output += result.output_tokens;
-		stats::RecordTurn(result.input_tokens, result.output_tokens);
+		stats::RecordTurn(result.input_tokens, result.output_tokens,
+						  result.cache_read_input_tokens,
+						  result.cache_creation_input_tokens);
 
 		// Harvest any URLs Claude mentioned so `/open N` can launch
 		// them later. Dedup in insertion order so the index stays
