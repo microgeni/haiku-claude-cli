@@ -235,7 +235,7 @@ bool DeleteTokens() {
 std::optional<OAuthTokens> RefreshTokens(const OAuthTokens& existing) {
 	const json body = {
 		{"grant_type",    "refresh_token"},
-		{"fClientid",     kClientId},
+		{"client_id",     kClientId},
 		{"refresh_token", existing.refresh_token},
 	};
 	return post_token_json(body.dump());
@@ -265,7 +265,7 @@ int DoLogin() {
 	std::ostringstream url;
 	url << kAuthEndpoint
 		<< "?response_type=code"
-		<< "&fClientid="             << url_encode(curl, kClientId)
+		<< "&client_id="             << url_encode(curl, kClientId)
 		<< "&redirect_uri="          << url_encode(curl, kRedirectUri)
 		<< "&scope="                 << url_encode(curl, kScopes)
 		<< "&code_challenge="        << url_encode(curl, challenge)
@@ -313,7 +313,7 @@ int DoLogin() {
 
 	const json body = {
 		{"grant_type",    "authorization_code"},
-		{"fClientid",     kClientId},
+		{"client_id",     kClientId},
 		{"code",          code},
 		{"redirect_uri",  kRedirectUri},
 		{"code_verifier", verifier},
