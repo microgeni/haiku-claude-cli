@@ -111,11 +111,15 @@ Use **conventional commits** for commit messages:
 
 ### Release checklist (in order)
 1. `bash ci_scripts/test.sh` — all tests must pass
-2. Update `CHANGELOG.md` — add `## [x.y.z] - YYYY-MM-DD` section
-3. `git add CHANGELOG.md && git commit -m "docs: changelog for vx.y.z"`
-4. `make release` — verify the binary builds clean
-5. `git tag -a vx.y.z -m "Release vx.y.z — <one-line summary>"`
-6. `git push origin main --tags`
+2. **Version sync** — confirm `PKG_VERSION` in `Makefile` and `kVersion` in
+   `src/config.cpp` show the same `x.y.z` string; update whichever is behind.
+   The HPKG metadata and the running binary must agree or users see the wrong
+   version (e.g. `/version`, `--version`, `claude -v`).
+3. Update `CHANGELOG.md` — add `## [x.y.z] - YYYY-MM-DD` section
+4. `git add CHANGELOG.md && git commit -m "docs: changelog for vx.y.z"`
+5. `make release` — verify the binary builds clean
+6. `git tag -a vx.y.z -m "Release vx.y.z — <one-line summary>"`
+7. `git push origin main --tags`
 
 CI (Gitea Actions, `.gitea/workflows/build-test.yml`) builds and
 tests every push by SSHing to Taurus (real Haiku hardware).

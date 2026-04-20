@@ -57,6 +57,17 @@ v{MAJOR}.{MINOR}.{PATCH}
 git checkout dev
 make test
 
+# ── Version sync check ──────────────────────────────────────────────────────
+# PKG_VERSION in the Makefile and kVersion in src/config.cpp MUST match.
+# If they differ the HPKG will advertise the new version but the running
+# binary will still report the old one (e.g. /version or --version).
+#
+# Verify they agree before tagging:
+grep 'PKG_VERSION' Makefile
+grep 'kVersion'    src/config.cpp
+# Both must show the same x.y.z string.  Update whichever is behind.
+# ────────────────────────────────────────────────────────────────────────────
+
 # Merge to main
 git checkout main
 git merge dev
