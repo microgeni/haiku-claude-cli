@@ -40,8 +40,13 @@ ToolResult run_read(const json& input) {
 		return {"error: cannot open " + path, true};
 	}
 
-	const int start = input.value("start_line", 0);
-	const int end   = input.value("end_line",   0);
+	// Guard against the model sending start_line/end_line as a string
+	// or null instead of an integer — json::value<int>() segfaults
+	// (via from_json) when the stored type isn't a JSON number.
+	const int start = (input.contains("start_line") && input["start_line"].is_number())
+	                ? input["start_line"].get<int>() : 0;
+	const int end   = (input.contains("end_line")   && input["end_line"].is_number())
+	                ? input["end_line"].get<int>()   : 0;
 
 	std::ostringstream out;
 	std::string        line;
@@ -536,7 +541,8 @@ ToolResult run_webfetch(const json& input) {
 	if (url.empty()) {
 		return {"error: WebFetch requires a `url` argument", true};
 	}
-	const int max_bytes = input.value("max_bytes", 32 * 1024);
+	const int max_bytes = (input.contains("max_bytes") && input["max_bytes"].is_number())
+	                    ? input["max_bytes"].get<int>() : 32 * 1024;
 
 	CURL* curl = curl_easy_init();
 	if (!curl) return {"error: curl_easy_init failed", true};
@@ -583,7 +589,8 @@ ToolResult run_webfetch(const json& input) {
 
 ToolResult run_bash(const json& input) {
 	const std::string command  = input.value("command", std::string{});
-	const int         timeout  = input.value("timeout_seconds", 60);
+	const int         timeout  = (input.contains("timeout_seconds") && input["timeout_seconds"].is_number())
+	                           ? input["timeout_seconds"].get<int>() : 60;
 	if (command.empty()) {
 		return {"error: Bash requires a `command` argument", true};
 	}
