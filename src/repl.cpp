@@ -14,6 +14,143 @@
 #include "paths.h"
 #include "tui.h"
 
+// ---------------------------------------------------------------------------
+// Bracketed-paste support
+//
+// When the terminal has bracketed paste enabled (\e[?2004h) it wraps any
+// paste with \e[200~ ... \e[201~.  libedit's internal trie sees the raw
+// escape bytes and either inserts garbage characters or silently drops
+// the sequence, so we intercept them ourselves in a custom rl_getc_function
+// that sits between the terminal and libedit.
+//
+// Strategy:
+//   • Normal characters are returned one-at-a-time as usual.
+//   • When we see \e[200~ we enter "paste mode": we read the entire paste
+//     body up to \e[201~ into g_paste_buf and set g_paste_pos = 0.
+//   • While g_paste_pos < g_paste_buf.size() we return characters from
+//     the buffer.  Newlines in the paste (\n or \r\n) are converted to
+//     the two-character sequence '\\' '\n' so that libedit calls
+//     soft_newline for each one, triggering backslash-continuation and
+//     keeping the existing read_message() logic happy.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string g_paste_buf;
+size_t      g_paste_pos = 0;
+
+// Read one raw byte from `f`, retrying on EINTR.
+static int raw_getc(FILE* f) {
+    int c;
+    do { c = fgetc(f); } while (c == EOF && errno == EINTR);
+    return c;
+}
+
+// Consume characters from `f` until the CSI terminator sequence `seq`
+// has been fully matched or we time out / hit EOF.  Returns true if the
+// sequence was consumed, false on EOF.  We read char-by-char matching
+// seq[matched..]; unmatched characters are appended to `buf`.
+static bool consume_until(FILE* f, const char* seq, std::string& buf) {
+    const size_t seqlen = strlen(seq);
+    size_t matched = 0;
+    while (matched < seqlen) {
+        const int c = raw_getc(f);
+        if (c == EOF) return false;
+        if (static_cast<char>(c) == seq[matched]) {
+            ++matched;
+        } else {
+            // False start — flush partially matched prefix into buf.
+            buf.append(seq, matched);
+            matched = 0;
+            buf.push_back(static_cast<char>(c));
+            // Re-check this character against seq[0].
+            if (static_cast<char>(c) == seq[0]) matched = 1;
+        }
+    }
+    return true;
+}
+
+// Custom rl_getc_function: intercepts \e[200~ and replays the paste
+// body with newlines converted to backslash-continuation sequences.
+extern "C" int bracketed_getc(FILE* f) {
+    // If we have buffered paste characters, drain them first.
+    if (g_paste_pos < g_paste_buf.size())
+        return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
+
+    const int c = raw_getc(f);
+    if (c == EOF) return c;
+
+    // Fast path: not the start of an escape sequence.
+    if (c != '\x1b') return c;
+
+    // Peek at the next byte.
+    const int c2 = raw_getc(f);
+    if (c2 == EOF) return c;  // lone ESC
+
+    if (c2 != '[') {
+        // Not a CSI sequence — return ESC now, stash c2 for next call
+        // by re-injecting into the paste buffer.
+        g_paste_buf.clear();
+        g_paste_buf.push_back(static_cast<char>(c2));
+        g_paste_pos = 0;
+        return c;   // return ESC
+    }
+
+    // We have ESC '[' — check for "200~" (bracketed paste start).
+    // Read up to 4 more bytes to decide.
+    char trailer[5] = {};
+    for (int i = 0; i < 4; ++i) {
+        const int cx = raw_getc(f);
+        if (cx == EOF) break;
+        trailer[i] = static_cast<char>(cx);
+    }
+
+    if (strcmp(trailer, "200~") == 0) {
+        // ── Bracketed paste start ──────────────────────────────────
+        // Slurp everything up to \e[201~ into a temporary buffer,
+        // then convert newlines to backslash-continuation sequences
+        // and store in g_paste_buf.
+        std::string raw;
+        raw.reserve(256);
+        consume_until(f, "\x1b[201~", raw);
+
+        // Normalise \r\n → \n, then convert each \n to '\\''\n' so
+        // soft_newline fires for every pasted newline.
+        g_paste_buf.clear();
+        g_paste_buf.reserve(raw.size() + 16);
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '\r') {
+                if (i + 1 < raw.size() && raw[i + 1] == '\n') ++i; // \r\n → skip \r
+                g_paste_buf.push_back('\\');
+                g_paste_buf.push_back('\n');
+            } else if (raw[i] == '\n') {
+                g_paste_buf.push_back('\\');
+                g_paste_buf.push_back('\n');
+            } else {
+                g_paste_buf.push_back(raw[i]);
+            }
+        }
+        g_paste_pos = 0;
+
+        // Return the first character of the paste (or, if paste was
+        // empty, loop by returning a NUL which libedit ignores).
+        if (g_paste_pos < g_paste_buf.size())
+            return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
+        return 0;
+    }
+
+    // Not a bracketed-paste sequence — reconstruct ESC [ + trailer
+    // into g_paste_buf and return ESC.
+    g_paste_buf.clear();
+    g_paste_buf.push_back('[');
+    for (int i = 0; i < 4 && trailer[i]; ++i)
+        g_paste_buf.push_back(trailer[i]);
+    g_paste_pos = 0;
+    return '\x1b';
+}
+
+} // anon namespace
+
 // Soft-newline: accept the current line with a trailing backslash so
 // that ReadMessage()'s backslash-continuation logic re-prompts for the
 // next line.  Using rl_insert_text("\n") doesn't work because libedit
@@ -192,6 +329,14 @@ void Init(const std::string& history_file) {
 		read_history(g_history_file.c_str());
 	}
 	rl_attempted_completion_function = slash_completion;
+
+	// Enable bracketed paste mode so the terminal wraps pastes in
+	// \e[200~ ... \e[201~.  Our custom rl_getc_function intercepts
+	// those markers and converts embedded newlines to backslash-
+	// continuation sequences that ReadMessage() already understands.
+	rl_getc_function = bracketed_getc;
+	if (isatty(fileno(stdin)))
+		fputs("\x1b[?2004h", stdout);
 
 	// Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
 	// ReadMessage() re-prompts via backslash-continuation.
