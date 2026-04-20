@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-04-22
+
+### Fixed
+- **First prompt double-Enter** — the very first prompt in every interactive
+  session required two Enter presses to submit; all subsequent prompts worked
+  normally. Three cooperating bugs were responsible:
+  1. `bracketed_getc` used a fixed 4-byte speculative read after `\e[` to
+     detect the bracketed-paste opener `\e[200~`. Longer CSI sequences (e.g.
+     cursor-position reports `\e[row;colR`) had their trailing bytes silently
+     dropped, corrupting libedit's key-sequence FSM so it consumed the first
+     Enter as part of a meta-key chord. Fixed by reading one byte at a time
+     and stopping at a CSI final byte (0x40–0x7E per ECMA-48), with all
+     accumulated bytes stashed and replayed verbatim on non-paste sequences.
+  2. The bracketed-paste enable sequence `\e[?2004h` was sent twice — once
+     via `fputs()` (stdio-buffered) and once via `::write()` — potentially
+     eliciting two terminal responses. Removed the early `fputs()` send;
+     kept only the single `::write()` call, now preceded by `fflush(stdout)`.
+  3. Terminal responses to init sequences could arrive in stdin between
+     `tui::InstallStatusBar()` and the first `readline()` call. Added
+     `repl::DrainStaleInput()` which briefly sets stdin non-blocking, discards
+     any queued bytes, then restores blocking mode — called once at the start
+     of each interactive session.
+- **Integer tool params crash** — `nlohmann::json::value<int>()` triggered a
+  SIGSEGV (confirmed via syslog stack trace) when the model sent `start_line`,
+  `end_line`, `max_bytes`, or `timeout_seconds` as a JSON string or null
+  instead of a number. Added explicit `is_number()` guards before all
+  `get<int>()` calls; falls back to the same defaults on type mismatch.
+
 ## [1.5.3] - 2026-04-21
 
 ### Fixed
