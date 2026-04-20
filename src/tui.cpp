@@ -867,6 +867,51 @@ int DisplayWidth(const std::string& s) {
 	return display_width(s);
 }
 
+// Map a file-path extension to a canonical language tag understood
+// by lookup_lang() / HighlightCode(). Returns empty string for
+// unrecognised extensions.
+std::string LangFromPath(const std::string& path) {
+	const auto dot = path.rfind('.');
+	if (dot == std::string::npos) return {};
+	std::string ext = path.substr(dot + 1);
+	for (auto& c : ext)
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+	if (ext == "cpp" || ext == "cxx" || ext == "cc"  ||
+	    ext == "c"   || ext == "h"   || ext == "hpp" ||
+	    ext == "hxx" || ext == "hh")          return "cpp";
+	if (ext == "py")                           return "python";
+	if (ext == "sh"  || ext == "bash" || ext == "zsh") return "bash";
+	if (ext == "rs")                           return "rust";
+	if (ext == "json")                         return "json";
+	if (ext == "js"  || ext == "ts"   ||
+	    ext == "jsx" || ext == "tsx")          return "js";
+	if (ext == "go")                           return "go";
+	if (ext == "rb")                           return "ruby";
+	if (ext == "java")                         return "java";
+	if (ext == "kt"  || ext == "kts")         return "kotlin";
+	if (ext == "swift")                        return "swift";
+	if (ext == "md"  || ext == "markdown")    return "markdown";
+	if (ext == "toml" || ext == "ini" ||
+	    ext == "cfg"  || ext == "conf")        return "toml";
+	if (ext == "xml" || ext == "html" ||
+	    ext == "htm" || ext == "svg")          return "xml";
+	if (ext == "css" || ext == "scss" ||
+	    ext == "sass")                         return "css";
+	if (ext == "yaml" || ext == "yml")         return "yaml";
+	if (ext == "lua")                          return "lua";
+	if (ext == "zig")                          return "zig";
+	return {};
+}
+
+// Public wrapper: apply syntax highlighting to a single source line.
+// Falls back to plain text when color is disabled or the language tag
+// is not in the built-in registry.
+std::string HighlightCode(const std::string& lang, const std::string& line) {
+	if (!g_color_enabled || lang.empty()) return line;
+	return highlight_code(lang, line);
+}
+
 namespace {
 
 // Strip the leading and trailing `|` from a table row, then split

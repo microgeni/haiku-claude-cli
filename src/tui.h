@@ -180,6 +180,20 @@ std::string ErrorLabel();              // bold red "error:"
 // (tui.cpp) so the same logic applies everywhere without duplication.
 int DisplayWidth(const std::string& s);
 
+// Infer a language tag from a file path by looking at its extension.
+// Returns a canonical tag string ("cpp", "python", "bash", "json",
+// "rust", …) or an empty string when the extension is unrecognised.
+// Intended for use with HighlightCode() when the language is not
+// explicitly known (e.g. in the Write/Edit permission preview).
+std::string LangFromPath(const std::string& path);
+
+// Apply syntax highlighting to a single source line for the given
+// language tag. Returns the line with embedded ANSI SGR escapes, or
+// the plain line when color is disabled or the language is unknown.
+// The tag must be a canonical string as returned by LangFromPath()
+// (or a fence tag such as "c++", "sh", "py", etc.).
+std::string HighlightCode(const std::string& lang, const std::string& line);
+
 // Forward declaration so MarkdownRenderer can reference Spinner.
 class Spinner;
 

@@ -22,6 +22,7 @@ extern volatile sig_atomic_t g_interrupted;
 
 #include "mcp.h"
 #include "paths.h"
+#include "tui.h"
 
 namespace tools {
 
@@ -99,16 +100,20 @@ ToolResult run_write(const json& input) {
 }
 
 // Build a bordered, line-numbered preview block matching the style
-// used by Claude Code: a header line, a ╌╌╌ top rule, up to
-// kPreviewLines numbered content rows, an optional truncation note,
-// and a ╌╌╌ bottom rule. Used by both preview_write and preview_edit.
+// used by Claude Code: a header line, a ─── top rule, up to
+// kPreviewLines numbered content rows with optional syntax
+// highlighting, an optional truncation note, and a ─── bottom rule.
+// Used by preview_write and preview_edit.
+//
+// lang: canonical language tag (e.g. "cpp", "python") passed to
+// tui::HighlightCode(). Empty string disables highlighting.
 static std::string make_preview_block(const std::string& header,
                                       const std::string& content,
-                                      int start_line_num = 1) {
+                                      int start_line_num = 1,
+                                      const std::string& lang = {}) {
 	constexpr int kPreviewLines = 10;
 
-	// Build the horizontal rule by repeating the UTF-8 sequence for
-	// U+2500 BOX DRAWINGS LIGHT HORIZONTAL (─). Each glyph is 3 bytes.
+	// Build the horizontal rule as UTF-8 U+2500 ─ repeated.
 	const int rule_len = std::min(72, std::max(40, static_cast<int>(header.size()) + 4));
 	std::string rule;
 	rule.reserve(static_cast<size_t>(rule_len) * 3);
@@ -117,27 +122,32 @@ static std::string make_preview_block(const std::string& header,
 	const size_t nlines = std::count(content.begin(), content.end(), '\n')
 	                    + (content.empty() || content.back() == '\n' ? 0 : 1);
 
+	// Dim the rules and line numbers; leave code lines at full
+	// brightness so syntax colors stand out.
+	const std::string dim_rule = tui::Dim(rule);
+
 	std::ostringstream body;
-	body << " " << header << "\n";
-	body << rule << "\n";
+	body << " " << tui::Bold(header) << "\n";
+	body << dim_rule << "\n";
 
 	size_t lines_shown = 0;
 	int    ln           = start_line_num;
 	std::string line;
 	std::istringstream iss(content);
 	while (lines_shown < kPreviewLines && std::getline(iss, line)) {
-		// Right-justify the line number in a 3-char field.
+		// Right-justify the line number in a 3-char field, dimmed.
 		char num[8];
 		std::snprintf(num, sizeof(num), "%3d", ln);
-		body << num << " " << line << "\n";
+		const std::string highlighted = tui::HighlightCode(lang, line);
+		body << tui::Dim(std::string(num)) << " " << highlighted << "\n";
 		++lines_shown;
 		++ln;
 	}
 	const size_t remaining = nlines > lines_shown ? nlines - lines_shown : 0;
 	if (remaining > 0) {
-		body << "    ... (" << remaining << " more lines)\n";
+		body << tui::Dim("    ... (" + std::to_string(remaining) + " more lines)") << "\n";
 	}
-	body << rule;
+	body << dim_rule;
 	return body.str();
 }
 
@@ -164,7 +174,7 @@ std::string preview_write(const json& input) {
 		action += "  \xE2\x9A\xA0  outside cwd";
 	}
 
-	return make_preview_block(action, content);
+	return make_preview_block(action, content, 1, tui::LangFromPath(path));
 }
 
 std::string read_file_all(const std::string& path) {
@@ -262,41 +272,59 @@ std::string preview_edit(const json& input) {
 	if (count > 1)        header += "  (" + std::to_string(count) + " matches, replace_all)";
 	if (!path_inside_cwd(path)) header += "  \xE2\x9A\xA0  outside cwd";
 
-	// Build a unified-style diff block: removed lines prefixed with
-	// "  - " and added lines prefixed with "  + ", capped at 8 each.
-	constexpr size_t kMax = 8;
 	// Build the horizontal rule as UTF-8 U+2500 ─ repeated.
 	const int rule_len = std::min(72, std::max(40, static_cast<int>(header.size()) + 4));
 	std::string rule;
 	rule.reserve(static_cast<size_t>(rule_len) * 3);
 	for (int i = 0; i < rule_len; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
 
+	const std::string lang = tui::LangFromPath(path);
+
 	std::ostringstream body;
-	body << " " << header << "\n";
-	body << rule << "\n";
+	body << " " << tui::Bold(header) << "\n";
+	body << tui::Dim(rule) << "\n";
+
+	// Unified-style diff: removed lines in red with "- " marker,
+	// added lines in green with "+ " marker. Both get syntax
+	// highlighting underneath the diff color so keywords still pop.
+	// Capped at kMax lines per hunk to keep the dialog compact.
+	constexpr size_t kMax = 8;
 
 	auto emit_diff_lines = [&](const std::string& text, const char marker) {
+		const bool is_add = (marker == '+');
 		size_t shown = 0;
-		int    ln    = (marker == '-') ? line_num : line_num;
+		int    ln    = line_num;
 		std::istringstream iss(text);
 		std::string line;
 		while (shown < kMax && std::getline(iss, line)) {
 			char num[8];
 			std::snprintf(num, sizeof(num), "%3d", ln);
-			body << num << " " << marker << " " << line << "\n";
+			// Syntax-highlight the line first, then tint the whole
+			// row red/green via the diff marker color.
+			const std::string hl = tui::HighlightCode(lang, line);
+			std::string row;
+			if (is_add) {
+				row = tui::Dim(std::string(num)) + " "
+				    + tui::Green(std::string(1, marker)) + " " + hl;
+			} else {
+				row = tui::Dim(std::string(num)) + " "
+				    + tui::Red(std::string(1, marker)) + " " + tui::Dim(hl);
+			}
+			body << row << "\n";
 			++shown;
 			++ln;
 		}
 		const size_t total = std::count(text.begin(), text.end(), '\n')
 		                   + (text.empty() || text.back() == '\n' ? 0 : 1);
 		if (shown < total) {
-			body << "    " << marker << " ... (" << (total - shown) << " more lines)\n";
+			body << tui::Dim("    " + std::string(1, marker)
+			               + " ... (" + std::to_string(total - shown) + " more lines)") << "\n";
 		}
 	};
 
 	emit_diff_lines(old_s, '-');
 	emit_diff_lines(new_s, '+');
-	body << rule;
+	body << tui::Dim(rule);
 	return body.str();
 }
 
