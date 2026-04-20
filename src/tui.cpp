@@ -313,10 +313,10 @@ int SelectOption(const std::vector<std::string>& options,
 
 	int sel = 0; // 0-based selected index
 
-	// Total rows owned by this widget: 1 heading row (if any) + n option rows.
-	// We track this so the teardown erase loop knows how far up to reach.
+	// Total rows owned by this widget: 1 heading row (if any) + n option rows
+	// + 1 footer row ("Esc to cancel · Tab to amend").
 	const int heading_rows = heading.empty() ? 0 : 1;
-
+	constexpr int kFooterRows = 1;
 
 	// Render the menu. Each option takes one line. We'll use ANSI
 	// cursor-up to redraw in-place on each keystroke.
@@ -342,25 +342,22 @@ int SelectOption(const std::vector<std::string>& options,
 			std::cout << "\x1b[2K"; // erase line
 			const std::string num = std::to_string(i + 1) + ". ";
 			if (i == sel) {
-				// Highlighted: bold + cyan number, bold label, then reset.
-				std::cout << "  " << Bold(Cyan(num)) << Bold(options[i]);
+				// Active item: ❯ cursor glyph + bold+cyan number + bold label.
+				std::cout << " \xE2\x9D\xAF " << Bold(Cyan(num)) << Bold(options[i]);
 			} else {
-				std::cout << "  " << Dim(num) << Dim(options[i]);
+				// Inactive: 3 spaces to align with the cursor glyph width.
+				std::cout << "   " << Dim(num) << Dim(options[i]);
 			}
-			if (i < n - 1) {
-				// Use \x1b[1B\r (cursor-down + CR) instead of \n.
-				// The cursor starts at the bottom of the DECSTBM scroll
-				// region; emitting \n there causes the terminal to scroll
-				// the region up, shifting the menu's absolute row on every
-				// redraw and breaking highlight updates on arrow keypresses.
-				std::cout << "\x1b[1B\r";
-			}
+			std::cout << "\x1b[1B\r";
 		}
-		// Move cursor back to the heading row (or first option row if no
-		// heading) so the next render overwrites from the same position.
-		// Cursor is currently at the last option row (H + heading_rows + n - 1).
-		// We want to return to H (heading row), so move up (heading_rows + n - 1).
-		const int rows_up = heading_rows + n - 1;
+		// Footer hint row: "Esc to cancel · Tab to amend"
+		std::cout << "\x1b[2K"
+		          << " " << Dim("Esc to cancel \xC2\xB7 Tab to amend");
+		// Move cursor back to the heading row so the next render overwrites
+		// from the same position.
+		// Cursor is currently at the footer row.
+		// Distance up: heading_rows + n + kFooterRows - 1 rows.
+		const int rows_up = heading_rows + n + kFooterRows - 1;
 		if (rows_up > 0) std::cout << "\x1b[" << rows_up << "A";
 		std::cout << "\r" << std::flush;
 	};
@@ -515,23 +512,9 @@ int SelectOption(const std::vector<std::string>& options,
 		}
 	}
 
-	// Collapse the entire owned block (pre_lines + heading + all option rows)
-	// down to a single compact summary line.
-	//
-	// After any render() call the cursor is parked at the heading row H
-	// (render() consistently moves up to H after drawing all options).
-	//
-	// The menu block spans physical rows that may be OUTSIDE the DECSTBM
-	// scroll region (options are drawn below scroll_bottom using \x1b[1B\r
-	// which moves physically without scrolling).  DL (\x1b[nM) only
-	// operates within the scroll region, so it cannot clean up option rows.
-	// Instead we use \x1b[1B\r to visit each row and \x1b[2K to erase it,
-	// then cursor-up to position for the summary.
-	//
-	// Total block rows: pre_lines + heading_rows + n.
-	// We erase all of them, then return to the top to write the summary.
-
-	const int block_rows = pre_lines + heading_rows + n;
+	// Collapse the entire owned block (pre_lines + heading + all option rows
+	// + footer row) down to a single compact summary line.
+	const int block_rows = pre_lines + heading_rows + n + kFooterRows;
 
 	// Step 1: move up pre_lines rows to reach the first row of the block.
 	if (pre_lines > 0)

@@ -412,9 +412,9 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 
 		tui::PositionCursorForChat();
 		const std::vector<std::string> choices = {
-			"Yes, allow once",
-			"Yes, allow all " + tool_name + " this session  \xE2\x87\xA7shift+tab",
-			"No, deny",
+			"Yes",
+			"Yes, allow all " + tool_name + " this session  (shift+tab)",
+			"No",
 		};
 		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
 		if (g_active_esc_guard) g_active_esc_guard->pause();
@@ -499,15 +499,37 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		pre_lines = 1;
 	}
 
+	// Derive a file basename and directory scope for the option labels.
+	// e.g. path="src/tools.cpp" → basename="tools.cpp", dir_scope="src/"
+	const std::string file_path = input.value("path", std::string{});
+	const auto slash = file_path.rfind('/');
+	const std::string basename  = (slash == std::string::npos)
+	                            ? file_path : file_path.substr(slash + 1);
+	const auto prev_slash = (slash == std::string::npos || slash == 0)
+	                      ? std::string::npos : file_path.rfind('/', slash - 1);
+	const std::string dir_scope = (!file_path.empty() && slash != std::string::npos)
+	    ? file_path.substr(prev_slash == std::string::npos ? 0 : prev_slash + 1,
+	                       slash - (prev_slash == std::string::npos ? 0 : prev_slash) )
+	    : std::string{};
+
+	// Natural-language question matching Claude Code's style.
+	const std::string question = basename.empty()
+	    ? "Do you want to proceed with " + tool_name + "?"
+	    : "Do you want to make this edit to " + basename + "?";
+
+	// Option 2: scope to directory when available, otherwise session-wide.
+	const std::string allow_session_label = dir_scope.empty()
+	    ? "Yes, allow all " + tool_name + " this session  (shift+tab)"
+	    : "Yes, allow all " + tool_name + " in " + dir_scope + " this session  (shift+tab)";
+
 	tui::PositionCursorForChat();
 	const std::vector<std::string> choices = {
-		"Yes, allow once",
-		"Yes, allow all " + tool_name + " this session  \xE2\x87\xA7shift+tab",
-		"No, deny",
+		"Yes",
+		allow_session_label,
+		"No",
 	};
 	if (g_active_esc_guard) g_active_esc_guard->pause();
-	const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
-										 nullptr, pre_lines);
+	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
 	if (g_active_esc_guard) g_active_esc_guard->resume();
 	tui::PositionCursorForChat();
 

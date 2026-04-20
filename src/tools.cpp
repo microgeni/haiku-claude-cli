@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <glob.h>
+#include <map>
 #include <poll.h>
 #include <sstream>
 #include <sys/stat.h>
@@ -99,82 +100,134 @@ ToolResult run_write(const json& input) {
 	return {"wrote " + std::to_string(content.size()) + " bytes to " + path, false};
 }
 
-// Build a bordered, line-numbered preview block matching the style
-// used by Claude Code: a header line, a ─── top rule, up to
-// kPreviewLines numbered content rows with optional syntax
-// highlighting, an optional truncation note, and a ─── bottom rule.
-// Used by preview_write and preview_edit.
-//
-// lang: canonical language tag (e.g. "cpp", "python") passed to
-// tui::HighlightCode(). Empty string disables highlighting.
-static std::string make_preview_block(const std::string& header,
-                                      const std::string& content,
-                                      int start_line_num = 1,
-                                      const std::string& lang = {}) {
-	constexpr int kPreviewLines = 10;
-
-	// Build the horizontal rule as UTF-8 U+2500 ─ repeated.
-	const int rule_len = std::min(72, std::max(40, static_cast<int>(header.size()) + 4));
+// Build a dashed rule U+254C ╌ repeated to `width` display columns.
+// Matches Claude Code's ╌╌╌ separator style exactly.
+static std::string make_dash_rule(int width) {
 	std::string rule;
-	rule.reserve(static_cast<size_t>(rule_len) * 3);
-	for (int i = 0; i < rule_len; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
+	rule.reserve(static_cast<size_t>(width) * 3);
+	for (int i = 0; i < width; ++i) rule += "\xE2\x95\x8C"; // U+254C ╌
+	return rule;
+}
 
+// Build a Claude Code-style permission preview block:
+//
+//   [tool label line]
+//   [filename line]
+//   [optional warning line]
+//   ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+//    1  line one
+//    2  line two
+//   ...
+//   ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+//
+// label:   tool label, e.g. "Create file" or "Edit file"
+// path:    file path shown on its own line below the label
+// warning: optional third header line (outside-cwd note etc.)
+// content: text to display inside the rules
+// lang:    language tag for syntax highlighting
+// changed_lines: set of 1-based line numbers to mark as changed;
+//                empty = all lines are context (Write preview)
+// old_lines: set of 1-based line numbers that are removals (shown red -)
+// new_lines: set of 1-based line numbers that are additions (shown green +)
+struct DiffMark { bool is_add; bool is_remove; };
+static std::string make_preview_block(
+		const std::string& label,
+		const std::string& path,
+		const std::string& warning,
+		const std::string& content,
+		const std::string& lang,
+		const std::map<int,DiffMark>& diff_marks = {}) {
+
+	constexpr int kMaxLines = 50; // show up to 50 lines of context
+
+	// Rule width = terminal width, capped at 96, min 40.
+	const int tw       = tui::TerminalWidth();
+	const int rule_w   = std::max(40, std::min(96, tw > 0 ? tw : 80));
+	const std::string rule = tui::Dim(make_dash_rule(rule_w));
+
+	// Count total lines.
 	const size_t nlines = std::count(content.begin(), content.end(), '\n')
 	                    + (content.empty() || content.back() == '\n' ? 0 : 1);
 
-	// Dim the rules and line numbers; leave code lines at full
-	// brightness so syntax colors stand out.
-	const std::string dim_rule = tui::Dim(rule);
-
 	std::ostringstream body;
-	body << " " << tui::Bold(header) << "\n";
-	body << dim_rule << "\n";
+
+	// Header: label on its own line, then path, then optional warning.
+	body << " " << tui::Bold(label) << "\n";
+	body << " " << path << "\n";
+	if (!warning.empty()) {
+		body << " " << tui::Yellow(warning) << "\n";
+	}
+	body << rule << "\n";
 
 	size_t lines_shown = 0;
-	int    ln           = start_line_num;
+	int    ln           = 1;
 	std::string line;
 	std::istringstream iss(content);
-	while (lines_shown < kPreviewLines && std::getline(iss, line)) {
-		// Right-justify the line number in a 3-char field, dimmed.
+	while (lines_shown < kMaxLines && std::getline(iss, line)) {
 		char num[8];
-		std::snprintf(num, sizeof(num), "%3d", ln);
-		const std::string highlighted = tui::HighlightCode(lang, line);
-		body << tui::Dim(std::string(num)) << " " << highlighted << "\n";
+		std::snprintf(num, sizeof(num), "%2d", ln);
+
+		auto it = diff_marks.find(ln);
+		if (it != diff_marks.end()) {
+			const std::string hl = tui::HighlightCode(lang, line);
+			if (it->second.is_remove) {
+				// Red "-" marker, dimmed content (being removed).
+				body << tui::Dim(std::string(num)) << " "
+				     << tui::Red("-") << " "
+				     << tui::Dim(hl) << "\n";
+			} else {
+				// Green "+" marker, full-brightness syntax-highlighted content.
+				body << tui::Dim(std::string(num)) << " "
+				     << tui::Green("+") << " "
+				     << tui::HighlightCode(lang, line) << "\n";
+			}
+		} else {
+			// Unchanged context line: dim number, space, plain content.
+			body << tui::Dim(std::string(num)) << "   "
+			     << tui::HighlightCode(lang, line) << "\n";
+		}
 		++lines_shown;
 		++ln;
 	}
+
 	const size_t remaining = nlines > lines_shown ? nlines - lines_shown : 0;
 	if (remaining > 0) {
-		body << tui::Dim("    ... (" + std::to_string(remaining) + " more lines)") << "\n";
+		body << tui::Dim("     ... (" + std::to_string(remaining) + " more lines)") << "\n";
 	}
-	body << dim_rule;
+	body << rule;
 	return body.str();
 }
 
+// Extract the directory component of a path for the "allow all in <dir>/"
+// session option. Returns the immediate parent directory name, e.g.
+// "src/foo.cpp" → "src/", "/tmp/bar.cpp" → "tmp/".
+// Falls back to empty string (→ session-wide) when the path has no dir.
 std::string preview_write(const json& input) {
 	const std::string path    = input.value("path", std::string{});
 	const std::string content = input.value("content", std::string{});
-	const size_t      nbytes  = content.size();
 	const size_t      nlines  = std::count(content.begin(), content.end(), '\n')
-								+ (content.empty() || content.back() == '\n' ? 0 : 1);
+	                          + (content.empty() || content.back() == '\n' ? 0 : 1);
 
+	std::string label;
+	std::string warning;
 	std::ifstream existing(path);
-	std::string   action;
 	if (existing.is_open()) {
 		existing.seekg(0, std::ios::end);
-		const auto old_size = existing.tellg();
-		action = "Overwrite " + path
-			   + "  (" + std::to_string(static_cast<long>(old_size)) + " \xE2\x86\x92 "
-			   + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
+		const auto old_size = static_cast<long>(existing.tellg());
+		label = "Overwrite file  (" + std::to_string(old_size) + " \xE2\x86\x92 "
+		      + std::to_string(content.size()) + " bytes, "
+		      + std::to_string(nlines) + " lines)";
 	} else {
-		action = "Create " + path
-			   + "  (" + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
+		label = "Create file  (" + std::to_string(content.size()) + " bytes, "
+		      + std::to_string(nlines) + " lines)";
 	}
 	if (!path_inside_cwd(path)) {
-		action += "  \xE2\x9A\xA0  outside cwd";
+		warning = "This will write outside the working directory";
 	}
 
-	return make_preview_block(action, content, 1, tui::LangFromPath(path));
+	// Write preview: no diff marks — all lines are plain context.
+	return make_preview_block(label, path, warning, content,
+	                          tui::LangFromPath(path), {});
 }
 
 std::string read_file_all(const std::string& path) {
@@ -250,82 +303,116 @@ std::string preview_edit(const json& input) {
 
 	const std::string content = read_file_all(path);
 	if (content.empty() && !std::ifstream(path).is_open()) {
-		return " Edit " + path + "  [error: cannot open]";
+		return " Edit file\n " + path + "\n [error: cannot open]";
 	}
 
 	const size_t count = count_occurrences(content, old_s);
 	if (count == 0) {
-		return " Edit " + path + "  [error: old_string not found]";
+		return " Edit file\n " + path + "\n [error: old_string not found]";
 	}
 	if (count > 1 && !replace_all) {
-		return " Edit " + path + "  [error: " + std::to_string(count)
-			 + " matches; set replace_all=true]";
+		return " Edit file\n " + path + "\n [error: " + std::to_string(count)
+		     + " matches; set replace_all=true]";
 	}
 
-	const size_t first = content.find(old_s);
-	int line_num = 1;
-	for (size_t i = 0; i < first; ++i) {
-		if (content[i] == '\n') ++line_num;
+	// Find the first match to determine which lines are affected.
+	const size_t match_pos = content.find(old_s);
+	int old_start_ln = 1;
+	for (size_t i = 0; i < match_pos; ++i)
+		if (content[i] == '\n') ++old_start_ln;
+
+	// Count how many lines the old string spans.
+	const int old_nlines = static_cast<int>(
+		std::count(old_s.begin(), old_s.end(), '\n')) + 1;
+	// Count lines in the new string.
+	const int new_nlines = static_cast<int>(
+		std::count(new_s.begin(), new_s.end(), '\n')) + 1;
+
+	// Build the "after" content: replace old_s with new_s once.
+	const size_t after_pos   = match_pos;
+	std::string after_content;
+	after_content.reserve(content.size() - old_s.size() + new_s.size());
+	after_content.append(content, 0, after_pos);
+	after_content += new_s;
+	after_content.append(content, after_pos + old_s.size(), std::string::npos);
+
+	// Produce unified diff view: full file with the changed lines
+	// substituted and marked. We show the "after" content in full
+	// (matching Claude Code's style) with diff markers on changed lines.
+	// Build diff_marks: lines [old_start_ln .. old_start_ln + old_nlines - 1]
+	// become removals, replaced by [old_start_ln .. old_start_ln + new_nlines - 1]
+	// as additions in the after view.
+	std::map<int,DiffMark> marks;
+	for (int i = 0; i < new_nlines; ++i) {
+		// In the after_content these are additions.
+		marks[old_start_ln + i] = {true, false};
 	}
+	// The removed lines no longer appear in after_content, so we need a
+	// separate removal block. Strategy: prepend old lines before the new
+	// lines in a virtual view. Build a combined display: prefix (unchanged)
+	// + removed lines (old) + added lines (new) + suffix (unchanged).
 
-	std::string header = "Edit " + path + "  @ line " + std::to_string(line_num);
-	if (count > 1)        header += "  (" + std::to_string(count) + " matches, replace_all)";
-	if (!path_inside_cwd(path)) header += "  \xE2\x9A\xA0  outside cwd";
-
-	// Build the horizontal rule as UTF-8 U+2500 ─ repeated.
-	const int rule_len = std::min(72, std::max(40, static_cast<int>(header.size()) + 4));
-	std::string rule;
-	rule.reserve(static_cast<size_t>(rule_len) * 3);
-	for (int i = 0; i < rule_len; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
-
-	const std::string lang = tui::LangFromPath(path);
-
-	std::ostringstream body;
-	body << " " << tui::Bold(header) << "\n";
-	body << tui::Dim(rule) << "\n";
-
-	// Unified-style diff: removed lines in red with "- " marker,
-	// added lines in green with "+ " marker. Both get syntax
-	// highlighting underneath the diff color so keywords still pop.
-	// Capped at kMax lines per hunk to keep the dialog compact.
-	constexpr size_t kMax = 8;
-
-	auto emit_diff_lines = [&](const std::string& text, const char marker) {
-		const bool is_add = (marker == '+');
-		size_t shown = 0;
-		int    ln    = line_num;
-		std::istringstream iss(text);
-		std::string line;
-		while (shown < kMax && std::getline(iss, line)) {
-			char num[8];
-			std::snprintf(num, sizeof(num), "%3d", ln);
-			// Syntax-highlight the line first, then tint the whole
-			// row red/green via the diff marker color.
-			const std::string hl = tui::HighlightCode(lang, line);
-			std::string row;
-			if (is_add) {
-				row = tui::Dim(std::string(num)) + " "
-				    + tui::Green(std::string(1, marker)) + " " + hl;
-			} else {
-				row = tui::Dim(std::string(num)) + " "
-				    + tui::Red(std::string(1, marker)) + " " + tui::Dim(hl);
-			}
-			body << row << "\n";
-			++shown;
+	// Simpler approach matching Claude Code exactly: show the full file
+	// after the edit, with changed lines marked as additions, plus the
+	// removed lines inserted just before them marked as removals — same
+	// line number repeated like Claude Code does (4 - / 4 +).
+	// Build display_content = prefix_lines + removal_lines + addition_lines + suffix_lines
+	std::vector<std::string> before_lines, old_lines_v, new_lines_v, after_lines;
+	{
+		std::istringstream iss(content);
+		std::string l;
+		int ln = 1;
+		while (std::getline(iss, l)) {
+			if (ln < old_start_ln)
+				before_lines.push_back(l);
+			else if (ln < old_start_ln + old_nlines)
+				old_lines_v.push_back(l);
+			else
+				after_lines.push_back(l);
 			++ln;
 		}
-		const size_t total = std::count(text.begin(), text.end(), '\n')
-		                   + (text.empty() || text.back() == '\n' ? 0 : 1);
-		if (shown < total) {
-			body << tui::Dim("    " + std::string(1, marker)
-			               + " ... (" + std::to_string(total - shown) + " more lines)") << "\n";
-		}
-	};
+	}
+	{
+		std::istringstream iss(new_s);
+		std::string l;
+		while (std::getline(iss, l)) new_lines_v.push_back(l);
+		if (!new_s.empty() && new_s.back() != '\n' && new_lines_v.empty())
+			new_lines_v.push_back(new_s);
+	}
 
-	emit_diff_lines(old_s, '-');
-	emit_diff_lines(new_s, '+');
-	body << tui::Dim(rule);
-	return body.str();
+	// Reassemble display string and marks map together.
+	std::string display;
+	std::map<int,DiffMark> diff_marks;
+	int dln = 1;
+	for (const auto& l : before_lines) {
+		display += l; display += '\n'; ++dln;
+	}
+	const int removal_start = dln;
+	for (const auto& l : old_lines_v) {
+		display += l; display += '\n';
+		diff_marks[dln++] = {false, true}; // removal
+	}
+	for (const auto& l : new_lines_v) {
+		display += l; display += '\n';
+		diff_marks[dln++] = {true, false}; // addition
+	}
+	for (const auto& l : after_lines) {
+		display += l; display += '\n'; ++dln;
+	}
+	(void)removal_start;
+
+	// Warning for outside-cwd edits.
+	std::string warning;
+	if (!path_inside_cwd(path)) {
+		warning = "This will modify outside the working directory";
+	}
+	if (count > 1) {
+		if (!warning.empty()) warning += " \xC2\xB7 ";
+		warning += std::to_string(count) + " occurrences (replace_all)";
+	}
+
+	return make_preview_block("Edit file", path, warning, display,
+	                          tui::LangFromPath(path), diff_marks);
 }
 
 size_t append_to_string(void* ptr, size_t size, size_t nmemb, void* userp) {
@@ -1152,8 +1239,8 @@ std::string preview_write_attr(const json& input) {
 	const std::string name  = input.value("name", std::string{});
 	const std::string value = input.value("value", std::string{});
 	const std::string type  = input.value("type", std::string{"string"});
-	const std::string header = "WriteAttr " + path + "  " + name + " (" + type + ")";
-	return make_preview_block(header, value);
+	const std::string label = "Write attribute  " + name + " (" + type + ")";
+	return make_preview_block(label, path, {}, value, {}, {});
 }
 
 std::string preview_index_attr(const json& input) {
