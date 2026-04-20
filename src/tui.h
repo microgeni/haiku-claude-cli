@@ -194,6 +194,19 @@ std::string LangFromPath(const std::string& path);
 // (or a fence tag such as "c++", "sh", "py", etc.).
 std::string HighlightCode(const std::string& lang, const std::string& line);
 
+// DiffRemoved / DiffAdded: render a full diff row with the background
+// colour extending to the end of the terminal line, matching Claude
+// Code's style exactly.
+//
+//   DiffRemoved — dark-red background  rgb(61,1,0),  red foreground  rgb(220,90,90)
+//   DiffAdded   — dark-green background rgb(2,40,0), green foreground rgb(80,200,80)
+//
+// The \x1b[K (erase-to-EOL) fills the background to the right margin
+// so the tint spans the full width regardless of text length.
+// Resets fg+bg with \x1b[39m\x1b[49m at the end.
+std::string DiffRemoved(const std::string& s);
+std::string DiffAdded(const std::string& s);
+
 // Forward declaration so MarkdownRenderer can reference Spinner.
 class Spinner;
 

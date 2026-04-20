@@ -171,15 +171,11 @@ static std::string make_preview_block(
 		if (it != diff_marks.end()) {
 			const std::string hl = tui::HighlightCode(lang, line);
 			if (it->second.is_remove) {
-				// Red "-" marker, dimmed content (being removed).
-				body << tui::Dim(std::string(num)) << " "
-				     << tui::Red("-") << " "
-				     << tui::Dim(hl) << "\n";
+				// Full row gets dark-red background (number + marker + content).
+				body << tui::DiffRemoved(std::string(num) + " - " + line) << "\n";
 			} else {
-				// Green "+" marker, full-brightness syntax-highlighted content.
-				body << tui::Dim(std::string(num)) << " "
-				     << tui::Green("+") << " "
-				     << tui::HighlightCode(lang, line) << "\n";
+				// Full row gets dark-green background (number + marker + content).
+				body << tui::DiffAdded(std::string(num) + " + " + hl) << "\n";
 			}
 		} else {
 			// Unchanged context line: dim number, space, plain content.
