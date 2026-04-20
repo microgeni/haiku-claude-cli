@@ -317,65 +317,42 @@ int SelectOption(const std::vector<std::string>& options,
 	// + 1 footer row ("Esc to cancel · Tab to amend").
 	const int heading_rows = heading.empty() ? 0 : 1;
 	constexpr int kFooterRows = 1;
+	const int menu_rows = heading_rows + n + kFooterRows;
 
-	// Two-phase rendering:
-	//
-	// first_render=true  — the widget rows don't exist yet; use \n to
-	//   emit each line naturally (scrolling the DECSTBM region if needed).
-	//   After the last line the cursor is on the footer row.  Move it back
-	//   up to the heading row so subsequent renders overwrite in-place.
-	//
-	// first_render=false — rows are already on screen; use \x1b[1B\r
-	//   (cursor-down + CR) to step between them without scrolling.
+	// Reserve space for the menu rows by emitting blank lines, then
+	// cursor-up back to the start. This ensures the menu always fits
+	// within the scroll region without displacing the preview above it.
+	for (int i = 0; i < menu_rows; ++i) std::cout << "\n";
+	std::cout << "\x1b[" << menu_rows << "A\r" << std::flush;
+
+	// All renders use \x1b[1B\r to step between rows (no scrolling).
+	// The space has already been reserved above.
 	bool first_render = true;
 	auto render = [&]() {
 		std::cout << "\r";
-		if (first_render) {
-			// ── Initial paint: emit each row with \n so the terminal
-			//    scrolls the region as needed. ──────────────────────────
-			if (!heading.empty()) {
-				std::cout << "\x1b[2K" << Bold(heading) << "\n";
+		if (!heading.empty()) {
+			if (first_render) {
+				std::cout << "\x1b[2K" << Bold(heading);
+				first_render = false;
 			}
-			for (int i = 0; i < n; ++i) {
-				std::cout << "\x1b[2K";
-				const std::string num = std::to_string(i + 1) + ". ";
-				if (i == sel)
-					std::cout << " \xE2\x9D\xAF " << Bold(Cyan(num)) << Bold(options[i]);
-				else
-					std::cout << "   " << Dim(num) << Dim(options[i]);
-				std::cout << "\n";
-			}
-			// Footer on its own line.
-			std::cout << "\x1b[2K"
-			          << " " << Dim("Esc to cancel \xC2\xB7 Tab to amend")
-			          << std::flush;
-			// Move cursor back up to the heading row so redraw overwrites
-			// from the same anchor.  Total rows printed below heading:
-			// n option rows + 1 footer row.
-			const int up = heading_rows + n + kFooterRows - 1;
-			if (up > 0) std::cout << "\x1b[" << up << "A";
-			std::cout << "\r" << std::flush;
-			first_render = false;
-		} else {
-			// ── Redraw in-place: step with \x1b[1B\r, no scrolling ────
-			if (!heading.empty()) std::cout << "\x1b[1B\r"; // skip heading
-			for (int i = 0; i < n; ++i) {
-				std::cout << "\x1b[2K";
-				const std::string num = std::to_string(i + 1) + ". ";
-				if (i == sel)
-					std::cout << " \xE2\x9D\xAF " << Bold(Cyan(num)) << Bold(options[i]);
-				else
-					std::cout << "   " << Dim(num) << Dim(options[i]);
-				std::cout << "\x1b[1B\r";
-			}
-			// Footer row (already exists; just redraw).
-			std::cout << "\x1b[2K"
-			          << " " << Dim("Esc to cancel \xC2\xB7 Tab to amend");
-			// Return cursor to heading row.
-			const int up = heading_rows + n + kFooterRows - 1;
-			if (up > 0) std::cout << "\x1b[" << up << "A";
-			std::cout << "\r" << std::flush;
+			std::cout << "\x1b[1B\r"; // advance past heading row
 		}
+		for (int i = 0; i < n; ++i) {
+			std::cout << "\x1b[2K";
+			const std::string num = std::to_string(i + 1) + ". ";
+			if (i == sel)
+				std::cout << " \xE2\x9D\xAF " << Bold(Cyan(num)) << Bold(options[i]);
+			else
+				std::cout << "   " << Dim(num) << Dim(options[i]);
+			std::cout << "\x1b[1B\r";
+		}
+		// Footer hint row.
+		std::cout << "\x1b[2K"
+		          << " " << Dim("Esc to cancel \xC2\xB7 Tab to amend");
+		// Return cursor to heading row.
+		const int rows_up = heading_rows + n + kFooterRows - 1;
+		if (rows_up > 0) std::cout << "\x1b[" << rows_up << "A";
+		std::cout << "\r" << std::flush;
 	};
 
 	// If the cancel flag is already set before we even render (e.g. a
