@@ -889,23 +889,34 @@ std::string HighlightCode(const std::string& lang, const std::string& line) {
 }
 
 // Render a diff row with full-width background colour, matching
-// Claude Code's style: dark-red bg + muted-red fg for removals,
-// dark-green bg + muted-green fg for additions. \x1b[K (erase to
-// end of line) fills the background across the entire terminal width.
-std::string DiffRemoved(const std::string& s) {
-	if (!g_color_enabled) return s;
-	// fg: rgb(220,90,90)  bg: rgb(61,1,0)
-	return "\x1b[38;2;220;90;90m\x1b[48;2;61;1;0m"
-	     + s
-	     + "\x1b[K\x1b[39m\x1b[49m";
+// Claude Code's style exactly:
+//
+//   DiffRemoved: dark-red bg rgb(61,1,0)
+//     - marker portion: muted-red fg rgb(220,90,90)
+//     - content portion: near-white fg rgb(248,248,242)  ← vivid/readable
+//
+//   DiffAdded: dark-green bg rgb(2,40,0)
+//     - entire row: muted-green fg rgb(80,200,80)
+//
+// marker: the " N - " or " N + " prefix (line number + diff char)
+// content: the source code text after the marker
+// \x1b[K fills the background to the terminal right edge.
+std::string DiffRemoved(const std::string& marker, const std::string& content) {
+	if (!g_color_enabled) return marker + content;
+	// Set dark-red bg first, then muted-red fg for the marker,
+	// then near-white fg for the content, then fill+reset.
+	return "\x1b[48;2;61;1;0m"
+	       "\x1b[38;2;220;90;90m" + marker +
+	       "\x1b[38;2;248;248;242m" + content +
+	       "\x1b[K\x1b[39m\x1b[49m";
 }
 
-std::string DiffAdded(const std::string& s) {
-	if (!g_color_enabled) return s;
-	// fg: rgb(80,200,80)  bg: rgb(2,40,0)
-	return "\x1b[38;2;80;200;80m\x1b[48;2;2;40;0m"
-	     + s
-	     + "\x1b[K\x1b[39m\x1b[49m";
+std::string DiffAdded(const std::string& marker, const std::string& content) {
+	if (!g_color_enabled) return marker + content;
+	// Dark-green bg, muted-green fg for the entire row.
+	return "\x1b[48;2;2;40;0m"
+	       "\x1b[38;2;80;200;80m" + marker + content +
+	       "\x1b[K\x1b[39m\x1b[49m";
 }
 
 namespace {

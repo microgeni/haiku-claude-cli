@@ -198,14 +198,17 @@ std::string HighlightCode(const std::string& lang, const std::string& line);
 // colour extending to the end of the terminal line, matching Claude
 // Code's style exactly.
 //
-//   DiffRemoved — dark-red background  rgb(61,1,0),  red foreground  rgb(220,90,90)
-//   DiffAdded   — dark-green background rgb(2,40,0), green foreground rgb(80,200,80)
+//   DiffRemoved — dark-red bg rgb(61,1,0)
+//     marker (line number + "-"): muted-red fg rgb(220,90,90)
+//     content (source text):      near-white fg rgb(248,248,242)
 //
-// The \x1b[K (erase-to-EOL) fills the background to the right margin
-// so the tint spans the full width regardless of text length.
+//   DiffAdded   — dark-green bg rgb(2,40,0), green fg rgb(80,200,80)
+//     entire row uses the same green fg.
+//
+// The \x1b[K (erase-to-EOL) fills the background to the right margin.
 // Resets fg+bg with \x1b[39m\x1b[49m at the end.
-std::string DiffRemoved(const std::string& s);
-std::string DiffAdded(const std::string& s);
+std::string DiffRemoved(const std::string& marker, const std::string& content);
+std::string DiffAdded(const std::string& marker, const std::string& content);
 
 // Forward declaration so MarkdownRenderer can reference Spinner.
 class Spinner;

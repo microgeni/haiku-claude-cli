@@ -169,13 +169,17 @@ static std::string make_preview_block(
 
 		auto it = diff_marks.find(ln);
 		if (it != diff_marks.end()) {
-			const std::string hl = tui::HighlightCode(lang, line);
 			if (it->second.is_remove) {
-				// Full row gets dark-red background (number + marker + content).
-				body << tui::DiffRemoved(std::string(num) + " - " + line) << "\n";
+				// Marker: line number + " - ", content: raw source line.
+				// DiffRemoved colors them differently (red marker, white content).
+				const std::string marker  = std::string(num) + " - ";
+				const std::string content = line;
+				body << tui::DiffRemoved(marker, content) << "\n";
 			} else {
-				// Full row gets dark-green background (number + marker + content).
-				body << tui::DiffAdded(std::string(num) + " + " + hl) << "\n";
+				// Marker: line number + " + ", content: syntax-highlighted.
+				const std::string marker  = std::string(num) + " + ";
+				const std::string content = tui::HighlightCode(lang, line);
+				body << tui::DiffAdded(marker, content) << "\n";
 			}
 		} else {
 			// Unchanged context line: dim number, space, plain content.
