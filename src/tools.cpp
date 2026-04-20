@@ -98,6 +98,49 @@ ToolResult run_write(const json& input) {
 	return {"wrote " + std::to_string(content.size()) + " bytes to " + path, false};
 }
 
+// Build a bordered, line-numbered preview block matching the style
+// used by Claude Code: a header line, a ╌╌╌ top rule, up to
+// kPreviewLines numbered content rows, an optional truncation note,
+// and a ╌╌╌ bottom rule. Used by both preview_write and preview_edit.
+static std::string make_preview_block(const std::string& header,
+                                      const std::string& content,
+                                      int start_line_num = 1) {
+	constexpr int kPreviewLines = 10;
+
+	// Build the horizontal rule by repeating the UTF-8 sequence for
+	// U+2500 BOX DRAWINGS LIGHT HORIZONTAL (─). Each glyph is 3 bytes.
+	const int rule_len = std::min(72, std::max(40, static_cast<int>(header.size()) + 4));
+	std::string rule;
+	rule.reserve(static_cast<size_t>(rule_len) * 3);
+	for (int i = 0; i < rule_len; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
+
+	const size_t nlines = std::count(content.begin(), content.end(), '\n')
+	                    + (content.empty() || content.back() == '\n' ? 0 : 1);
+
+	std::ostringstream body;
+	body << " " << header << "\n";
+	body << rule << "\n";
+
+	size_t lines_shown = 0;
+	int    ln           = start_line_num;
+	std::string line;
+	std::istringstream iss(content);
+	while (lines_shown < kPreviewLines && std::getline(iss, line)) {
+		// Right-justify the line number in a 3-char field.
+		char num[8];
+		std::snprintf(num, sizeof(num), "%3d", ln);
+		body << num << " " << line << "\n";
+		++lines_shown;
+		++ln;
+	}
+	const size_t remaining = nlines > lines_shown ? nlines - lines_shown : 0;
+	if (remaining > 0) {
+		body << "    ... (" << remaining << " more lines)\n";
+	}
+	body << rule;
+	return body.str();
+}
+
 std::string preview_write(const json& input) {
 	const std::string path    = input.value("path", std::string{});
 	const std::string content = input.value("content", std::string{});
@@ -106,36 +149,22 @@ std::string preview_write(const json& input) {
 								+ (content.empty() || content.back() == '\n' ? 0 : 1);
 
 	std::ifstream existing(path);
-	std::string   header;
+	std::string   action;
 	if (existing.is_open()) {
 		existing.seekg(0, std::ios::end);
 		const auto old_size = existing.tellg();
-		header = "overwrite " + path
-			   + " (" + std::to_string(static_cast<long>(old_size)) + " -> "
+		action = "Overwrite " + path
+			   + "  (" + std::to_string(static_cast<long>(old_size)) + " \xE2\x86\x92 "
 			   + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
 	} else {
-		header = "new file " + path
-			   + " (" + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
+		action = "Create " + path
+			   + "  (" + std::to_string(nbytes) + " bytes, " + std::to_string(nlines) + " lines)";
 	}
 	if (!path_inside_cwd(path)) {
-		header += "  [WARNING: outside current working directory]";
+		action += "  \xE2\x9A\xA0  outside cwd";
 	}
 
-	// Preview the first few lines of the new content so the user sees what
-	// they're approving, capped at 10 lines.
-	std::ostringstream body;
-	body << "  -> " << header;
-	size_t lines_shown = 0;
-	std::string line;
-	std::istringstream iss(content);
-	while (lines_shown < 10 && std::getline(iss, line)) {
-		body << "\n  | " << line;
-		++lines_shown;
-	}
-	if (lines_shown < nlines) {
-		body << "\n  | ... (" << (nlines - lines_shown) << " more lines)";
-	}
-	return body.str();
+	return make_preview_block(action, content);
 }
 
 std::string read_file_all(const std::string& path) {
@@ -211,15 +240,15 @@ std::string preview_edit(const json& input) {
 
 	const std::string content = read_file_all(path);
 	if (content.empty() && !std::ifstream(path).is_open()) {
-		return "  -> Edit " + path + "  [error: cannot open]";
+		return " Edit " + path + "  [error: cannot open]";
 	}
 
 	const size_t count = count_occurrences(content, old_s);
 	if (count == 0) {
-		return "  -> Edit " + path + "  [error: old_string not found]";
+		return " Edit " + path + "  [error: old_string not found]";
 	}
 	if (count > 1 && !replace_all) {
-		return "  -> Edit " + path + "  [error: " + std::to_string(count)
+		return " Edit " + path + "  [error: " + std::to_string(count)
 			 + " matches; set replace_all=true]";
 	}
 
@@ -229,28 +258,45 @@ std::string preview_edit(const json& input) {
 		if (content[i] == '\n') ++line_num;
 	}
 
-	std::ostringstream body;
-	body << "  -> Edit " << path << " @ line " << line_num;
-	if (count > 1) body << " (" << count << " matches, replace_all)";
-	if (!path_inside_cwd(path)) body << "  [WARNING: outside cwd]";
+	std::string header = "Edit " + path + "  @ line " + std::to_string(line_num);
+	if (count > 1)        header += "  (" + std::to_string(count) + " matches, replace_all)";
+	if (!path_inside_cwd(path)) header += "  \xE2\x9A\xA0  outside cwd";
 
-	auto emit_lines = [&](const std::string& text, const char marker) {
+	// Build a unified-style diff block: removed lines prefixed with
+	// "  - " and added lines prefixed with "  + ", capped at 8 each.
+	constexpr size_t kMax = 8;
+	// Build the horizontal rule as UTF-8 U+2500 ─ repeated.
+	const int rule_len = std::min(72, std::max(40, static_cast<int>(header.size()) + 4));
+	std::string rule;
+	rule.reserve(static_cast<size_t>(rule_len) * 3);
+	for (int i = 0; i < rule_len; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
+
+	std::ostringstream body;
+	body << " " << header << "\n";
+	body << rule << "\n";
+
+	auto emit_diff_lines = [&](const std::string& text, const char marker) {
 		size_t shown = 0;
+		int    ln    = (marker == '-') ? line_num : line_num;
 		std::istringstream iss(text);
 		std::string line;
-		while (shown < 12 && std::getline(iss, line)) {
-			body << "\n  " << marker << " " << line;
+		while (shown < kMax && std::getline(iss, line)) {
+			char num[8];
+			std::snprintf(num, sizeof(num), "%3d", ln);
+			body << num << " " << marker << " " << line << "\n";
 			++shown;
+			++ln;
 		}
-		size_t total_lines = std::count(text.begin(), text.end(), '\n')
-						   + (text.empty() || text.back() == '\n' ? 0 : 1);
-		if (shown < total_lines) {
-			body << "\n  " << marker << " ... (" << (total_lines - shown) << " more lines)";
+		const size_t total = std::count(text.begin(), text.end(), '\n')
+		                   + (text.empty() || text.back() == '\n' ? 0 : 1);
+		if (shown < total) {
+			body << "    " << marker << " ... (" << (total - shown) << " more lines)\n";
 		}
 	};
 
-	emit_lines(old_s, '-');
-	emit_lines(new_s, '+');
+	emit_diff_lines(old_s, '-');
+	emit_diff_lines(new_s, '+');
+	body << rule;
 	return body.str();
 }
 
@@ -1078,8 +1124,8 @@ std::string preview_write_attr(const json& input) {
 	const std::string name  = input.value("name", std::string{});
 	const std::string value = input.value("value", std::string{});
 	const std::string type  = input.value("type", std::string{"string"});
-	return "  -> WriteAttr " + path + "\n"
-		 + "     " + name + " (" + type + ") = " + value;
+	const std::string header = "WriteAttr " + path + "  " + name + " (" + type + ")";
+	return make_preview_block(header, value);
 }
 
 std::string preview_index_attr(const json& input) {

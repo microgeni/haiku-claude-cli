@@ -128,6 +128,40 @@ std::string BfsSystemBlock() {
 #endif
 }
 
+// Behaviour guidelines injected into every session to improve the
+// interactive experience. Covers three UX improvements observed from
+// studying Claude Code's interaction patterns:
+//
+//   #3 — Intent narration: briefly state what you are about to do
+//        before invoking a tool, so the user understands the plan
+//        without waiting for the tool result.
+//
+//   #4 — Proactive next-step suggestions: after completing a task
+//        (especially code), volunteer the obvious follow-up (compile,
+//        run, test) as a short note — do not wait to be asked.
+//
+//   #5 — Post-tool summary: after a tool result arrives, emit one
+//        plain-English sentence summarising what was done or found,
+//        rather than (or in addition to) quoting the raw output.
+std::string BehaviorSystemBlock() {
+	return
+		"## Interaction style\n"
+		"\n"
+		"Before calling a tool, write one short sentence describing what "
+		"you are about to do and why. For example: \"I'll read the file to "
+		"check the current implementation.\" or \"Creating the file now.\"\n"
+		"\n"
+		"After a tool returns, summarise the outcome in one plain-English "
+		"sentence rather than repeating the raw output verbatim. For example: "
+		"\"The file has 142 lines and imports curl and nlohmann/json.\" or "
+		"\"Wrote hello_world.cpp successfully.\"\n"
+		"\n"
+		"After completing a task that involves code (creating, editing, or "
+		"building a file), proactively suggest the next logical step — such "
+		"as how to compile or run it — as a brief closing note, unless the "
+		"user has already indicated what they want to do next.";
+}
+
 #ifdef __HAIKU__
 // "What is this file about" distilled from content Claude just Read.
 // No API call — first non-blank, non-comment line plus total-line-
@@ -289,6 +323,7 @@ std::string ComposeSystem(const std::string& flag_system) {
 	append(LoadOptionalFile(paths::UserMemoryPath()));
 	append(LoadOptionalFile(paths::ProjectMemoryPath()));
 	append(BfsSystemBlock());
+	append(BehaviorSystemBlock());
 	append(flag_system);
 	return out;
 }

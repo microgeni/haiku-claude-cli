@@ -413,7 +413,7 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		tui::PositionCursorForChat();
 		const std::vector<std::string> choices = {
 			"Yes, allow once",
-			"Always allow this session",
+			"Yes, allow all " + tool_name + " this session  \xE2\x87\xA7shift+tab",
 			"No, deny",
 		};
 		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
@@ -491,14 +491,18 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		std::cout << tui::Dim(extra) << "\n";
 		pre_lines = static_cast<int>(std::count(extra.begin(), extra.end(), '\n')) + 1;
 	} else {
-		std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
+		// Fallback for tools without a rich preview: show a compact
+		// one-liner with the tool name and a summary of its input.
+		const std::string action_line = "  \xE2\x86\x92 " + tool_name
+		                              + "  " + ShortInputSummary(input);
+		std::cout << tui::Meta(action_line) << "\n";
 		pre_lines = 1;
 	}
 
 	tui::PositionCursorForChat();
 	const std::vector<std::string> choices = {
 		"Yes, allow once",
-		"Always allow this session",
+		"Yes, allow all " + tool_name + " this session  \xE2\x87\xA7shift+tab",
 		"No, deny",
 	};
 	if (g_active_esc_guard) g_active_esc_guard->pause();
