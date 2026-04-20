@@ -240,6 +240,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		// drags the terminal window.
 		if (tui::ConsumeResizePending()) tui::RedrawStatusBar();
 		tui::ShowCursor();
+		tui::EmitChatRule();
 		tui::PositionCursorForInput();
 
 		std::string line;
