@@ -356,7 +356,7 @@ std::string ShortInputSummary(const json& input) {
 	}
 	const std::string dumped = input.dump();
 	if (dumped.size() <= 80) return dumped;
-	return dumped.substr(0, 80);
+	return dumped.substr(0, 77) + "...";
 }
 
 Permission PromptPermission(const std::string& tool_name, const json& input,
