@@ -348,6 +348,12 @@ CURL* get_curl() {
 }
 
 std::string ShortInputSummary(const json& input) {
+	// For Bash, show the full command string untruncated so the user
+	// can see exactly what will be executed. Other tools keep the
+	// 80-char cap since their inputs (paths, patterns) are brief.
+	if (input.contains("command") && input["command"].is_string()) {
+		return input["command"].get<std::string>();
+	}
 	const std::string dumped = input.dump();
 	if (dumped.size() <= 80) return dumped;
 	return dumped.substr(0, 77) + "...";
