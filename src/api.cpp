@@ -171,6 +171,7 @@ struct StreamState {
 	std::atomic<int>     cache_read_input_tokens     { 0 };
 	bool                 saw_text            = false;
 	bool                 stream_error        = false;
+	std::string          stream_error_type;
 	std::string          stream_error_message;
 	tui::Spinner*        spinner             = nullptr;
 	tui::MarkdownRenderer renderer;
@@ -308,8 +309,12 @@ void ProcessSseEvent(const std::string& event, StreamState* state) {
 			}
 		} else if (type == "error") {
 			state->stream_error = true;
-			if (j.contains("error") && j["error"].contains("message")) {
-				state->stream_error_message = j["error"]["message"].get<std::string>();
+			if (j.contains("error") && j["error"].is_object()) {
+				const auto& e = j["error"];
+				if (e.contains("type") && e["type"].is_string())
+					state->stream_error_type = e["type"].get<std::string>();
+				if (e.contains("message") && e["message"].is_string())
+					state->stream_error_message = e["message"].get<std::string>();
 			}
 		}
 	} catch (const json::exception&) {
@@ -816,7 +821,43 @@ SendResult SendConversation(const config::Auth& auth, const std::string& model,
 	}
 
 	if (state.stream_error) {
-		std::cerr << "\nerror: stream error: " << state.stream_error_message << "\n";
+		// Overloaded errors arrive as SSE error events after HTTP 200, so the
+		// HTTP-level retry path above never fires.  Treat them the same way:
+		// retry with exponential backoff, then give a friendly final message.
+		const bool stream_retryable =
+			(state.stream_error_type == "overloaded_error"
+			 || state.stream_error_type == "api_error")
+			&& !g_interrupted && attempt < kMaxRetries;
+		if (stream_retryable) {
+			const int delay = kBaseDelay << (attempt - 1);
+			std::cerr << tui::Dim("[retry " + std::to_string(attempt)
+								  + "/" + std::to_string(kMaxRetries)
+								  + " in " + std::to_string(delay) + "ms: "
+								  + state.stream_error_type + "]")
+					  << "\n";
+			config::LogLine("retry attempt=" + std::to_string(attempt)
+					 + " stream_error=" + state.stream_error_type);
+			for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
+				std::this_thread::sleep_for(std::chrono::milliseconds(
+					std::min(100, delay - slept)));
+			continue; // retry
+		}
+
+		// Non-retryable or retries exhausted — surface a clear message.
+		std::cerr << "\n" << tui::ErrorLabel() << " ";
+		if (state.stream_error_type == "overloaded_error") {
+			std::cerr << "Anthropic's servers are overloaded — please try again in a moment.";
+		} else {
+			std::cerr << "stream error";
+			if (!state.stream_error_type.empty())
+				std::cerr << " (" << state.stream_error_type << ")";
+			if (!state.stream_error_message.empty())
+				std::cerr << ": " << state.stream_error_message;
+		}
+		std::cerr << "\n";
+		config::LogLine("stream_error type=" + state.stream_error_type
+				 + (state.stream_error_message.empty()
+					? "" : " msg=" + state.stream_error_message));
 		return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
 				state.content_blocks, state.stop_reason,
 				state.cache_creation_input_tokens.load(),
