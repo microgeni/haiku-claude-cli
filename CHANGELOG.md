@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-04-20
+
+### Added
+- **Syntax highlighting in Write/Edit permission previews** — `tui::LangFromPath()`
+  maps 20+ file extensions to language tags; `tui::HighlightCode()` applies
+  the existing highlight engine to preview content. Keywords, strings,
+  comments and numbers are coloured in the diff block.
+- **`tui::DiffRemoved()` / `tui::DiffAdded()`** — new public helpers that
+  render full-width diff rows with background colour matching Claude Code
+  exactly: dark-red bg `rgb(61,1,0)` + muted-red marker + near-white content
+  `rgb(248,248,242)` for removals; dark-green bg `rgb(2,40,0)` + green fg for
+  additions. `\x1b[K` fills the background to the terminal right edge.
+- **Behaviour system prompt** — three interaction-style guidelines injected
+  into every session: intent narration before tool calls, post-tool
+  natural-language summary, proactive next-step suggestions after code tasks.
+- **Separator rule above prompt** — `tui::EmitChatRule()` now called at the
+  top of the REPL loop so each prompt is preceded by a full-width `─` rule,
+  matching Claude Code's two-rule frame around the input row.
+
+### Changed
+- **Permission dialog matches Claude Code style** — complete visual overhaul:
+  - `╌` dashed rule (U+254C) at full terminal width instead of `─` solid.
+  - Three-line header: tool label / filename / optional yellow warning line.
+  - Full file context shown (surrounding unchanged lines) instead of changed
+    lines only.
+  - Repeated line numbers on removal/addition rows (`4 - / 4 +` style).
+  - `❯` cursor glyph on active option; inactive options indented with spaces.
+  - Natural-language question: *"Do you want to make this edit to foo.cpp?"*
+  - Directory-scoped option 2: *"Yes, allow all Edit in src/ this session (shift+tab)"*.
+  - `Esc to cancel · Tab to amend` footer row.
+- **`SelectOption` render fix** — pre-reserves rows before drawing to prevent
+  scroll displacement when the preview block fills most of the terminal height.
+  Initial render uses `\n` (natural scroll); subsequent redraws use
+  `\x1b[1B\r` (no scroll). `PositionCursorForChat()` no longer called before
+  `SelectOption` — cursor stays where the preview ended.
+- **Bash tool notice shows full command** — `ShortInputSummary()` returns the
+  raw command string untruncated for Bash; other tools keep the 80-char `...`
+  cap.
+- **`...` removed from non-Bash truncation bracket** — restored after
+  brief removal; `[tool: Write {"path":...}]` reads naturally.
+
 ## [1.5.1] - 2026-04-19
 
 ### Changed
