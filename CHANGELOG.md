@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.5] - 2026-04-22
+
+### Fixed
+- **Cost estimate accuracy** — the `/stats` estimated cost was inflated ~10×
+  for heavy cache users because `in_tok` from the API already includes
+  cache-read and cache-write tokens, but the old formula charged all of them
+  at the full $3.00/M uncached rate. The formula now subtracts `c_read_tok`
+  and `c_write_tok` from `in_tok` before applying the uncached rate, then
+  prices each tier correctly: fresh input at $3.00/M, cache reads at $0.30/M,
+  cache writes at $3.75/M, and output at $15.00/M.
+- **Telegram slash commands unblocked** — non-Claude slash commands
+  (`/mute`, `/unmute`, `/new`, `/help`, `/model`, etc.) sent via Telegram
+  are now handled immediately in the `WorkLoop` via a new
+  `TryHandleSlashImmediate()` method, without waiting for `AcquireTurn()`.
+  Previously these commands were blocked until any in-progress Claude turn
+  finished. Plain prompts and passthrough commands still go through
+  `AcquireTurn` → `ProcessUpdate` to preserve the single-turn invariant.
+  ANSI escape sequences are stripped from captured output before replying
+  to Telegram.
+
 ## [1.5.4] - 2026-04-22
 
 ### Fixed
