@@ -194,14 +194,19 @@ std::string FormatDisplay() {
 	const long long c_write_tok= s.value("cache_write_tokens", 0LL);
 
 	// Lifetime cost using Sonnet rates:
-	//   $3.00 / M input (uncached)
+	//   $3.00 / M input (uncached, fresh)
 	//   $15.00 / M output
 	//   $0.30 / M cache reads  (10% of input rate)
 	//   $3.75 / M cache writes (125% of input rate)
-	const double est_cost = (in_tok      / 1'000'000.0) * 3.0
-						  + (out_tok     / 1'000'000.0) * 15.0
-						  + (c_read_tok  / 1'000'000.0) * 0.30
-						  + (c_write_tok / 1'000'000.0) * 3.75;
+	//
+	// in_tok from the API already includes cache-read and cache-write
+	// tokens, so we subtract those out before applying the full $3/M
+	// rate — otherwise cached tokens are charged 10× too much.
+	const long long fresh_input = in_tok - c_read_tok - c_write_tok;
+	const double est_cost = (fresh_input  / 1'000'000.0) * 3.0
+						  + (out_tok      / 1'000'000.0) * 15.0
+						  + (c_read_tok   / 1'000'000.0) * 0.30
+						  + (c_write_tok  / 1'000'000.0) * 3.75;
 
 	// BFS counters — computed first so the summary block can
 	// lead with the savings number.
