@@ -6,6 +6,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-14
+
+### Added
+- **`/stats` bar charts** — three █-block gauges now appear after the
+  summary block, showing Cache hit rate, BFS-read savings rate, and Output
+  token share as a filled/unfilled bar with a percentage label:
+  ```
+  Cache hits   [████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░]  42%
+  BFS savings  [████████████████████████████████░░░░░░░░]  78%
+  Output share [███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   8%
+  ```
+- **`/stats` cost/savings annotations** — each bar is followed by an
+  explanation line that translates the token counts into dollar figures
+  (cache savings at $2.70/M, BFS savings at $3.00/M, output cost at
+  $15.00/M):
+  ```
+               66,500 tokens served from cache  →  saved $0.1796
+               39,200 tokens avoided via BFS    →  saved $0.1176
+               12,400 output tokens             →  cost  $0.1860
+  ```
+- **`/stats` turns-per-session sparkline** — a Unicode block sparkline
+  (▁▂▃▄▅▆▇█) over the last 60 sessions, with lo/hi/last annotations.
+  `RecordSession()` now pushes a new entry and `RecordTurn()` increments
+  it; the array is capped at 60 and written atomically with `stats.json`.
+
 ## [1.5.6] - 2026-07-14
 
 ### Fixed
