@@ -307,12 +307,17 @@ std::string FormatDisplay() {
 	const int cacheHitPct = in_tok > 0
 		? static_cast<int>((c_read_tok * 100) / in_tok)
 		: 0;
+	// Cost avoided by cache: tokens served from cache paid $0.30/M
+	// instead of $3.00/M — saving $2.70/M per cache-read token.
+	const double cacheCostSaved = (c_read_tok / 1'000'000.0) * (3.00 - 0.30);
 
 	// Input/output split (output as % of total tokens transferred).
 	const long long totalTok = in_tok + out_tok;
 	const int outPct = totalTok > 0
 		? static_cast<int>((out_tok * 100) / totalTok)
 		: 0;
+	// Actual output cost at $15/M.
+	const double outCost = (out_tok / 1'000'000.0) * 15.0;
 
 	// Per-session turn sparkline.
 	std::vector<long long> sparkVals;
@@ -351,17 +356,29 @@ std::string FormatDisplay() {
 	// ── Token graphs ─────────────────────────────────────
 	out += "\n";
 
-	// Cache hit ratio bar.
+	// Cache hit ratio bar + savings annotation.
 	std::snprintf(buf, sizeof(buf), "%3d%%", cacheHitPct);
 	out += "  Cache hits   " + RenderBar(cacheHitPct) + " " + buf + "\n";
+	std::snprintf(buf, sizeof(buf),
+		"               %s tokens served from cache  →  saved $%.4f\n",
+		thousands(c_read_tok).c_str(), cacheCostSaved);
+	out += buf;
 
-	// BFS savings bar.
+	// BFS savings bar + savings annotation.
 	std::snprintf(buf, sizeof(buf), "%3d%%", bfsPct);
 	out += "  BFS savings  " + RenderBar(bfsPct)      + " " + buf + "\n";
+	std::snprintf(buf, sizeof(buf),
+		"               %s tokens avoided via BFS    →  saved $%.4f\n",
+		thousands(savedTokens).c_str(), bfsCostSaved);
+	out += buf;
 
-	// Output share bar (output / total tokens).
+	// Output share bar + cost annotation.
 	std::snprintf(buf, sizeof(buf), "%3d%%", outPct);
 	out += "  Output share " + RenderBar(outPct)       + " " + buf + "\n";
+	std::snprintf(buf, sizeof(buf),
+		"               %s output tokens             →  cost  $%.4f\n",
+		thousands(out_tok).c_str(), outCost);
+	out += buf;
 
 	// Per-session turns sparkline (only shown when we have data).
 	if (!spark.empty()) {
