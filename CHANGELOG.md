@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-07-14
+
+### Fixed
+- **Process crash on non-UTF-8 content** — `nlohmann::json::dump()` defaults
+  to `error_handler_t::strict`, which throws `json::type_error` (error.316)
+  on any non-UTF-8 byte in a string value.  Tool output containing binary
+  data, Latin-1 text, or truncated multi-byte sequences — and assistant
+  responses forwarded through the Telegram bridge — both triggered this path,
+  reaching `std::terminate` via an uncaught exception.  All `dump()` call
+  sites that may carry user or tool data now use `error_handler_t::replace`;
+  invalid bytes are silently substituted with U+FFFD so output remains valid
+  UTF-8 and the process continues normally.  Sites fixed: `config::SaveHistory`,
+  `telegram::Client::SendMessage` (both overloads), `telegram::Client::EditMessageText`,
+  `api::ShortInputSummary`, `hooks::Run`, and the MCP stdio transport.
+
 ## [1.5.5] - 2026-04-22
 
 ### Fixed

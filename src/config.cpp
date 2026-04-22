@@ -17,7 +17,7 @@
 
 namespace config {
 
-const char* const kVersion      = "1.5.5";
+const char* const kVersion      = "1.5.6";
 const char* const kDefaultModel = "claude-sonnet-4-6";
 const char* const kApiVersion   = "2023-06-01";
 const char* const kOAuthBeta    = "oauth-2025-04-20";
@@ -412,7 +412,8 @@ bool SaveHistory(const json& messages, const std::string& model,
 		if (fd < 0) return false;
 		FILE* fp = ::fdopen(fd, "w");
 		if (!fp) { ::close(fd); return false; }
-		const std::string serialized = j.dump(2) + "\n";
+		const std::string serialized = j.dump(2, ' ', false,
+			json::error_handler_t::replace) + "\n";
 		const bool ok = std::fwrite(serialized.data(), 1,
 		                            serialized.size(), fp) == serialized.size();
 		std::fclose(fp); // also closes fd

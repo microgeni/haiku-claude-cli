@@ -359,7 +359,7 @@ std::string ShortInputSummary(const json& input) {
 	if (input.contains("command") && input["command"].is_string()) {
 		return input["command"].get<std::string>();
 	}
-	const std::string dumped = input.dump();
+	const std::string dumped = input.dump(-1, ' ', false, json::error_handler_t::replace);
 	if (dumped.size() <= 80) return dumped;
 	return dumped.substr(0, 77) + "...";
 }

@@ -190,7 +190,9 @@ bool Client::SendMessage(int64_t chat_id, const std::string& text,
 		if (last && !reply_markup.is_null()) {
 			body["reply_markup"] = reply_markup;
 		}
-		if (!PostJson("sendMessage", body.dump(), nullptr, 15)) {
+		if (!PostJson("sendMessage",
+		              body.dump(-1, ' ', false, json::error_handler_t::replace),
+		              nullptr, 15)) {
 			all_ok = false;
 			break;
 		}
@@ -224,7 +226,9 @@ int64_t Client::SendMessageWithId(int64_t chat_id, const std::string& text,
 	}
 
 	std::string response;
-	if (!PostJson("sendMessage", body.dump(), &response, 15)) return 0;
+	if (!PostJson("sendMessage",
+	              body.dump(-1, ' ', false, json::error_handler_t::replace),
+	              &response, 15)) return 0;
 
 	int64_t message_id = 0;
 	try {
@@ -273,7 +277,9 @@ bool Client::EditMessageText(int64_t chat_id, int64_t message_id,
 	}
 
 	std::string response;
-	const bool ok = PostJson("editMessageText", body.dump(), &response, 10);
+	const bool ok = PostJson("editMessageText",
+	                         body.dump(-1, ' ', false, json::error_handler_t::replace),
+	                         &response, 10);
 	// Distinguish "message is not modified" (harmless, treat as ok)
 	// from real failures (network error, rate-limit, wrong message_id)
 	// so callers can fall back to sendMessage when the edit fails.
