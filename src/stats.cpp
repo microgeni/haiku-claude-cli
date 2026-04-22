@@ -1,11 +1,13 @@
 #include "stats.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -135,6 +137,54 @@ std::string thousands(long long n) {
 	return s;
 }
 
+// Render a filled block-bar of width kBarWidth characters.
+// `filled` is the number of filled columns (0..kBarWidth).
+// Uses U+2588 FULL BLOCK (█) for filled cells and space for empty.
+// A thin left-bracket and right-bracket frame it so it reads as a
+// discrete gauge even in monochrome terminals.
+std::string RenderBar(double pct, int width = 40) {
+	if (pct < 0.0)   pct = 0.0;
+	if (pct > 100.0) pct = 100.0;
+	const int filled = static_cast<int>(pct * width / 100.0 + 0.5);
+	std::string out = "[";
+	for (int i = 0; i < filled;         ++i) out += "\xE2\x96\x88"; // █
+	for (int i = 0; i < width - filled; ++i) out += ' ';
+	out += "]";
+	return out;
+}
+
+// Render a UTF-8 sparkline from a vector of values using the eight
+// block characters ▁▂▃▄▅▆▇█ (U+2581..U+2588). Values are normalised
+// to the range [min, max]; if all values are equal every cell shows ▄.
+// Returns an empty string when `vals` is empty.
+std::string RenderSparkline(const std::vector<long long>& vals) {
+	if (vals.empty()) return "";
+	// Block characters from lowest (▁) to highest (█).
+	static const char* const kBlocks[] = {
+		"\xE2\x96\x81", // ▁
+		"\xE2\x96\x82", // ▂
+		"\xE2\x96\x83", // ▃
+		"\xE2\x96\x84", // ▄
+		"\xE2\x96\x85", // ▅
+		"\xE2\x96\x86", // ▆
+		"\xE2\x96\x87", // ▇
+		"\xE2\x96\x88", // █
+	};
+	constexpr int kLevels = 8;
+	const long long lo = *std::min_element(vals.begin(), vals.end());
+	const long long hi = *std::max_element(vals.begin(), vals.end());
+	std::string out;
+	for (long long v : vals) {
+		int idx = (hi == lo)
+			? kLevels / 2
+			: static_cast<int>((v - lo) * (kLevels - 1) / (hi - lo));
+		if (idx < 0)        idx = 0;
+		if (idx >= kLevels) idx = kLevels - 1;
+		out += kBlocks[idx];
+	}
+	return out;
+}
+
 } // namespace
 
 void RecordSession() {
@@ -148,6 +198,14 @@ void RecordSession() {
 		std::strftime(date, sizeof(date), "%Y-%m-%d", &tm);
 		s["first_session"] = date;
 	}
+	// Push a new 0-turn entry for this session into the per-session
+	// sparkline history. Cap at 60 entries so the array stays small.
+	if (!s.contains("session_turns") || !s["session_turns"].is_array())
+		s["session_turns"] = json::array();
+	s["session_turns"].push_back(0LL);
+	constexpr int kMaxHistory = 60;
+	while (static_cast<int>(s["session_turns"].size()) > kMaxHistory)
+		s["session_turns"].erase(s["session_turns"].begin());
 	save(s);
 }
 
@@ -159,6 +217,12 @@ void RecordTurn(int input_tokens, int output_tokens,
 	s["output_tokens"]       = s.value("output_tokens",       0LL) + static_cast<long long>(output_tokens);
 	s["cache_read_tokens"]   = s.value("cache_read_tokens",   0LL) + static_cast<long long>(cache_read_tokens);
 	s["cache_write_tokens"]  = s.value("cache_write_tokens",  0LL) + static_cast<long long>(cache_write_tokens);
+	// Increment the current session's turn count in the sparkline history.
+	if (s.contains("session_turns") && s["session_turns"].is_array()
+			&& !s["session_turns"].empty()) {
+		auto& last = s["session_turns"].back();
+		last = last.get<long long>() + 1LL;
+	}
 	save(s);
 }
 
@@ -188,10 +252,10 @@ std::string FormatDisplay() {
 	const std::string since = s.value("first_session", std::string{"(unknown)"});
 	const int  sessions = s.value("sessions", 0LL);
 	const int  turns    = s.value("turns", 0LL);
-	const long long in_tok     = s.value("input_tokens",       0LL);
-	const long long out_tok    = s.value("output_tokens",      0LL);
-	const long long c_read_tok = s.value("cache_read_tokens",  0LL);
-	const long long c_write_tok= s.value("cache_write_tokens", 0LL);
+	const long long in_tok      = s.value("input_tokens",       0LL);
+	const long long out_tok     = s.value("output_tokens",      0LL);
+	const long long c_read_tok  = s.value("cache_read_tokens",  0LL);
+	const long long c_write_tok = s.value("cache_write_tokens", 0LL);
 
 	// Lifetime cost using Sonnet rates:
 	//   $3.00 / M input (uncached, fresh)
@@ -212,22 +276,21 @@ std::string FormatDisplay() {
 	// lead with the savings number.
 	long long read_attr_saved = 0, read_attr_used = 0;
 	int  read_attr_calls = 0;
-	long long query_saved     = 0, query_used    = 0;
-	int  query_calls     = 0;
+	long long query_saved = 0, query_used = 0;
+	int  query_calls = 0;
 	if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
 		const auto& tc = s["tool_calls"];
 		if (tc.contains("ReadAttr")) {
-			// Read the new key; fall back to the legacy "fSavedbytes" spelling.
 			read_attr_saved = tc["ReadAttr"].value("saved_bytes",
 				tc["ReadAttr"].value("fSavedbytes", 0LL));
-			read_attr_used  = tc["ReadAttr"].value("bytes",       0LL);
-			read_attr_calls = tc["ReadAttr"].value("count",       0LL);
+			read_attr_used  = tc["ReadAttr"].value("bytes", 0LL);
+			read_attr_calls = tc["ReadAttr"].value("count", 0LL);
 		}
 		if (tc.contains("Query")) {
 			query_saved = tc["Query"].value("saved_bytes",
 				tc["Query"].value("fSavedbytes", 0LL));
-			query_used  = tc["Query"].value("bytes",       0LL);
-			query_calls = tc["Query"].value("count",       0LL);
+			query_used  = tc["Query"].value("bytes", 0LL);
+			query_calls = tc["Query"].value("count", 0LL);
 		}
 	}
 	const long long totalSavedBytes = read_attr_saved + query_saved;
@@ -235,12 +298,31 @@ std::string FormatDisplay() {
 	const long long savedTokens     = totalSavedBytes / 4;
 	const long long usedTokens      = totalUsedBytes  / 4;
 	const long long fullTokens      = savedTokens + usedTokens;
-	const int  bfsPct           = fullTokens > 0
+	const int bfsPct = fullTokens > 0
 		? static_cast<int>((savedTokens * 100) / fullTokens)
 		: 0;
-	const double bfsCostSaved  = (savedTokens / 1'000'000.0) * 3.0;
+	const double bfsCostSaved = (savedTokens / 1'000'000.0) * 3.0;
 
-	char buf[768];
+	// Cache hit ratio (cache-read tokens vs. total input tokens).
+	const int cacheHitPct = in_tok > 0
+		? static_cast<int>((c_read_tok * 100) / in_tok)
+		: 0;
+
+	// Input/output split (output as % of total tokens transferred).
+	const long long totalTok = in_tok + out_tok;
+	const int outPct = totalTok > 0
+		? static_cast<int>((out_tok * 100) / totalTok)
+		: 0;
+
+	// Per-session turn sparkline.
+	std::vector<long long> sparkVals;
+	if (s.contains("session_turns") && s["session_turns"].is_array()) {
+		for (const auto& v : s["session_turns"])
+			sparkVals.push_back(v.get<long long>());
+	}
+	const std::string spark = RenderSparkline(sparkVals);
+
+	char buf[1024];
 	std::string out;
 
 	out += "haiku-claude-cli lifetime stats";
@@ -249,6 +331,7 @@ std::string FormatDisplay() {
 	}
 	out += "\n\n";
 
+	// ── Summary block ────────────────────────────────────
 	std::snprintf(buf, sizeof(buf),
 		"  Sessions:  %d\n"
 		"  Turns:     %d\n"
@@ -265,9 +348,38 @@ std::string FormatDisplay() {
 		est_cost);
 	out += buf;
 
+	// ── Token graphs ─────────────────────────────────────
+	out += "\n";
+
+	// Cache hit ratio bar.
+	std::snprintf(buf, sizeof(buf), "%3d%%", cacheHitPct);
+	out += "  Cache hits   " + RenderBar(cacheHitPct) + " " + buf + "\n";
+
+	// BFS savings bar.
+	std::snprintf(buf, sizeof(buf), "%3d%%", bfsPct);
+	out += "  BFS savings  " + RenderBar(bfsPct)      + " " + buf + "\n";
+
+	// Output share bar (output / total tokens).
+	std::snprintf(buf, sizeof(buf), "%3d%%", outPct);
+	out += "  Output share " + RenderBar(outPct)       + " " + buf + "\n";
+
+	// Per-session turns sparkline (only shown when we have data).
+	if (!spark.empty()) {
+		out += "\n";
+		out += "  Turns/session  " + spark + "\n";
+		if (sparkVals.size() > 1) {
+			const long long lo = *std::min_element(sparkVals.begin(), sparkVals.end());
+			const long long hi = *std::max_element(sparkVals.begin(), sparkVals.end());
+			std::snprintf(buf, sizeof(buf),
+				"                 lo %lld  hi %lld  last %lld\n",
+				lo, hi, sparkVals.back());
+			out += buf;
+		}
+	}
+
 	// ── BFS showcase block ───────────────────────────────
 	out += "\n";
-	out += "  \xE2\x94\x83 BFS — the Haiku advantage\n";
+	out += "  \xE2\x94\x83 BFS \xE2\x80\x94 the Haiku advantage\n";
 	out += "  \xE2\x94\x83\n";
 	if (savedTokens > 0) {
 		std::snprintf(buf, sizeof(buf),
@@ -284,7 +396,7 @@ std::string FormatDisplay() {
 			thousands(savedTokens).c_str());
 	} else {
 		std::snprintf(buf, sizeof(buf),
-			"  \xE2\x94\x83  Cache empty — builds itself as Claude\n"
+			"  \xE2\x94\x83  Cache empty \xE2\x80\x94 builds itself as Claude\n"
 			"  \xE2\x94\x83  reads files this session.\n");
 	}
 	out += buf;
@@ -294,7 +406,7 @@ std::string FormatDisplay() {
 	if (s.contains("tool_calls") && s["tool_calls"].is_object()) {
 		out += "  Tool calls (lifetime):\n";
 		for (const auto& [name, val] : s["tool_calls"].items()) {
-			const int  count = val.value("count", 0);
+			const int  count  = val.value("count", 0);
 			const bool is_bfs = (name == "ReadAttr"  || name == "Query"
 							  || name == "WriteAttr" || name == "IndexAttr");
 			std::snprintf(buf, sizeof(buf),
