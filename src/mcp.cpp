@@ -67,7 +67,7 @@ std::string ReadLine(Client& c) {
 }
 
 bool send_json(Client& c, const json& msg) {
-	const std::string line = msg.dump() + "\n";
+	const std::string line = msg.dump(-1, ' ', false, json::error_handler_t::replace) + "\n";
 	if (!write_all(c.in_fd, line)) {
 		c.alive = false;
 		return false;

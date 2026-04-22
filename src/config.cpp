@@ -412,7 +412,8 @@ bool SaveHistory(const json& messages, const std::string& model,
 		if (fd < 0) return false;
 		FILE* fp = ::fdopen(fd, "w");
 		if (!fp) { ::close(fd); return false; }
-		const std::string serialized = j.dump(2) + "\n";
+		const std::string serialized = j.dump(2, ' ', false,
+			json::error_handler_t::replace) + "\n";
 		const bool ok = std::fwrite(serialized.data(), 1,
 		                            serialized.size(), fp) == serialized.size();
 		std::fclose(fp); // also closes fd

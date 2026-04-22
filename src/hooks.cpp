@@ -142,7 +142,8 @@ Outcome Fire(Event event, const json& payload, const std::string& tool_name) {
 		enriched["event"] = event_name(event);
 		if (!tool_name.empty()) enriched["tool_name"] = tool_name;
 
-		const int rc = run_one(h.command, enriched.dump());
+		const int rc = run_one(h.command,
+		    enriched.dump(-1, ' ', false, json::error_handler_t::replace));
 		if (rc != 0) blocked = true;
 	}
 	return blocked ? Outcome::Block : Outcome::Proceed;
