@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-04-23
+
+### Fixed
+- **Remote-control duplicate message header** — `TryHandleSlashImmediate`
+  was printing `[remote who] text` unconditionally before checking whether
+  the message was a plain prompt, causing `ProcessUpdate` to print it a
+  second time. The print is now skipped for plain prompts so only slash
+  commands fully handled in `TryHandleSlashImmediate` emit the header there.
+- **Input prompt visible during Telegram turns** — libedit's `> ` prompt
+  lingered on the input row for the entire duration of a remote-control
+  turn. `ProcessUpdate` now calls `tui::ClearInputRow()` at the start to
+  blank it, and a RAII `CursorGuard` calls the new `tui::RepaintInputRow()`
+  on every exit path so the prompt is always restored once the turn
+  completes — replacing the previous scattered `\x1b"8"` calls.
+
 ## [1.6.1] - 2026-04-23
 
 ### Fixed

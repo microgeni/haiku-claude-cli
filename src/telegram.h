@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -16,6 +17,11 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+
+// Forward declaration so the StartThinkingUpdater signature can
+// reference api::StreamProgress without pulling in all of api.h
+// (which would create a circular include with api.h → telegram.h).
+namespace api { struct StreamProgress; }
 
 // Tiny Telegram Bot API client over libcurl. Enough for the v1.1
 // remote-control bridge: long-polling getUpdates and sending text
@@ -146,7 +152,12 @@ public:
 	// with a user-friendly explanation and returns false.
 	static bool ConfigIsValid(const config::Config& cfg, std::string* reason);
 
-	RemoteControl(const config::Config& cfg, const config::Auth& auth,
+	// authGetter is called before each Claude turn to obtain a
+	// fresh token — pass a lambda that returns the REPL's own
+	// auth variable so Telegram piggybacks on the session that
+	// is already being refreshed by the interactive loop.
+	RemoteControl(const config::Config& cfg,
+				  std::function<config::Auth()> authGetter,
 				  const std::string& custom_system);
 	~RemoteControl();
 	RemoteControl(const RemoteControl&) = delete;
@@ -162,19 +173,41 @@ public:
 	void AcquireTurn();
 	void ReleaseTurn();
 
+	// Register a provider that returns a read-only snapshot of the
+	// local REPL's `messages` array.  When set, ProcessUpdate prepends
+	// this shared context before the Telegram user's own thread so
+	// Claude sees both sides of the conversation on every remote turn.
+	//
+	// The lambda is called under the turn lock (AcquireTurn has
+	// already been acquired), so the snapshot is always consistent
+	// with the just-finished local turn — no additional mutex needed.
+	// Passing nullptr (or never calling this) restores the original
+	// silo behaviour where each Telegram user has independent context.
+	void SetSharedHistory(std::function<nlohmann::json()> provider);
+
 	// Mirror a locally-initiated turn to the primary Telegram chat.
-	// Call order: MirrorPrompt() before api::SendWithTools starts,
-	// then MirrorToPrimary() after it returns, or MirrorCancel() if
-	// the turn was aborted.
+	// Call order (all called from the local REPL turn, after
+	// AcquireTurn() so the turn lock is already held):
+	//   1. MirrorPrompt()  — sends "> text" + placeholder to Telegram.
+	//   2. StartThinkingUpdater(progress) — starts the animated
+	//      placeholder thread, pinned to the caller's StreamProgress.
+	//   3. api::SendWithTools(…)
+	//   4. StopThinkingUpdater() — joins the updater thread.
+	//   5. ReleaseTurn()   — MUST be after StopThinkingUpdater.
+	//   6. MirrorToPrimary() or MirrorCancel().
 	void MirrorPrompt(const std::string& user_text);
 	void MirrorToPrimary(const std::string& assistant_text);
 	void MirrorCancel();
 
 	// Animate the primary chat's "thinking" placeholder while a
-	// local turn is in progress. StartThinkingUpdater is called
-	// from MirrorPrompt; StopThinkingUpdater from the terminating
-	// MirrorToPrimary / MirrorCancel.
-	void StartThinkingUpdater();
+	// local turn is in progress. `progress` must remain valid for
+	// the lifetime of the updater thread — pass the StreamProgress
+	// that lives on the same stack frame as api::SendWithTools so
+	// the pointer is guaranteed live until StopThinkingUpdater()
+	// returns. Pass nullptr to suppress streaming-text updates (dot
+	// animation only).
+	// StopThinkingUpdater() must be called before ReleaseTurn().
+	void StartThinkingUpdater(api::StreamProgress* progress);
 	void StopThinkingUpdater();
 
 private:
@@ -200,10 +233,14 @@ private:
 	std::atomic<bool>            fUpdaterRunning { false };
 	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
-	config::Auth                 fAuth;
+	std::function<config::Auth()> fAuthGetter;
 	std::string                  fCustomSystem;
 	std::string                  fCfgModel;
 	int                          fCfgMaxTokens;
+	// Optional provider for the local REPL's shared message history.
+	// Set via SetSharedHistory(); null means each Telegram user has
+	// independent context (the original silo behaviour).
+	std::function<nlohmann::json()> fSharedHistory;
 	std::map<int64_t, nlohmann::json> fUserMessages;
 	std::atomic<bool>            fRunning { false };
 	std::thread                  fPoller;

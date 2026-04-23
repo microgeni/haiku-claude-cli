@@ -99,6 +99,13 @@ void PositionCursorForInput();
 // status frame isn't active.
 void ClearInputRow();
 
+// Write `prompt` to the fixed input row (N-2) so it is visible
+// while libedit is blocked waiting for the next keypress (e.g.
+// after a remote-control Telegram turn blanked the row). The cursor
+// is left just after the prompt text. libedit will naturally
+// overwrite this on its next redraw. No-op when frame is inactive.
+void RepaintInputRow(const std::string& prompt);
+
 // Position the cursor at the bottom of the scroll region
 // (row N-4 when the 4-row frame is active) so subsequent stdout
 // writes flow into the chat history area instead of bleeding

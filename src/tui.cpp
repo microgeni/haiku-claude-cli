@@ -281,6 +281,18 @@ void ClearInputRow() {
 			  << "\x1b[2K" << std::flush;
 }
 
+void RepaintInputRow(const std::string& prompt) {
+	// Write the prompt string directly onto the fixed input row (N-2)
+	// so it is visible while libedit is blocked. libedit will
+	// overwrite this on its next redraw — no coordination needed.
+	if (!g_status_bar_active) return;
+	if (g_term_dirty) refresh_dims();
+	if (g_cached_term_rows < kStatusBarRows + 1) return;
+	const int input_row = g_cached_term_rows - 2; // N-2
+	std::cout << "\x1b[" << input_row << ";1H"
+			  << "\x1b[2K" << prompt << std::flush;
+}
+
 void PositionCursorForChat() {
 	// Move cursor to the scroll-region bottom (N-4) so spinner and
 	// response output scrolls into chat history above the fixed frame.
