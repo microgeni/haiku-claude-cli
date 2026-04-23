@@ -429,35 +429,58 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			messages = snapshot;
 			continue;
 		}
-		// Echo the user's local prompt to Telegram immediately.
-		if (remote && remote->Running()) {
-			remote->MirrorPrompt(line);
-		}
 
-		// Set up stream progress so the remote-control thinking
-		// updater can show live streaming text on the phone side.
+		// StreamProgress lives here so its lifetime covers the
+		// entire window [AcquireTurn … ReleaseTurn].
 		api::StreamProgress stream_progress;
-		if (remote && remote->Running())
-			api::g_stream_progress = &stream_progress;
-
-		// Serialise against any concurrent Telegram-origin turn via
-		// the turn-token. AcquireTurn() blocks only until the
-		// current Telegram turn finishes (if one is running).
 		api::SendResult result;
+
 		if (remote && remote->Running()) {
+			// Correct ordering for bidirectional Telegram/console turns:
+			//
+			//  1. AcquireTurn() — block until any running Telegram
+			//     turn finishes.  Everything below is protected by
+			//     the turn lock so no Telegram turn can start.
+			//
+			//  2. Set g_stream_progress while the lock is held so
+			//     a Telegram turn that starts right after
+			//     ReleaseTurn() cannot race our assignment.
+			//
+			//  3. MirrorPrompt() — now safe: no Telegram updater
+			//     thread is running, and g_stream_progress already
+			//     points to our StreamProgress.
+			//
+			//  4. StartThinkingUpdater(&stream_progress) — pass the
+			//     pointer directly; the thread never touches the
+			//     global and cannot pick up a stale or wrong object.
+			//
+			//  5. SendWithTools()
+			//
+			//  6. StopThinkingUpdater() — joins the updater thread
+			//     while we still hold the turn lock and while
+			//     stream_progress is still on our stack.
+			//
+			//  7. g_stream_progress = nullptr — nulled before
+			//     ReleaseTurn() so an incoming Telegram turn never
+			//     races our write.
+			//
+			//  8. ReleaseTurn() — Telegram turns may now proceed;
+			//     g_stream_progress is guaranteed null.
+			//
+			//  9. MirrorToPrimary() / MirrorCancel() — outside the
+			//     lock, just Telegram API calls.
 			remote->AcquireTurn();
-			if (remote->Running()) {
-				result = api::SendWithTools(auth, model, max_tokens, messages, system_for_turn);
-				remote->ReleaseTurn();
-			} else {
-				remote->ReleaseTurn();
-				result = api::SendWithTools(auth, model, max_tokens, messages, system_for_turn);
-			}
+			api::g_stream_progress = &stream_progress;
+			remote->MirrorPrompt(line);
+			remote->StartThinkingUpdater(&stream_progress);
+			result = api::SendWithTools(auth, model, max_tokens, messages, system_for_turn);
+			remote->StopThinkingUpdater();
+			api::g_stream_progress = nullptr;
+			remote->ReleaseTurn();
 		} else {
 			result = api::SendWithTools(auth, model, max_tokens, messages, system_for_turn);
 		}
 
-		api::g_stream_progress = nullptr;
 		const double elapsed = std::chrono::duration<double>(
 			std::chrono::steady_clock::now() - turn_start).count();
 

@@ -18,6 +18,11 @@
 
 #include "config.h"
 
+// Forward declaration so the StartThinkingUpdater signature can
+// reference api::StreamProgress without pulling in all of api.h
+// (which would create a circular include with api.h → telegram.h).
+namespace api { struct StreamProgress; }
+
 // Tiny Telegram Bot API client over libcurl. Enough for the v1.1
 // remote-control bridge: long-polling getUpdates and sending text
 // back via sendMessage.
@@ -169,18 +174,28 @@ public:
 	void ReleaseTurn();
 
 	// Mirror a locally-initiated turn to the primary Telegram chat.
-	// Call order: MirrorPrompt() before api::SendWithTools starts,
-	// then MirrorToPrimary() after it returns, or MirrorCancel() if
-	// the turn was aborted.
+	// Call order (all called from the local REPL turn, after
+	// AcquireTurn() so the turn lock is already held):
+	//   1. MirrorPrompt()  — sends "> text" + placeholder to Telegram.
+	//   2. StartThinkingUpdater(progress) — starts the animated
+	//      placeholder thread, pinned to the caller's StreamProgress.
+	//   3. api::SendWithTools(…)
+	//   4. StopThinkingUpdater() — joins the updater thread.
+	//   5. ReleaseTurn()   — MUST be after StopThinkingUpdater.
+	//   6. MirrorToPrimary() or MirrorCancel().
 	void MirrorPrompt(const std::string& user_text);
 	void MirrorToPrimary(const std::string& assistant_text);
 	void MirrorCancel();
 
 	// Animate the primary chat's "thinking" placeholder while a
-	// local turn is in progress. StartThinkingUpdater is called
-	// from MirrorPrompt; StopThinkingUpdater from the terminating
-	// MirrorToPrimary / MirrorCancel.
-	void StartThinkingUpdater();
+	// local turn is in progress. `progress` must remain valid for
+	// the lifetime of the updater thread — pass the StreamProgress
+	// that lives on the same stack frame as api::SendWithTools so
+	// the pointer is guaranteed live until StopThinkingUpdater()
+	// returns. Pass nullptr to suppress streaming-text updates (dot
+	// animation only).
+	// StopThinkingUpdater() must be called before ReleaseTurn().
+	void StartThinkingUpdater(api::StreamProgress* progress);
 	void StopThinkingUpdater();
 
 private:

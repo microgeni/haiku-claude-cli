@@ -491,7 +491,9 @@ void RemoteControl::ReleaseTurn() {
 
 // Send the user's local prompt to the primary Telegram chat
 // immediately — before Claude starts working — so the phone side
-// sees what is being asked in real time.
+// sees what is being asked in real time. Caller must then call
+// StartThinkingUpdater(progress) to animate the placeholder, and
+// StopThinkingUpdater() before ReleaseTurn().
 void RemoteControl::MirrorPrompt(const std::string& user_text) {
 	if (!fRunning.load()) return;
 	if (fPrimaryUserId == 0) return;
@@ -500,7 +502,10 @@ void RemoteControl::MirrorPrompt(const std::string& user_text) {
 	fPrimaryThinkingMsgId = fClient.SendMessageWithId(
 		fPrimaryUserId,
 		"\xE2\x8F\xB3 thinking\xE2\x80\xA6"); // ⏳ thinking…
-	StartThinkingUpdater();
+	// NOTE: StartThinkingUpdater() is NOT called here. The caller
+	// (session.cpp InteractiveLoop) calls it explicitly after
+	// AcquireTurn() so the updater thread is never alive concurrently
+	// with a Telegram-origin turn.
 }
 
 void RemoteControl::MirrorToPrimary(const std::string& assistant_text) {
@@ -533,10 +538,15 @@ void RemoteControl::MirrorCancel() {
 	fPrimaryThinkingMsgId = 0;
 }
 
-void RemoteControl::StartThinkingUpdater() {
+void RemoteControl::StartThinkingUpdater(api::StreamProgress* progress) {
 	if (fPrimaryThinkingMsgId == 0) return;
+	// progress is captured by value (it's a pointer) so the thread
+	// holds exactly the StreamProgress that belongs to the current
+	// turn's stack frame. It must remain valid until
+	// StopThinkingUpdater() returns — callers guarantee this by
+	// stopping the thread before the stack frame unwinds.
 	fUpdaterRunning.store(true);
-	fUpdaterThread = std::thread([this]() {
+	fUpdaterThread = std::thread([this, progress]() {
 		int  dot_phase    = 0;
 		int  last_version = 0;
 		static const char* kDots[] = {
@@ -551,15 +561,14 @@ void RemoteControl::StartThinkingUpdater() {
 			if (api::g_telegram_updater_paused.load()) continue;
 			const int64_t ph = fPrimaryThinkingMsgId;
 			if (ph == 0) break;
-			if (api::g_stream_progress) {
-				const int v = api::g_stream_progress->version.load(
-					std::memory_order_relaxed);
+			if (progress) {
+				const int v = progress->version.load(std::memory_order_relaxed);
 				if (v != last_version) {
 					last_version = v;
 					std::string snap;
 					{
-						std::lock_guard<std::mutex> lk(api::g_stream_progress->mu);
-						snap = api::g_stream_progress->text;
+						std::lock_guard<std::mutex> lk(progress->mu);
+						snap = progress->text;
 					}
 					if (!snap.empty()) {
 						fClient.EditMessageText(fPrimaryUserId, ph,
