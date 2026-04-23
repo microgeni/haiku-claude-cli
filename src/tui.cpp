@@ -64,15 +64,15 @@ std::string                g_status_bar_text;
 // Number of rows reserved at the bottom of the terminal for the
 // fixed frame:
 //
-//   row N-1  separator rule (dimmed ─)
-//   row N    status content (model · counts · Remote Control)
+//   row N-3  top separator  (─── between scroll region and input)
+//   row N-2  input row      (persistent "> " prompt, drawn by libedit)
+//   row N-1  bottom separator (─── between input and status)
+//   row N    status content  (model · counts · Remote Control)
 //
-// The scroll region is rows 1..N-2. Chat history, streamed output,
-// and the input prompt all live inside it. The cursor naturally
-// sits at the bottom of the scroll region; after the user submits
-// a line the session re-draws a fresh "> " at row N-2 and moves
-// the cursor to row N-3 so spinner and response scroll above it.
-constexpr int              kStatusBarRows      = 2;
+// The scroll region is rows 1..N-4. Chat history, spinner, and
+// streamed responses all scroll within that region. libedit draws
+// the prompt inside the fixed input row (N-2) which never scrolls.
+constexpr int              kStatusBarRows      = 4;
 
 extern "C" void sigwinch_handler(int) {
 	g_term_dirty     = 1;
@@ -129,8 +129,10 @@ namespace {
 // Build the ANSI sequences for drawing the fixed frame. Pulled out
 // so both InstallStatusBar and RedrawStatusBar share the logic.
 // Caller is responsible for flushing stdout after calling.
-// Only two rows are drawn:
-//   row N-1 : separator rule (dimmed ─)
+// Four rows are drawn:
+//   row N-3 : top separator   (─── between scroll chat and input)
+//   row N-2 : input row       (blank here; libedit draws "> " on demand)
+//   row N-1 : bottom separator(─── between input and status)
 //   row N   : status text
 void draw_fixed_frame(int rows, int cols, const std::string& status) {
 	if (rows < kStatusBarRows + 1) return;
@@ -143,7 +145,16 @@ void draw_fixed_frame(int rows, int cols, const std::string& status) {
 	rule.reserve(cols * 3);
 	for (int i = 0; i < cols; ++i) rule += "\xE2\x94\x80"; // ─
 
-	// Row N-1: separator between chat area and status bar.
+	// Row N-3: top separator.
+	std::cout << "\x1b[" << (rows - 3) << ";1H"
+			  << "\x1b[2K"
+			  << Muted(rule);
+
+	// Row N-2: input row — clear it; libedit redraws "> " when active.
+	std::cout << "\x1b[" << (rows - 2) << ";1H"
+			  << "\x1b[2K";
+
+	// Row N-1: bottom separator.
 	std::cout << "\x1b[" << (rows - 1) << ";1H"
 			  << "\x1b[2K"
 			  << Muted(rule);
@@ -213,15 +224,14 @@ void TeardownStatusBar() {
 	if (!g_status_bar_active) return;
 	g_status_bar_active = false;
 
-	// Restore the full scroll region and clear our two fixed rows,
-	// then move the cursor below them so anything the caller (or
-	// the shell) prints next doesn't overwrite the stale footer.
-	// Also ensure the cursor is visible again in case we exited
-	// mid-stream with the cursor hidden.
 	const int rows = g_cached_term_rows > 0 ? g_cached_term_rows : 24;
 	std::cout << "\x1b[r"                         // reset scroll region
+			  << "\x1b[" << (rows - 3) << ";1H"
+			  << "\x1b[2K"                        // clear top separator row
+			  << "\x1b[" << (rows - 2) << ";1H"
+			  << "\x1b[2K"                        // clear input row
 			  << "\x1b[" << (rows - 1) << ";1H"
-			  << "\x1b[2K"                        // clear separator row
+			  << "\x1b[2K"                        // clear bottom separator row
 			  << "\x1b[" << rows << ";1H"
 			  << "\x1b[2K"                        // clear status row
 			  << "\x1b[" << rows << ";1H"
@@ -230,10 +240,9 @@ void TeardownStatusBar() {
 }
 
 void EmitChatRule() {
-	// With the flowing-prompt layout the separator lives at row N-1
-	// (fixed, outside the scroll region) and in-chat turn rules are
-	// emitted directly into the scrolling history. Always emit one
-	// when the caller asks — no duplication risk.
+	// Emit a turn-separator rule into the scroll region. Always
+	// position at the scroll-region bottom (N-4) first so the \n
+	// triggers a DECSTBM scroll on every turn.
 	if (!g_color_enabled) return;
 	if (!isatty(fileno(stdout))) return;
 	const int width = TerminalWidth();
@@ -242,16 +251,10 @@ void EmitChatRule() {
 	rule.reserve(width * 3);
 	for (int i = 0; i < width; ++i) rule += "\xE2\x94\x80"; // ─
 
-	// Always position at the scroll-region bottom before emitting the
-	// rule. Without this, the first turn (and any turn where the
-	// cursor was left mid-screen by a previous operation) would print
-	// the rule at the wrong row: the \n would NOT trigger a DECSTBM
-	// scroll, leaving the rule stranded near the top and a blank gap
-	// between it and the input prompt below.
 	if (g_status_bar_active) {
 		if (g_term_dirty) refresh_dims();
 		if (g_cached_term_rows >= kStatusBarRows + 1) {
-			const int bottom = g_cached_term_rows - kStatusBarRows;
+			const int bottom = g_cached_term_rows - kStatusBarRows; // N-4
 			std::cout << "\x1b[" << bottom << ";1H";
 		}
 	}
@@ -259,44 +262,33 @@ void EmitChatRule() {
 }
 
 void PositionCursorForInput() {
-	// Input row is the scroll-region bottom (N-2). Libedit draws
-	// the prompt there; on Enter its \n scrolls the typed text into
-	// history and leaves cursor back at N-2.
+	// Move cursor to the fixed input row (N-2) so libedit can draw
+	// the "> " prompt there. This row is outside the scroll region.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int bottom = g_cached_term_rows - kStatusBarRows;
-	std::cout << "\x1b[" << bottom << ";1H"
-			  << std::flush;
+	const int input_row = g_cached_term_rows - 2; // N-2 (fixed)
+	std::cout << "\x1b[" << input_row << ";1H" << "\x1b[2K" << std::flush;
 }
 
 void ClearInputRow() {
-	// After the user submits, libedit's \r\n has already scrolled
-	// ">" hi" to row N-3 and left cursor at N-2.  Re-draw an empty
-	// "> " at N-2 so the prompt stays visible, then step cursor UP
-	// to N-3 so the spinner and response run above the prompt line.
+	// Erase the fixed input row (N-2) ready for libedit to redraw.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int bottom = g_cached_term_rows - kStatusBarRows; // N-2
-	std::cout << "\x1b[" << bottom << ";1H"
-			  << "\x1b[2K"
-			  << std::flush;
+	const int input_row = g_cached_term_rows - 2; // N-2
+	std::cout << "\x1b[" << input_row << ";1H"
+			  << "\x1b[2K" << std::flush;
 }
 
 void PositionCursorForChat() {
-	// Place cursor one row above the input row (N-3) so spinner and
-	// streaming response appear above the persistent "> " prompt.
-	// Uses cursor-up from the input row position rather than an
-	// absolute jump so it works when g_status_bar_active is false too.
+	// Move cursor to the scroll-region bottom (N-4) so spinner and
+	// response output scrolls into chat history above the fixed frame.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
-	if (g_cached_term_rows < kStatusBarRows + 2) return;
-	// Move to input row first (in case we're not there), then up 1.
-	const int input_row = g_cached_term_rows - kStatusBarRows; // N-2
-	std::cout << "\x1b[" << input_row << ";1H"  // ensure at N-2
-			  << "\x1b[1A"                        // up to N-3
-			  << std::flush;
+	if (g_cached_term_rows < kStatusBarRows + 1) return;
+	const int chat_bottom = g_cached_term_rows - kStatusBarRows; // N-4
+	std::cout << "\x1b[" << chat_bottom << ";1H" << std::flush;
 }
 
 void HideCursor() {

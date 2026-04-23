@@ -259,29 +259,33 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
-			// Echo the pending line at N-2 (\n scrolls it to N-3),
-			// second \n scrolls it to N-4, then cursor-up to N-3.
-			std::cout << tui::UserPrompt() << line << "\n"
-			          << "\n" << std::flush;
+			// Erase the input row, echo "> line" into the scroll
+			// region at N-4 (where \n scrolls it into history),
+			// then position at N-4 for spinner / response.
+			tui::ClearInputRow();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
 			tui::PositionCursorForChat();
 		} else {
-			// libedit draws the prompt and user input at row N-2
-			// (the scroll-region bottom). On Enter its \r\n scrolls
-			// "> hi" to row N-3 and leaves cursor at N-2 col 1.
+			// libedit draws the prompt at the fixed input row N-2
+			// (outside the scroll region). On Enter libedit moves the
+			// cursor down but does NOT trigger a DECSTBM scroll (N-2
+			// is outside the scroll region). "> hi" stays at N-2.
 			//
-			// Emit \n at N-2 to scroll "> hi" one more row up into
-			// history (N-4), leaving N-3 blank. Then move cursor up
-			// to N-3 so the spinner and response appear above row N-2,
-			// giving the visual layout: history | "> hi" | spinner | "> ".
+			// After ReadMessage() returns we:
+			//  1. Erase N-2 (wipes "> hi" from the fixed row).
+			//  2. Echo "> hi\n" at the scroll-region bottom N-4 so
+			//     it scrolls into history.
+			//  3. Position cursor at N-4 for spinner / response.
 			if (!repl::ReadMessage(tui::UserPrompt(),
 									tui::ContinuationPrompt(),
 									line)) {
-				std::cout << "\n";
+				tui::ClearInputRow();
 				break;
 			}
-			// \n at scroll-bottom scrolls "> hi" (now at N-3) to N-4.
-			std::cout << "\n" << std::flush;
-			// Move cursor up to N-3 for spinner / response.
+			tui::ClearInputRow();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
 			tui::PositionCursorForChat();
 		}
 
