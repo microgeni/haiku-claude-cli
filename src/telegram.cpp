@@ -12,6 +12,7 @@
 #include "api.h"
 #include "commands.h"
 #include "models.h"
+#include "oauth.h"
 #include "tools.h"
 #include "tui.h"
 
@@ -928,22 +929,50 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 
 	// Refresh OAuth token before each call so long-running bridge
 	// sessions don't hit 401 after the token expires (~8 hours).
+	// ResolveAuth() already tries the refresh_token automatically;
+	// it only returns None when the refresh is dead too. In that
+	// case, use the local console to run a full re-login flow
+	// (open browser URL, paste code) rather than making the user
+	// SSH in manually.
 	fAuth = config::ResolveAuth();
 	if (fAuth.kind == config::AuthKind::None) {
-		updater_running.store(false);
-		if (updater.joinable()) updater.join();
-		api::g_stream_progress = nullptr;
-		msgs = snapshot;
-		const std::string err =
-			"(error: authentication expired \xE2\x80\x94 run `claude logout && claude login` on the server)";
-		if (placeholder_id)
-			fClient.EditMessageText(u.chat_id, placeholder_id, err);
-		else if (!g_muted.load())
-			fClient.SendMessage(u.chat_id, err);
-		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
-		fActiveChatId.store(fPrimaryUserId);
+		// Notify Telegram that we need console interaction.
+		if (!g_muted.load()) {
+			const std::string notice =
+				"\xF0\x9F\x94\x91 OAuth token expired. Re-authenticating on the server console \xE2\x80\x94 check there now\xE2\x80\xA6";
+			if (placeholder_id)
+				fClient.EditMessageText(u.chat_id, placeholder_id, notice);
+			else
+				fClient.SendMessage(u.chat_id, notice);
+		}
+		config::LogLine("remote-control: OAuth expired, running DoLogin() on console");
+		// Restore the terminal to a usable state while DoLogin()
+		// prompts the user and reads a line from stdin.
 		std::cout << "\x1b""8" << std::flush;
-		return;
+		const int login_rc = DoLogin();
+		if (login_rc == 0) fAuth = config::ResolveAuth();
+
+		if (fAuth.kind == config::AuthKind::None) {
+			// Login failed or user aborted — give up on this turn.
+			updater_running.store(false);
+			if (updater.joinable()) updater.join();
+			api::g_stream_progress = nullptr;
+			msgs = snapshot;
+			const std::string err =
+				"(error: re-authentication failed \xE2\x80\x94 run `claude logout && claude login` on the server)";
+			if (!g_muted.load()) {
+				if (placeholder_id)
+					fClient.EditMessageText(u.chat_id, placeholder_id, err);
+				else
+					fClient.SendMessage(u.chat_id, err);
+			}
+			config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
+			fActiveChatId.store(fPrimaryUserId);
+			return;
+		}
+		// Login succeeded — restore cursor position and continue.
+		std::cout << "\x1b""7";
+		tui::PositionCursorForChat();
 	}
 
 	std::cout << tui::ClaudePrompt();
