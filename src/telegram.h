@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -146,7 +147,12 @@ public:
 	// with a user-friendly explanation and returns false.
 	static bool ConfigIsValid(const config::Config& cfg, std::string* reason);
 
-	RemoteControl(const config::Config& cfg, const config::Auth& auth,
+	// authGetter is called before each Claude turn to obtain a
+	// fresh token — pass a lambda that returns the REPL's own
+	// auth variable so Telegram piggybacks on the session that
+	// is already being refreshed by the interactive loop.
+	RemoteControl(const config::Config& cfg,
+				  std::function<config::Auth()> authGetter,
 				  const std::string& custom_system);
 	~RemoteControl();
 	RemoteControl(const RemoteControl&) = delete;
@@ -200,7 +206,7 @@ private:
 	std::atomic<bool>            fUpdaterRunning { false };
 	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
-	config::Auth                 fAuth;
+	std::function<config::Auth()> fAuthGetter;
 	std::string                  fCustomSystem;
 	std::string                  fCfgModel;
 	int                          fCfgMaxTokens;

@@ -12,7 +12,6 @@
 #include "api.h"
 #include "commands.h"
 #include "models.h"
-#include "oauth.h"
 #include "tools.h"
 #include "tui.h"
 
@@ -348,10 +347,11 @@ bool RemoteControl::ConfigIsValid(const config::Config& cfg, std::string* reason
 	return true;
 }
 
-RemoteControl::RemoteControl(const config::Config& cfg, const config::Auth& auth,
+RemoteControl::RemoteControl(const config::Config& cfg,
+                              std::function<config::Auth()> authGetter,
                               const std::string& custom_system)
 	: fClient(cfg.telegram.value("bot_token", std::string{})),
-	  fAuth(auth),
+	  fAuthGetter(std::move(authGetter)),
 	  fCustomSystem(custom_system),
 	  fCfgModel(cfg.model),
 	  fCfgMaxTokens(cfg.max_tokens) {
@@ -684,7 +684,7 @@ bool RemoteControl::TryHandleSlashImmediate(const Update& u_in) {
 	double rc_thresh = 60.0;
 	std::vector<std::string> rc_urls;
 	json   rc_prices = json::object();
-	commands::LoopCtx ctx{fAuth, fCfgMaxTokens, fCustomSystem, rc_prices,
+	commands::LoopCtx ctx{fAuthGetter(), fCfgMaxTokens, fCustomSystem, rc_prices,
 	                      fCfgModel, rc_turn, rc_in, rc_out,
 	                      messages_ref, rc_urls, rc_notify, rc_thresh,
 	                      {}};
@@ -693,6 +693,7 @@ bool RemoteControl::TryHandleSlashImmediate(const Update& u_in) {
 
 	std::cout.rdbuf(old_buf);
 	const std::string output = capture.str();
+
 
 	if (action == commands::SlashAction::Passthrough) {
 		// The command wants Claude to handle it — let WorkLoop proceed
@@ -825,7 +826,7 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 		double rc_thresh = 60.0;
 		std::vector<std::string> rc_urls;
 		json   rc_prices = json::object();
-		commands::LoopCtx ctx{fAuth, fCfgMaxTokens, fCustomSystem, rc_prices,
+		commands::LoopCtx ctx{fAuthGetter(), fCfgMaxTokens, fCustomSystem, rc_prices,
 		                      fCfgModel, rc_turn, rc_in, rc_out,
 		                      messages_ref, rc_urls, rc_notify, rc_thresh,
 		                      {}};
@@ -927,57 +928,34 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	api::g_non_interactive_tools             = true;
 	api::g_non_interactive_allow_destructive = fAllowDestructive;
 
-	// Refresh OAuth token before each call so long-running bridge
-	// sessions don't hit 401 after the token expires (~8 hours).
-	// ResolveAuth() already tries the refresh_token automatically;
-	// it only returns None when the refresh is dead too. In that
-	// case, use the local console to run a full re-login flow
-	// (open browser URL, paste code) rather than making the user
-	// SSH in manually.
-	fAuth = config::ResolveAuth();
-	if (fAuth.kind == config::AuthKind::None) {
-		// Notify Telegram that we need console interaction.
+	// Piggyback on the REPL session's auth — the interactive loop
+	// already calls ResolveAuth() before every turn, so fAuthGetter
+	// returns a token that is always live and never needs refreshing
+	// here. If for some reason it comes back None (e.g. standalone
+	// bridge mode with a dead API key), bail with a clear error.
+	const config::Auth auth = fAuthGetter();
+	if (auth.kind == config::AuthKind::None) {
+		updater_running.store(false);
+		if (updater.joinable()) updater.join();
+		api::g_stream_progress = nullptr;
+		msgs = snapshot;
+		const std::string err =
+			"(error: authentication expired \xE2\x80\x94 run `claude logout && claude login` on the server)";
 		if (!g_muted.load()) {
-			const std::string notice =
-				"\xF0\x9F\x94\x91 OAuth token expired. Re-authenticating on the server console \xE2\x80\x94 check there now\xE2\x80\xA6";
 			if (placeholder_id)
-				fClient.EditMessageText(u.chat_id, placeholder_id, notice);
+				fClient.EditMessageText(u.chat_id, placeholder_id, err);
 			else
-				fClient.SendMessage(u.chat_id, notice);
+				fClient.SendMessage(u.chat_id, err);
 		}
-		config::LogLine("remote-control: OAuth expired, running DoLogin() on console");
-		// Restore the terminal to a usable state while DoLogin()
-		// prompts the user and reads a line from stdin.
+		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
+		fActiveChatId.store(fPrimaryUserId);
 		std::cout << "\x1b""8" << std::flush;
-		const int login_rc = DoLogin();
-		if (login_rc == 0) fAuth = config::ResolveAuth();
-
-		if (fAuth.kind == config::AuthKind::None) {
-			// Login failed or user aborted — give up on this turn.
-			updater_running.store(false);
-			if (updater.joinable()) updater.join();
-			api::g_stream_progress = nullptr;
-			msgs = snapshot;
-			const std::string err =
-				"(error: re-authentication failed \xE2\x80\x94 run `claude logout && claude login` on the server)";
-			if (!g_muted.load()) {
-				if (placeholder_id)
-					fClient.EditMessageText(u.chat_id, placeholder_id, err);
-				else
-					fClient.SendMessage(u.chat_id, err);
-			}
-			config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
-			fActiveChatId.store(fPrimaryUserId);
-			return;
-		}
-		// Login succeeded — restore cursor position and continue.
-		std::cout << "\x1b""7";
-		tui::PositionCursorForChat();
+		return;
 	}
 
 	std::cout << tui::ClaudePrompt();
 	const std::string effective_system = config::ComposeSystem(fCustomSystem);
-	const auto result = api::SendWithTools(fAuth, fCfgModel, fCfgMaxTokens,
+	const auto result = api::SendWithTools(auth, fCfgModel, fCfgMaxTokens,
 										    msgs, effective_system);
 	std::cout << "\n";
 	api::g_non_interactive_tools = false;

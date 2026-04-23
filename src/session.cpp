@@ -356,7 +356,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 							try {
 								if (!remote) {
 									remote = std::make_unique<telegram::RemoteControl>(
-										cfg, auth, custom_system);
+										cfg,
+										[&auth]{ return auth; },
+										custom_system);
 								}
 								if (remote->Start()) {
 									std::cout << tui::Meta("[remote control: telegram poller started]") << "\n";
