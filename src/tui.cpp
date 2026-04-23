@@ -232,6 +232,20 @@ void EmitChatRule() {
 	std::string rule;
 	rule.reserve(width * 3);
 	for (int i = 0; i < width; ++i) rule += "\xE2\x94\x80"; // ─
+
+	// Always position at the scroll-region bottom before emitting the
+	// rule. Without this, the first turn (and any turn where the
+	// cursor was left mid-screen by a previous operation) would print
+	// the rule at the wrong row: the \n would NOT trigger a DECSTBM
+	// scroll, leaving the rule stranded near the top and a blank gap
+	// between it and the input prompt below.
+	if (g_status_bar_active) {
+		if (g_term_dirty) refresh_dims();
+		if (g_cached_term_rows >= kStatusBarRows + 1) {
+			const int bottom = g_cached_term_rows - kStatusBarRows;
+			std::cout << "\x1b[" << bottom << ";1H";
+		}
+	}
 	std::cout << Dim(rule) << "\n" << std::flush;
 }
 
@@ -1026,6 +1040,14 @@ void MarkdownRenderer::Emit(const std::string& s) {
 			fSpinner->Stop();
 			fSpinner = nullptr;
 		}
+		// Print the response prefix (e.g. "claude> ") immediately
+		// after the spinner clears its line, so the label appears
+		// right before the first streamed character and is never
+		// overwritten by a spinner tick.
+		if (!fResponsePrefix.empty()) {
+			std::cout << fResponsePrefix << std::flush;
+			fResponsePrefix.clear();
+		}
 	}
 	std::cout << s << std::flush;
 }
@@ -1281,14 +1303,18 @@ void MarkdownRenderer::RenderLine(const std::string& line) {
 
 void MarkdownRenderer::Write(const std::string& chunk) {
 	if (!g_color_enabled) {
-		std::cout << chunk << std::flush;
 		if (!fFirstOutputDone) {
 			fFirstOutputDone = true;
 			if (fSpinner) {
 				fSpinner->Stop();
 				fSpinner = nullptr;
 			}
+			if (!fResponsePrefix.empty()) {
+				std::cout << fResponsePrefix << std::flush;
+				fResponsePrefix.clear();
+			}
 		}
+		std::cout << chunk << std::flush;
 		return;
 	}
 

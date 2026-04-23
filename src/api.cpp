@@ -678,6 +678,10 @@ SendResult SendConversation(const config::Auth& auth, const std::string& model,
 	spinner.SetLiveInputTokens(&state.input_tokens);
 	state.spinner = &spinner;
 	state.renderer.SetSpinner(&spinner);
+	// The "claude> " label is printed by the renderer the moment the
+	// first streamed character arrives — after the spinner has cleared
+	// its own line — so the spinner never overwrites it.
+	state.renderer.SetResponsePrefix(tui::ClaudePrompt());
 
 	curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);

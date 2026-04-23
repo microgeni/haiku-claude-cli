@@ -230,6 +230,11 @@ class MarkdownRenderer {
 public:
 	MarkdownRenderer();
 	void SetSpinner(Spinner* s) { fSpinner = s; }
+	// Optional prefix emitted immediately before the first streamed
+	// character (after the spinner clears itself). Used to print the
+	// "claude> " label at the exact moment output begins, so the
+	// spinner does not overwrite it.
+	void SetResponsePrefix(const std::string& prefix) { fResponsePrefix = prefix; }
 	void Write(const std::string& chunk);
 	void Flush();
 private:
@@ -246,6 +251,7 @@ private:
 
 	std::string fLineBuffer;
 	std::string fCodeBlockLang;
+	std::string fResponsePrefix;
 	bool        fInCodeBlock     = false;
 	bool        fFirstOutputDone = false;
 	Spinner*    fSpinner           = nullptr;

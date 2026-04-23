@@ -401,7 +401,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		const json snapshot = messages;
 		messages.push_back({{"role", "user"}, {"content", api_content}});
 
-		std::cout << "\n" << tui::ClaudePrompt();
+		std::cout << "\n" << std::flush;
 		const auto turn_start = std::chrono::steady_clock::now();
 		const std::string system_for_turn = config::ComposeSystem(custom_system);
 		// Refresh the OAuth token if it's about to expire so
