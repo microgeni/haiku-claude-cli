@@ -179,6 +179,15 @@ void InstallStatusBar(const std::string& initial_status) {
 	g_status_bar_active = true;
 	g_status_bar_text   = initial_status;
 
+	// Clear the screen before installing the fixed frame so that any
+	// output from a previous session (e.g. an earlier ./build/claude
+	// run in the same tmux pane or terminal window) doesn't bleed into
+	// the new session's scroll region and show as phantom prompt lines.
+	// \x1b[H positions cursor at row 1 col 1; \x1b[2J erases the
+	// entire screen. Both happen before the DECSTBM scroll region is
+	// set, so the erase covers the full terminal.
+	std::cout << "\x1b[H\x1b[2J" << std::flush;
+
 	apply_scroll_region(g_cached_term_rows);
 	draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
 	std::cout.flush();

@@ -171,30 +171,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	const double compact_auto_threshold  = cfg.compact_auto_threshold;
 	const int    compact_window_override = cfg.compact_context_window;
 
-	if (resume) {
-		if (auto loaded = config::LoadHistory(resume_name); loaded && loaded->is_array()) {
-			messages = *loaded;
-			const std::string hist_path = resume_name.empty()
-				? paths::HistoryPath()
-				: paths::NamedHistoryPath(resume_name);
-			std::cout << tui::Meta("[resumed " + std::to_string(messages.size())
-								   + " messages from " + hist_path + "]")
-					  << "\n";
-		} else {
-			const std::string hist_path = resume_name.empty()
-				? paths::HistoryPath()
-				: paths::NamedHistoryPath(resume_name);
-			std::cout << tui::Meta("[no prior session to resume at " + hist_path + "]")
-					  << "\n";
-		}
-	}
-
-	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
-			  << tui::Dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
-			  << tui::Dim(IsSshSession()
-				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
-				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
-
 	std::unique_ptr<telegram::RemoteControl> remote;
 
 	// Remote-control is off by default even when telegram config is
@@ -219,11 +195,39 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 								 session_output, max_tokens, right);
 	};
 
-	// Install the fixed-bottom status frame after the welcome text.
+	// Install the fixed-bottom status frame first. This clears the
+	// terminal so output from any prior session in the same window
+	// doesn't bleed into the new session's scroll area.
 	tui::InstallStatusBar(compose_status());
 	struct StatusFrameGuard {
 		~StatusFrameGuard() { tui::TeardownStatusBar(); }
 	} status_frame_guard;
+
+	// Welcome text and optional resume header appear inside the
+	// newly-cleared scroll region.
+	if (resume) {
+		if (auto loaded = config::LoadHistory(resume_name); loaded && loaded->is_array()) {
+			messages = *loaded;
+			const std::string hist_path = resume_name.empty()
+				? paths::HistoryPath()
+				: paths::NamedHistoryPath(resume_name);
+			std::cout << tui::Meta("[resumed " + std::to_string(messages.size())
+								   + " messages from " + hist_path + "]")
+					  << "\n";
+		} else {
+			const std::string hist_path = resume_name.empty()
+				? paths::HistoryPath()
+				: paths::NamedHistoryPath(resume_name);
+			std::cout << tui::Meta("[no prior session to resume at " + hist_path + "]")
+					  << "\n";
+		}
+	}
+
+	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
+			  << tui::Dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
+			  << tui::Dim(IsSshSession()
+				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
+				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
 
 	// Drain any bytes the terminal sent in response to our init
 	// sequences (bracketed-paste enable, DECSTBM scroll-region setup,
