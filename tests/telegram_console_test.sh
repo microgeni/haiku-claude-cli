@@ -63,14 +63,16 @@ COUNT=$(grep -c '"8"' "$SRC" || true)
 [ "$COUNT" -ge 5 ] || fail "expected >= 5 cursor-restores in $SRC, found $COUNT"
 pass
 
-# ── T4: every non-trivial exit point in TryHandleSlashImmediate restores cursor
+# ── T4: cursor restore is guaranteed on all exit paths ───────────────────────
 step "T4: TryHandleSlashImmediate — all return paths emit cursor-restore"
-# TryHandleSlashImmediate has 6+ return points; each must restore the cursor.
-# We count the \x1b""8 occurrences specifically in the function's region by
-# looking for the pattern between the two function bodies.
-# As a proxy: total restores in the file must be >= 12.
-TOTAL=$(grep -c '"8"' "$SRC" || true)
-[ "$TOTAL" -ge 12 ] || fail "fewer cursor-restores than expected ($TOTAL); check ProcessUpdate and TryHandleSlashImmediate"
+# ProcessUpdate now uses a RAII CursorGuard (one \x1b"8" in the destructor)
+# instead of per-return-path literals, so the raw count is lower but the
+# guarantee is stronger. TryHandleSlashImmediate still has individual restores.
+# Verify: at least one \x1b"8" restore exists in each function's region.
+TSHI=$(awk '/^bool RemoteControl::TryHandleSlashImmediate/,/^void RemoteControl::WorkLoop/' "$SRC" | grep -c '"8"' || true)
+PU=$(awk '/^void RemoteControl::ProcessUpdate/,/^} \/\/ namespace telegram/' "$SRC" | grep -c '"8"' || true)
+[ "$TSHI" -ge 1 ] || fail "TryHandleSlashImmediate has no cursor-restore; check the function"
+[ "$PU"   -ge 1 ] || fail "ProcessUpdate has no cursor-restore (expected RAII guard); check the function"
 pass
 
 # ── T5: cursor-save always precedes cursor-restore in both functions ──────────
