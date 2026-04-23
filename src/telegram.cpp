@@ -638,8 +638,14 @@ bool RemoteControl::TryHandleSlashImmediate(const Update& u_in) {
 	const std::string who = u.username.empty()
 		? std::to_string(u.user_id) : u.username;
 
-	// Mirror the incoming command to the local terminal (same as
-	// ProcessUpdate does for every message).
+	if (u.text.empty() || u.text.front() != '/') {
+		// Plain prompt — must go through AcquireTurn / ProcessUpdate,
+		// which will print the [remote who] header itself.  Return now
+		// without printing so ProcessUpdate doesn't duplicate it.
+		return false;
+	}
+
+	// Mirror the incoming slash command to the local terminal.
 	std::cout << "\x1b""7";
 	tui::PositionCursorForChat();
 	std::cout << tui::Meta("[remote " + who + "] " + u.text) << "\n";
@@ -712,8 +718,9 @@ bool RemoteControl::TryHandleSlashImmediate(const Update& u_in) {
 		// The command wants Claude to handle it — let WorkLoop proceed
 		// through AcquireTurn.  ProcessUpdate will re-run the full
 		// dispatch (including the passthrough rewrite) so we do NOT
-		// consume the update here; just tell the caller it needs the
-		// turn lock.
+		// consume the update here; restore cursor and tell caller it
+		// needs the turn lock.
+		std::cout << "\x1b""8" << std::flush;
 		return false;
 	}
 
@@ -780,10 +787,23 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 		? std::to_string(u.user_id) : u.username;
 
 	// The poller thread runs while libedit has the cursor parked on
-	// the fixed input row. Route all our stdout writes into the
-	// scroll region via save/restore so we don't clobber the prompt.
+	// the fixed input row. Save cursor, blank the input row so the
+	// "> " prompt doesn't sit there while we process the remote turn,
+	// then move to the scroll-region bottom for chat output.
+	// The RAII guard restores the cursor and repaints the prompt on
+	// every exit path so libedit's input row is always visible again.
 	std::cout << "\x1b""7";          // save cursor
+	tui::ClearInputRow();            // hide libedit's "> " prompt
 	tui::PositionCursorForChat();
+	const std::string user_prompt = tui::UserPrompt();
+	struct CursorGuard {
+		const std::string& prompt;
+		~CursorGuard() {
+			tui::RepaintInputRow(prompt);  // restore "> " on the input row
+			std::cout << "\x1b""8" << std::flush; // restore saved cursor pos
+		}
+	} _guard{user_prompt};
+
 	std::cout << tui::Meta("[remote " + who + "] " + u.text) << "\n";
 	config::LogLine("remote-control rx user=" + std::to_string(u.user_id)
 			 + " text=" + u.text);
@@ -793,7 +813,6 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 			fClient.SendMessage(u.chat_id,
 				"Remote muted. No replies until /unmute.");
 		}
-		std::cout << "\x1b""8" << std::flush;
 		return;
 	}
 	if (u.text == "/unmute") {
@@ -801,17 +820,14 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 			fClient.SendMessage(u.chat_id,
 				"Remote unmuted. Replies will be sent again.");
 		}
-		std::cout << "\x1b""8" << std::flush;
 		return;
 	}
 	// /new is a Telegram-friendly alias for /clear.
 	if (u.text == "/new") {
 		fUserMessages.erase(u.user_id);
 		TgSend(u.chat_id, "(history cleared)");
-		std::cout << "\x1b""8" << std::flush;
 		return;
 	}
-
 	// All other slash commands go through commands::Dispatch.
 	// /exit, /quit, and /remote-control are not meaningful here.
 	if (!u.text.empty() && u.text.front() == '/') {
@@ -819,7 +835,6 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 		if (cmd_word == "/exit" || cmd_word == "/quit"
 				|| cmd_word == "/remote-control") {
 			TgSend(u.chat_id, "(" + cmd_word + " is not available from Telegram)");
-			std::cout << "\x1b""8" << std::flush;
 			return;
 		}
 		const std::string dispatched = (u.text == "/start") ? "/help" : u.text;
@@ -874,7 +889,6 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 			// Fall through to normal prompt handling below.
 		} else {
 			if (!plain.empty()) TgSend(u.chat_id, plain);
-			std::cout << "\x1b""8" << std::flush;
 			return;
 		}
 	}
@@ -982,7 +996,6 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 		}
 		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
 		fActiveChatId.store(fPrimaryUserId);
-		std::cout << "\x1b""8" << std::flush;
 		return;
 	}
 
@@ -1008,7 +1021,6 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 		else if (!g_muted.load())
 			fClient.SendMessage(u.chat_id, err);
 		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
-		std::cout << "\x1b""8" << std::flush;
 		return;
 	}
 
@@ -1034,7 +1046,6 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	}
 	config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
 			 + " out=" + std::to_string(result.output_tokens));
-	std::cout << "\x1b""8" << std::flush;
 }
 
 } // namespace telegram
