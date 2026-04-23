@@ -259,20 +259,29 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
-			// Echo the pending line (from a drag-drop or hook) as if
-			// the user had typed it, then advance past it.
-			std::cout << tui::UserPrompt() << line << "\n";
+			// Echo the pending line at N-2 (\n scrolls it to N-3),
+			// second \n scrolls it to N-4, then cursor-up to N-3.
+			std::cout << tui::UserPrompt() << line << "\n"
+			          << "\n" << std::flush;
 			tui::PositionCursorForChat();
 		} else {
-			// libedit draws the prompt and the user's input inside the
-			// scroll region. After Enter the cursor is on a new line
-			// inside the chat area — no erase or re-echo needed.
+			// libedit draws the prompt and user input at row N-2
+			// (the scroll-region bottom). On Enter its \r\n scrolls
+			// "> hi" to row N-3 and leaves cursor at N-2 col 1.
+			//
+			// Emit \n at N-2 to scroll "> hi" one more row up into
+			// history (N-4), leaving N-3 blank. Then move cursor up
+			// to N-3 so the spinner and response appear above row N-2,
+			// giving the visual layout: history | "> hi" | spinner | "> ".
 			if (!repl::ReadMessage(tui::UserPrompt(),
 									tui::ContinuationPrompt(),
 									line)) {
 				std::cout << "\n";
 				break;
 			}
+			// \n at scroll-bottom scrolls "> hi" (now at N-3) to N-4.
+			std::cout << "\n" << std::flush;
+			// Move cursor up to N-3 for spinner / response.
 			tui::PositionCursorForChat();
 		}
 

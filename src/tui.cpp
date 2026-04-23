@@ -68,9 +68,10 @@ std::string                g_status_bar_text;
 //   row N    status content (model · counts · Remote Control)
 //
 // The scroll region is rows 1..N-2. Chat history, streamed output,
-// and the ❯ input prompt all live inside it. The cursor naturally
-// sits at the bottom of the scroll region, so the prompt is always
-// right there — no absolute jump needed between turns.
+// and the input prompt all live inside it. The cursor naturally
+// sits at the bottom of the scroll region; after the user submits
+// a line the session re-draws a fresh "> " at row N-2 and moves
+// the cursor to row N-3 so spinner and response scroll above it.
 constexpr int              kStatusBarRows      = 2;
 
 extern "C" void sigwinch_handler(int) {
@@ -156,9 +157,8 @@ void draw_fixed_frame(int rows, int cols, const std::string& status) {
 }
 
 // Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows)
-// so the bottom four rows stay fixed, and place the cursor at
-// the bottom of the scroll region so subsequent output lands in
-// the chat history area.
+// so the fixed rows stay outside the scroll area. Places the cursor
+// at the bottom of the scroll region ready for chat output.
 void apply_scroll_region(int rows) {
 	if (rows < kStatusBarRows + 1) return;
 	const int top    = 1;
@@ -259,9 +259,9 @@ void EmitChatRule() {
 }
 
 void PositionCursorForInput() {
-	// In the flowing-prompt model the input row is the bottom of the
-	// scroll region (row N-2). Positioning here lets libedit draw
-	// the prompt at the natural end of chat history.
+	// Input row is the scroll-region bottom (N-2). Libedit draws
+	// the prompt there; on Enter its \n scrolls the typed text into
+	// history and leaves cursor back at N-2.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
@@ -271,24 +271,32 @@ void PositionCursorForInput() {
 }
 
 void ClearInputRow() {
+	// After the user submits, libedit's \r\n has already scrolled
+	// ">" hi" to row N-3 and left cursor at N-2.  Re-draw an empty
+	// "> " at N-2 so the prompt stays visible, then step cursor UP
+	// to N-3 so the spinner and response run above the prompt line.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	// In the flowing-prompt model the input row is inside the scroll
-	// region. The submitted text is already visible in chat history
-	// (libedit drew it). We just need to ensure the cursor is at the
-	// bottom of the scroll region, ready for streaming output.
-	const int bottom = g_cached_term_rows - kStatusBarRows;
+	const int bottom = g_cached_term_rows - kStatusBarRows; // N-2
 	std::cout << "\x1b[" << bottom << ";1H"
+			  << "\x1b[2K"
 			  << std::flush;
 }
 
 void PositionCursorForChat() {
+	// Place cursor one row above the input row (N-3) so spinner and
+	// streaming response appear above the persistent "> " prompt.
+	// Uses cursor-up from the input row position rather than an
+	// absolute jump so it works when g_status_bar_active is false too.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
-	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int bottom = g_cached_term_rows - kStatusBarRows;
-	std::cout << "\x1b[" << bottom << ";1H" << std::flush;
+	if (g_cached_term_rows < kStatusBarRows + 2) return;
+	// Move to input row first (in case we're not there), then up 1.
+	const int input_row = g_cached_term_rows - kStatusBarRows; // N-2
+	std::cout << "\x1b[" << input_row << ";1H"  // ensure at N-2
+			  << "\x1b[1A"                        // up to N-3
+			  << std::flush;
 }
 
 void HideCursor() {
