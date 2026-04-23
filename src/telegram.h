@@ -173,6 +173,18 @@ public:
 	void AcquireTurn();
 	void ReleaseTurn();
 
+	// Register a provider that returns a read-only snapshot of the
+	// local REPL's `messages` array.  When set, ProcessUpdate prepends
+	// this shared context before the Telegram user's own thread so
+	// Claude sees both sides of the conversation on every remote turn.
+	//
+	// The lambda is called under the turn lock (AcquireTurn has
+	// already been acquired), so the snapshot is always consistent
+	// with the just-finished local turn — no additional mutex needed.
+	// Passing nullptr (or never calling this) restores the original
+	// silo behaviour where each Telegram user has independent context.
+	void SetSharedHistory(std::function<nlohmann::json()> provider);
+
 	// Mirror a locally-initiated turn to the primary Telegram chat.
 	// Call order (all called from the local REPL turn, after
 	// AcquireTurn() so the turn lock is already held):
@@ -225,6 +237,10 @@ private:
 	std::string                  fCustomSystem;
 	std::string                  fCfgModel;
 	int                          fCfgMaxTokens;
+	// Optional provider for the local REPL's shared message history.
+	// Set via SetSharedHistory(); null means each Telegram user has
+	// independent context (the original silo behaviour).
+	std::function<nlohmann::json()> fSharedHistory;
 	std::map<int64_t, nlohmann::json> fUserMessages;
 	std::atomic<bool>            fRunning { false };
 	std::thread                  fPoller;

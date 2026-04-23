@@ -489,6 +489,10 @@ void RemoteControl::ReleaseTurn() {
 	fTurnCv.notify_all();
 }
 
+void RemoteControl::SetSharedHistory(std::function<json()> provider) {
+	fSharedHistory = std::move(provider);
+}
+
 // Send the user's local prompt to the primary Telegram chat
 // immediately — before Claude starts working — so the phone side
 // sees what is being asked in real time. Caller must then call
@@ -934,6 +938,26 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	const json snapshot = msgs;
 	msgs.push_back({{"role", "user"}, {"content", u.text}});
 
+	// Build the call array passed to SendWithTools. When a shared-
+	// history provider is registered (the common interactive case),
+	// prepend a snapshot of the local REPL's messages so Claude sees
+	// the full conversation from both sides. The snapshot is taken
+	// here, under the turn lock, so it is always consistent with the
+	// most recently completed local turn. The Telegram user's own
+	// thread (fUserMessages) is appended after the shared prefix so
+	// their prior remote exchanges are preserved too.
+	//
+	// When no provider is set (standalone bridge or explicitly
+	// disabled), fall back to the original per-user silo behaviour.
+	json call_msgs;
+	if (fSharedHistory) {
+		call_msgs = fSharedHistory(); // snapshot of local messages[]
+		// Append this user's Telegram-side thread on top.
+		for (const auto& m : msgs) call_msgs.push_back(m);
+	} else {
+		call_msgs = msgs;
+	}
+
 	api::g_non_interactive_tools             = true;
 	api::g_non_interactive_allow_destructive = fAllowDestructive;
 
@@ -965,7 +989,7 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	std::cout << tui::ClaudePrompt();
 	const std::string effective_system = config::ComposeSystem(fCustomSystem);
 	const auto result = api::SendWithTools(auth, fCfgModel, fCfgMaxTokens,
-										    msgs, effective_system);
+										    call_msgs, effective_system);
 	std::cout << "\n";
 	api::g_non_interactive_tools = false;
 	// Restore active chat to primary so any local-turn permission

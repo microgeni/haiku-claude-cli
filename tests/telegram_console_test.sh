@@ -14,7 +14,7 @@
 #
 #   bash tests/telegram_console_test.sh
 #
-# 23 tests total; up to 3 may be skipped when TELEGRAM_API_BASE is unset.
+# 27 tests total; up to 3 may be skipped when TELEGRAM_API_BASE is unset.
 
 set -euo pipefail
 
@@ -235,6 +235,41 @@ else
     [ "$rc" -lt 128 ] || fail "binary crashed with TELEGRAM_API_BASE set (exit $rc)"
     pass
 fi
+
+# ── T24: SetSharedHistory method is declared in telegram.h ───────────────────
+step "T24: SetSharedHistory() is declared in telegram.h"
+grep -q 'SetSharedHistory' src/telegram.h \
+    || fail 'SetSharedHistory not declared in telegram.h'
+pass
+
+# ── T25: fSharedHistory member exists in telegram.h ──────────────────────────
+step "T25: fSharedHistory member variable is declared in telegram.h"
+grep -q 'fSharedHistory' src/telegram.h \
+    || fail 'fSharedHistory not found in telegram.h'
+pass
+
+# ── T26: ProcessUpdate builds call_msgs from shared history + user thread ─────
+step "T26: ProcessUpdate uses call_msgs (shared history + user thread) for SendWithTools"
+grep -q 'call_msgs' "$SRC" || fail 'call_msgs not found in telegram.cpp'
+CALL_MSGS_COUNT=$(grep -c 'call_msgs' "$SRC" || true)
+[ "$CALL_MSGS_COUNT" -ge 3 ] \
+    || fail "expected >= 3 call_msgs references (declare, build, pass), found $CALL_MSGS_COUNT"
+grep -q 'fSharedHistory' "$SRC" \
+    || fail 'fSharedHistory not referenced in telegram.cpp'
+grep -q 'SetSharedHistory' src/session.cpp \
+    || fail 'SetSharedHistory not called in session.cpp'
+pass
+
+# ── T27: SetSharedHistory registered immediately after Start() in session.cpp ─
+step "T27: SetSharedHistory registered within 10 lines of remote->Start() in session.cpp"
+LINE_START=$(grep -n 'remote->Start()' src/session.cpp | head -1 | cut -d: -f1)
+LINE_SET=$(grep -n 'SetSharedHistory' src/session.cpp | head -1 | cut -d: -f1)
+[ -n "$LINE_START" ] || fail 'remote->Start() not found in session.cpp'
+[ -n "$LINE_SET"   ] || fail 'SetSharedHistory not found in session.cpp'
+DIFF=$(( LINE_SET - LINE_START ))
+[ "$DIFF" -ge 1 ] && [ "$DIFF" -le 10 ] \
+    || fail "SetSharedHistory (L$LINE_SET) should be within 10 lines of Start() (L$LINE_START), diff=$DIFF"
+pass
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed, $SKIP skipped ==="

@@ -364,6 +364,13 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 									std::cout << tui::Meta("[remote control: telegram poller started]") << "\n";
 									config::LogLine("remote control started from /remote-control");
 									tui::SetStatusBar(compose_status());
+									// Share a read-only snapshot of the local
+									// messages array with the Telegram bridge so
+									// Claude sees both sides of the conversation
+									// on every remote turn (ping-pong fix).
+									remote->SetSharedHistory([&messages]() -> json {
+										return messages;
+									});
 								} else {
 									std::cout << tui::Meta("[remote control: Start() returned false — already running?]") << "\n";
 								}
