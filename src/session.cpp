@@ -171,30 +171,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	const double compact_auto_threshold  = cfg.compact_auto_threshold;
 	const int    compact_window_override = cfg.compact_context_window;
 
-	if (resume) {
-		if (auto loaded = config::LoadHistory(resume_name); loaded && loaded->is_array()) {
-			messages = *loaded;
-			const std::string hist_path = resume_name.empty()
-				? paths::HistoryPath()
-				: paths::NamedHistoryPath(resume_name);
-			std::cout << tui::Meta("[resumed " + std::to_string(messages.size())
-								   + " messages from " + hist_path + "]")
-					  << "\n";
-		} else {
-			const std::string hist_path = resume_name.empty()
-				? paths::HistoryPath()
-				: paths::NamedHistoryPath(resume_name);
-			std::cout << tui::Meta("[no prior session to resume at " + hist_path + "]")
-					  << "\n";
-		}
-	}
-
-	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
-			  << tui::Dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
-			  << tui::Dim(IsSshSession()
-				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
-				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
-
 	std::unique_ptr<telegram::RemoteControl> remote;
 
 	// Remote-control is off by default even when telegram config is
@@ -219,11 +195,39 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 								 session_output, max_tokens, right);
 	};
 
-	// Install the fixed-bottom status frame after the welcome text.
+	// Install the fixed-bottom status frame first. This clears the
+	// terminal so output from any prior session in the same window
+	// doesn't bleed into the new session's scroll area.
 	tui::InstallStatusBar(compose_status());
 	struct StatusFrameGuard {
 		~StatusFrameGuard() { tui::TeardownStatusBar(); }
 	} status_frame_guard;
+
+	// Welcome text and optional resume header appear inside the
+	// newly-cleared scroll region.
+	if (resume) {
+		if (auto loaded = config::LoadHistory(resume_name); loaded && loaded->is_array()) {
+			messages = *loaded;
+			const std::string hist_path = resume_name.empty()
+				? paths::HistoryPath()
+				: paths::NamedHistoryPath(resume_name);
+			std::cout << tui::Meta("[resumed " + std::to_string(messages.size())
+								   + " messages from " + hist_path + "]")
+					  << "\n";
+		} else {
+			const std::string hist_path = resume_name.empty()
+				? paths::HistoryPath()
+				: paths::NamedHistoryPath(resume_name);
+			std::cout << tui::Meta("[no prior session to resume at " + hist_path + "]")
+					  << "\n";
+		}
+	}
+
+	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
+			  << tui::Dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
+			  << tui::Dim(IsSshSession()
+				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
+				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
 
 	// Drain any bytes the terminal sent in response to our init
 	// sequences (bracketed-paste enable, DECSTBM scroll-region setup,
@@ -248,27 +252,39 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		// drags the terminal window.
 		if (tui::ConsumeResizePending()) tui::RedrawStatusBar();
 		tui::ShowCursor();
-		tui::EmitChatRule();
 		tui::PositionCursorForInput();
 
 		std::string line;
 		if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
-			// Echo the pending line (from a drag-drop or hook) as if
-			// the user had typed it, then advance past it.
-			std::cout << tui::UserPrompt() << line << "\n";
+			// Erase the input row, echo "> line" into the scroll
+			// region at N-4 (where \n scrolls it into history),
+			// then position at N-4 for spinner / response.
+			tui::ClearInputRow();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
 			tui::PositionCursorForChat();
 		} else {
-			// libedit draws the prompt and the user's input inside the
-			// scroll region. After Enter the cursor is on a new line
-			// inside the chat area — no erase or re-echo needed.
+			// libedit draws the prompt at the fixed input row N-2
+			// (outside the scroll region). On Enter libedit moves the
+			// cursor down but does NOT trigger a DECSTBM scroll (N-2
+			// is outside the scroll region). "> hi" stays at N-2.
+			//
+			// After ReadMessage() returns we:
+			//  1. Erase N-2 (wipes "> hi" from the fixed row).
+			//  2. Echo "> hi\n" at the scroll-region bottom N-4 so
+			//     it scrolls into history.
+			//  3. Position cursor at N-4 for spinner / response.
 			if (!repl::ReadMessage(tui::UserPrompt(),
 									tui::ContinuationPrompt(),
 									line)) {
-				std::cout << "\n";
+				tui::ClearInputRow();
 				break;
 			}
+			tui::ClearInputRow();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
 			tui::PositionCursorForChat();
 		}
 
@@ -401,7 +417,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		const json snapshot = messages;
 		messages.push_back({{"role", "user"}, {"content", api_content}});
 
-		std::cout << "\n" << tui::ClaudePrompt();
 		const auto turn_start = std::chrono::steady_clock::now();
 		const std::string system_for_turn = config::ComposeSystem(custom_system);
 		// Refresh the OAuth token if it's about to expire so
@@ -443,7 +458,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		api::g_stream_progress = nullptr;
 		const double elapsed = std::chrono::duration<double>(
 			std::chrono::steady_clock::now() - turn_start).count();
-		std::cout << "\n";
 
 		if (result.exit_code != 0) {
 			messages = snapshot;
@@ -502,8 +516,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			}
 		}
 
-		char status[256];
-		// Append cache info when either creation or read is non-zero.
 		char cache_tail[64] = {0};
 		const int c_read  = result.cache_read_input_tokens;
 		const int c_write = result.cache_creation_input_tokens;
@@ -511,13 +523,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			std::snprintf(cache_tail, sizeof(cache_tail),
 				"  \xC2\xB7 cache R:%d W:%d", c_read, c_write);
 		}
-		std::snprintf(status, sizeof(status),
-			"[turn %d  %.1fs  in %d/%d  out %d/%d%s]",
-			turn_count, elapsed,
-			result.input_tokens, session_input,
-			result.output_tokens, session_output,
-			cache_tail);
-		std::cout << tui::Meta(status) << "\n";
 		config::LogLine("turn " + std::to_string(turn_count)
 				 + " model=" + model
 				 + " in=" + std::to_string(result.input_tokens)

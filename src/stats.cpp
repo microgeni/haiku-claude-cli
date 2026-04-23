@@ -304,8 +304,10 @@ std::string FormatDisplay() {
 	const double bfsCostSaved = (savedTokens / 1'000'000.0) * 3.0;
 
 	// Cache hit ratio (cache-read tokens vs. total input tokens).
+	// Clamp to [0,100] — cache tokens can exceed in_tok when the API
+	// counts them independently, which would otherwise produce >100%.
 	const int cacheHitPct = in_tok > 0
-		? static_cast<int>((c_read_tok * 100) / in_tok)
+		? std::min(100LL, (c_read_tok * 100) / in_tok)
 		: 0;
 	// Cost avoided by cache: tokens served from cache paid $0.30/M
 	// instead of $3.00/M — saving $2.70/M per cache-read token.
@@ -360,7 +362,7 @@ std::string FormatDisplay() {
 	std::snprintf(buf, sizeof(buf), "%3d%%", cacheHitPct);
 	out += "  Cache hits   " + RenderBar(cacheHitPct) + " " + buf + "\n";
 	std::snprintf(buf, sizeof(buf),
-		"               %s tokens served from cache  →  saved $%.4f\n",
+		"               %s tokens served from cache  →  saved $%.2f\n",
 		thousands(c_read_tok).c_str(), cacheCostSaved);
 	out += buf;
 
@@ -368,7 +370,7 @@ std::string FormatDisplay() {
 	std::snprintf(buf, sizeof(buf), "%3d%%", bfsPct);
 	out += "  BFS savings  " + RenderBar(bfsPct)      + " " + buf + "\n";
 	std::snprintf(buf, sizeof(buf),
-		"               %s tokens avoided via BFS    →  saved $%.4f\n",
+		"               %s tokens avoided via BFS    →  saved $%.2f\n",
 		thousands(savedTokens).c_str(), bfsCostSaved);
 	out += buf;
 
@@ -376,7 +378,7 @@ std::string FormatDisplay() {
 	std::snprintf(buf, sizeof(buf), "%3d%%", outPct);
 	out += "  Output share " + RenderBar(outPct)       + " " + buf + "\n";
 	std::snprintf(buf, sizeof(buf),
-		"               %s output tokens             →  cost  $%.4f\n",
+		"               %s output tokens             →  cost  $%.2f\n",
 		thousands(out_tok).c_str(), outCost);
 	out += buf;
 
@@ -401,7 +403,7 @@ std::string FormatDisplay() {
 	if (savedTokens > 0) {
 		std::snprintf(buf, sizeof(buf),
 			"  \xE2\x94\x83  Saved %s tokens  (%d%% of full-read cost)\n"
-			"  \xE2\x94\x83  Cost avoided: $%.4f\n"
+			"  \xE2\x94\x83  Cost avoided: $%.2f\n"
 			"  \xE2\x94\x83\n"
 			"  \xE2\x94\x83  %d BFS calls  (%d ReadAttr + %d Query)\n"
 			"  \xE2\x94\x83  Tokens they used:     %8s\n"
