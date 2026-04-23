@@ -926,6 +926,26 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	api::g_non_interactive_tools             = true;
 	api::g_non_interactive_allow_destructive = fAllowDestructive;
 
+	// Refresh OAuth token before each call so long-running bridge
+	// sessions don't hit 401 after the token expires (~8 hours).
+	fAuth = config::ResolveAuth();
+	if (fAuth.kind == config::AuthKind::None) {
+		updater_running.store(false);
+		if (updater.joinable()) updater.join();
+		api::g_stream_progress = nullptr;
+		msgs = snapshot;
+		const std::string err =
+			"(error: authentication expired \xE2\x80\x94 run `claude logout && claude login` on the server)";
+		if (placeholder_id)
+			fClient.EditMessageText(u.chat_id, placeholder_id, err);
+		else if (!g_muted.load())
+			fClient.SendMessage(u.chat_id, err);
+		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
+		fActiveChatId.store(fPrimaryUserId);
+		std::cout << "\x1b""8" << std::flush;
+		return;
+	}
+
 	std::cout << tui::ClaudePrompt();
 	const std::string effective_system = config::ComposeSystem(fCustomSystem);
 	const auto result = api::SendWithTools(fAuth, fCfgModel, fCfgMaxTokens,
