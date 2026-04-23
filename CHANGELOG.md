@@ -6,6 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-04-23
+
+### Fixed
+- **TUI layout: 4-row fixed frame** — the status-bar frame is now
+  `separator / input / separator / status` (`kStatusBarRows = 4`).
+  `PositionCursorForInput()` moves to row N-2 (outside the scroll
+  region) so libedit's Enter key no longer triggers a DECSTBM scroll;
+  `PositionCursorForChat()` targets the scroll-region bottom (N-4) so
+  spinner and streamed responses always land in chat history.
+- **Spinner and `claude>` response appear above the input row** —
+  after the user submits, the spinner and response now scroll into
+  history above the fixed `>` prompt row rather than overwriting it.
+- **Blank line between prompt and spinner removed** — the spurious
+  `\n` before the API call that created a visible gap between the
+  user's input line and the spinner has been removed.
+- **Screen cleared on startup** — `InstallStatusBar()` now emits
+  `\x1b[H\x1b[2J` before applying DECSTBM and drawing the fixed
+  frame, preventing prior-session content bleeding into the viewport.
+  `InstallStatusBar()` is also called before the welcome text so the
+  welcome prints inside the clean scroll region.
+- **Turn-1 layout and `claude>` label erasure in tmux** — two
+  independent first-turn bugs fixed: `EmitChatRule()` unconditionally
+  moves to the scroll-region bottom before printing so the rule always
+  triggers a DECSTBM scroll; `ClaudePrompt()` is now emitted by
+  `MarkdownRenderer::Emit()` via `SetResponsePrefix()` rather than
+  before the spinner, preventing the spinner's `\r\x1b[2K` tick from
+  wiping the label on the very first character.
+- **Cache-hit % clamped to 100** — `/stats` bar reading no longer
+  exceeds 100 % when cache-read tokens reported by the API exceed
+  `in_tok`. Cost/savings lines now use `%.2f` instead of `%.4f`.
+
+### Refactored
+- **`[turn N]` line and in-chat rule removed from scroll history** —
+  both were redundant with the fixed status bar and top separator;
+  turn stats are still logged to the config log file and the status
+  bar is updated every turn.
+
 ## [1.6.0] - 2026-07-14
 
 ### Added
