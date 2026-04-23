@@ -525,14 +525,27 @@ void RemoteControl::MirrorToPrimary(const std::string& assistant_text) {
 		fPrimaryThinkingMsgId = 0;
 		return;
 	}
+
+	// Build an inline keyboard for any numbered options in the
+	// response so the Telegram user can tap to reply — same logic
+	// as ProcessUpdate uses for Telegram-origin turns.
+	std::vector<std::vector<Button>> keyboard;
+	const auto options = models::ExtractNumberedOptions(assistant_text);
+	for (const auto& opt : options) {
+		Button b;
+		b.text          = opt.first + ". " + opt.second;
+		b.callback_data = opt.first;
+		keyboard.push_back({ std::move(b) });
+	}
+
 	const int64_t ph = fPrimaryThinkingMsgId;
 	fPrimaryThinkingMsgId = 0;
 	if (!assistant_text.empty()) {
 		if (ph != 0) {
-			if (!fClient.EditMessageText(fPrimaryUserId, ph, assistant_text))
-				fClient.SendMessage(fPrimaryUserId, assistant_text);
+			if (!fClient.EditMessageText(fPrimaryUserId, ph, assistant_text, keyboard))
+				fClient.SendMessage(fPrimaryUserId, assistant_text, keyboard);
 		} else {
-			fClient.SendMessage(fPrimaryUserId, assistant_text);
+			fClient.SendMessage(fPrimaryUserId, assistant_text, keyboard);
 		}
 	} else if (ph != 0) {
 		fClient.EditMessageText(fPrimaryUserId, ph, "(no response)");
