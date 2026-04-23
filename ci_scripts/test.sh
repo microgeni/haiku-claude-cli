@@ -39,5 +39,13 @@ set -e
 echo "$out" | grep -qi "no authentication" || fail "error did not mention missing auth (got: $out)"
 echo "PASS"
 
+step "session state persistence tests"
+bash tests/session_state_test.sh
+echo "PASS"
+
+step "telegram/console interaction tests"
+bash tests/telegram_console_test.sh
+echo "PASS"
+
 echo
 echo "=== all tests passed ==="
