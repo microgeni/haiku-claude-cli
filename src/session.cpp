@@ -252,7 +252,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		// drags the terminal window.
 		if (tui::ConsumeResizePending()) tui::RedrawStatusBar();
 		tui::ShowCursor();
-		tui::EmitChatRule();
 		tui::PositionCursorForInput();
 
 		std::string line;
@@ -459,7 +458,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		api::g_stream_progress = nullptr;
 		const double elapsed = std::chrono::duration<double>(
 			std::chrono::steady_clock::now() - turn_start).count();
-		std::cout << "\n";
 
 		if (result.exit_code != 0) {
 			messages = snapshot;
@@ -518,8 +516,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			}
 		}
 
-		char status[256];
-		// Append cache info when either creation or read is non-zero.
 		char cache_tail[64] = {0};
 		const int c_read  = result.cache_read_input_tokens;
 		const int c_write = result.cache_creation_input_tokens;
@@ -527,13 +523,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			std::snprintf(cache_tail, sizeof(cache_tail),
 				"  \xC2\xB7 cache R:%d W:%d", c_read, c_write);
 		}
-		std::snprintf(status, sizeof(status),
-			"[turn %d  %.1fs  in %d/%d  out %d/%d%s]",
-			turn_count, elapsed,
-			result.input_tokens, session_input,
-			result.output_tokens, session_output,
-			cache_tail);
-		std::cout << tui::Meta(status) << "\n";
 		config::LogLine("turn " + std::to_string(turn_count)
 				 + " model=" + model
 				 + " in=" + std::to_string(result.input_tokens)
