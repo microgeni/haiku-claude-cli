@@ -371,6 +371,16 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 									remote->SetSharedHistory([&messages]() -> json {
 										return messages;
 									});
+									// Write-back: append each completed Telegram
+									// turn (user + assistant) into the local REPL
+									// messages[] so the exchange appears in the
+									// scroll history and is saved to history.json.
+									remote->SetSharedHistoryAppender(
+										[&messages, &model, &resume_name](json user_msg, json asst_msg) {
+											messages.push_back(std::move(user_msg));
+											messages.push_back(std::move(asst_msg));
+											config::SaveHistory(messages, model, resume_name);
+										});
 								} else {
 									std::cout << tui::Meta("[remote control: Start() returned false — already running?]") << "\n";
 								}

@@ -14,7 +14,8 @@
 #
 #   bash tests/telegram_console_test.sh
 #
-# 27 tests total; up to 3 may be skipped when TELEGRAM_API_BASE is unset.
+# 34 tests total; up to 3 may be skipped when TELEGRAM_API_BASE is unset.
+# T28–T34 cover the "Telegram turns visible in local scroll history" fix.
 
 set -euo pipefail
 
@@ -271,6 +272,78 @@ LINE_SET=$(grep -n 'SetSharedHistory' src/session.cpp | head -1 | cut -d: -f1)
 DIFF=$(( LINE_SET - LINE_START ))
 [ "$DIFF" -ge 1 ] && [ "$DIFF" -le 10 ] \
     || fail "SetSharedHistory (L$LINE_SET) should be within 10 lines of Start() (L$LINE_START), diff=$DIFF"
+pass
+
+# ── T28: SetSharedHistoryAppender is declared in telegram.h ──────────────────
+step "T28: SetSharedHistoryAppender() is declared in telegram.h"
+grep -q 'SetSharedHistoryAppender' src/telegram.h \
+    || fail 'SetSharedHistoryAppender not declared in telegram.h'
+pass
+
+# ── T29: fSharedHistoryAppend member is declared in telegram.h ───────────────
+step "T29: fSharedHistoryAppend member variable is declared in telegram.h"
+grep -q 'fSharedHistoryAppend' src/telegram.h \
+    || fail 'fSharedHistoryAppend not found in telegram.h'
+pass
+
+# ── T30: SetSharedHistoryAppender is implemented in telegram.cpp ─────────────
+step "T30: SetSharedHistoryAppender() is implemented in telegram.cpp"
+grep -q 'RemoteControl::SetSharedHistoryAppender' src/telegram.cpp \
+    || fail 'SetSharedHistoryAppender implementation not found in telegram.cpp'
+pass
+
+# ── T31: fSharedHistoryAppend is called in ProcessUpdate after success ────────
+step "T31: ProcessUpdate calls fSharedHistoryAppend after a successful turn"
+# After the fix, ProcessUpdate must invoke the appender with the user and
+# assistant messages.  Verify both the call site and the guard exist.
+grep -q 'fSharedHistoryAppend' src/telegram.cpp \
+    || fail 'fSharedHistoryAppend not referenced in telegram.cpp'
+APPEND_CALLS=$(grep -c 'fSharedHistoryAppend' src/telegram.cpp || true)
+# One definition (SetSharedHistoryAppender body) + at least one call site
+# in ProcessUpdate.
+[ "$APPEND_CALLS" -ge 2 ] \
+    || fail "expected >= 2 fSharedHistoryAppend references (setter + call), found $APPEND_CALLS"
+pass
+
+# ── T32: assistant reply is appended to msgs silo in ProcessUpdate ────────────
+step "T32: ProcessUpdate appends the assistant reply to the per-user message silo"
+# After the fix, ProcessUpdate must push the assistant message onto msgs
+# (the per-user Telegram silo) after SendWithTools succeeds.  We verify
+# that 'assistant_msg' is pushed onto msgs in the success path.
+grep -q 'assistant_msg' src/telegram.cpp \
+    || fail 'assistant_msg not found in telegram.cpp — assistant reply not appended'
+# Verify the push_back appears in ProcessUpdate's success path (after the
+# "error: Claude did not return a response" early-return block).
+LINE_ERR=$(grep -n 'Claude did not return a response' src/telegram.cpp | tail -1 | cut -d: -f1)
+LINE_PUSH=$(grep -n 'msgs.push_back.*assistant_msg\|assistant_msg.*msgs' src/telegram.cpp | head -1 | cut -d: -f1)
+[ -n "$LINE_ERR"  ] || fail 'error guard not found in telegram.cpp'
+[ -n "$LINE_PUSH" ] || fail 'msgs.push_back(assistant_msg) not found in telegram.cpp'
+[ "$LINE_PUSH" -gt "$LINE_ERR" ] \
+    || fail "assistant_msg push (L$LINE_PUSH) must come after the error guard (L$LINE_ERR)"
+pass
+
+# ── T33: SetSharedHistoryAppender is wired up in session.cpp ─────────────────
+step "T33: session.cpp calls SetSharedHistoryAppender after Start()"
+grep -q 'SetSharedHistoryAppender' src/session.cpp \
+    || fail 'SetSharedHistoryAppender not called in session.cpp'
+pass
+
+# ── T34: write-back lambda calls SaveHistory so history.json is updated ───────
+step "T34: write-back lambda in session.cpp calls config::SaveHistory"
+# The appender lambda must call SaveHistory so the Telegram-origin turn
+# is persisted to disk and survives --resume in a future session.
+# Verify that SaveHistory appears within the SetSharedHistoryAppender
+# lambda body (i.e. after the SetSharedHistoryAppender call site).
+LINE_SETTER=$(grep -n 'SetSharedHistoryAppender' src/session.cpp | head -1 | cut -d: -f1)
+LINE_SAVE=$(grep -n 'config::SaveHistory' src/session.cpp | awk -F: -v after="$LINE_SETTER" '$1 > after {print $1; exit}')
+[ -n "$LINE_SETTER" ] || fail 'SetSharedHistoryAppender call not found in session.cpp'
+[ -n "$LINE_SAVE"   ] \
+    || fail "config::SaveHistory not found after SetSharedHistoryAppender in session.cpp — history.json will not be updated for Telegram turns"
+# Confirm SaveHistory appears close by (within 15 lines of the setter),
+# i.e. it is inside the lambda, not somewhere unrelated later.
+DIFF=$(( LINE_SAVE - LINE_SETTER ))
+[ "$DIFF" -le 15 ] \
+    || fail "SaveHistory (L$LINE_SAVE) is $DIFF lines after SetSharedHistoryAppender (L$LINE_SETTER) — check it is inside the lambda"
 pass
 
 echo

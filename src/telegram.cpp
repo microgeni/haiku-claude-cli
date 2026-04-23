@@ -493,6 +493,11 @@ void RemoteControl::SetSharedHistory(std::function<json()> provider) {
 	fSharedHistory = std::move(provider);
 }
 
+void RemoteControl::SetSharedHistoryAppender(
+		std::function<void(json, json)> appender) {
+	fSharedHistoryAppend = std::move(appender);
+}
+
 // Send the user's local prompt to the primary Telegram chat
 // immediately — before Claude starts working — so the phone side
 // sees what is being asked in real time. Caller must then call
@@ -1044,6 +1049,22 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 			fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
 		}
 	}
+
+	// Append the assistant reply to this user's Telegram message
+	// silo so their subsequent turns have full context.
+	const json assistant_msg = {{"role", "assistant"}, {"content", result.assistant_text}};
+	msgs.push_back(assistant_msg);
+
+	// Write the user+assistant pair back into the local REPL's
+	// shared messages[] so the exchange appears in the local scroll
+	// history and is saved to history.json. The user message was
+	// already pushed onto msgs above (before SendWithTools); we
+	// retrieve it as the last-but-one element of msgs.
+	if (fSharedHistoryAppend) {
+		const json user_msg = msgs[msgs.size() - 2]; // the user turn we pushed
+		fSharedHistoryAppend(user_msg, assistant_msg);
+	}
+
 	config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
 			 + " out=" + std::to_string(result.output_tokens));
 }
