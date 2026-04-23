@@ -6,6 +6,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-07-15
+
+### Fixed
+- **Telegram-origin turns now appear in local scroll history** —
+  `ProcessUpdate` had two gaps: (1) the assistant reply was never
+  appended to `fUserMessages[user_id]`, so per-user remote context
+  accumulated user messages only; (2) there was no write-back path
+  from `ProcessUpdate` into the local REPL `messages[]`, so completed
+  Telegram turns were invisible to scroll history and never saved to
+  `history.json`. Fixed by adding `SetSharedHistoryAppender()` /
+  `fSharedHistoryAppend` to `RemoteControl`; `ProcessUpdate` now
+  appends the assistant message to the per-user silo and calls the
+  appender to push both turns into the live local `messages[]`.
+  `session.cpp` wires up the appender alongside `SetSharedHistory`;
+  the lambda pushes both messages and calls `config::SaveHistory` so
+  `--resume` sees the Telegram turns. `tui::RepaintInputRow()` is used
+  by an RAII `CursorGuard` in `ProcessUpdate` to restore the `> `
+  prompt after each remote turn.
+- **Inline keyboard missing on `MirrorToPrimary` numbered responses** —
+  when a locally-initiated turn produced a numbered-choice response,
+  `MirrorToPrimary` sent the assistant text to Telegram as plain text
+  with no inline keyboard, so the option buttons never appeared and the
+  user could not tap to reply. Applied the same
+  `ExtractNumberedOptions` → keyboard-building logic that
+  `ProcessUpdate` already uses for Telegram-origin turns; the keyboard
+  is now passed to both `EditMessageText` and `SendMessage`.
+
 ## [1.6.2] - 2026-04-23
 
 ### Fixed
