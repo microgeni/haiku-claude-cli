@@ -118,8 +118,10 @@ private:
 
 // Single streamed POST to /v1/messages. `include_tools` decides
 // whether the tools array is sent — set false for sub-agents that
-// must not call tools.
-SendResult SendConversation(const config::Auth& auth, const std::string& model,
+// must not call tools. `auth` is taken by value so the 401-refresh
+// path can swap in a renewed token and retry without touching the
+// caller's copy.
+SendResult SendConversation(config::Auth auth, const std::string& model,
                             int max_tokens, const json& messages,
                             const std::string& custom_system, bool include_tools);
 

@@ -572,7 +572,7 @@ InterruptGuard::~InterruptGuard() {
 	sigaction(SIGINT, &fPrev, nullptr);
 }
 
-SendResult SendConversation(const config::Auth& auth, const std::string& model,
+SendResult SendConversation(config::Auth auth, const std::string& model,
                             int max_tokens, const json& messages,
                             const std::string& custom_system, bool include_tools) {
 	constexpr int kMaxRetries = 3;
@@ -771,6 +771,27 @@ SendResult SendConversation(const config::Auth& auth, const std::string& model,
 			}
 		} catch (const json::exception&) {}
 
+		// 401 with an OAuth token means the access token has expired
+		// mid-session (common in long-running Telegram bridge sessions).
+		// Attempt a silent token refresh and retry once before giving up.
+		if (http_status == 401
+			&& auth.kind == config::AuthKind::OAuth
+			&& !g_interrupted
+			&& attempt < kMaxRetries) {
+			std::cerr << tui::Dim("[HTTP 401 — refreshing OAuth token and retrying]") << "\n";
+			config::LogLine("HTTP 401 — attempting token refresh (attempt="
+					 + std::to_string(attempt) + ")");
+			const config::Auth refreshed = config::ResolveAuth();
+			if (refreshed.kind == config::AuthKind::OAuth) {
+				auth = refreshed;
+				continue; // retry with the new token; no delay needed
+			}
+			// Refresh failed (no stored tokens or refresh rejected) —
+			// fall through to the hard-error path below.
+			std::cerr << tui::Dim("[token refresh failed — cannot recover]") << "\n";
+			config::LogLine("token refresh failed after 401");
+		}
+
 		// 429 (rate limit) and 5xx (server errors) are transient —
 		// retry with exponential backoff before giving up.
 		const bool http_retryable =
@@ -793,8 +814,8 @@ SendResult SendConversation(const config::Auth& auth, const std::string& model,
 		std::cerr << "\n" << tui::ErrorLabel() << " ";
 		switch (http_status) {
 			case 401:
-				std::cerr << "unauthorized (HTTP 401) — your OAuth token may be "
-							 "expired. Run `claude logout` and then `claude login`.";
+				std::cerr << "unauthorized (HTTP 401) — token refresh failed. "
+							 "Run `claude logout` then `claude login` to re-authenticate.";
 				break;
 			case 403:
 				std::cerr << "forbidden (HTTP 403) — this client or account is not "
