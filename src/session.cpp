@@ -713,10 +713,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			}
 			turn_active = false;
 			if (!drain_turn()) break;
-			// Re-echo the user's input so it appears in scroll history.
-			tui::PositionCursorForChat();
-			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
-			tui::PositionCursorForChat();
+			// The user's input was already echoed into the TurnOutputBuf
+			// above (line 690); EndTurn() flushed it in drain_turn().
+			// No second echo needed.
 		}
 
 		// Drag-and-drop from Tracker: if libedit hands back a line
