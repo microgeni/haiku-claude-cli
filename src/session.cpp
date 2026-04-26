@@ -741,8 +741,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 				remote->MirrorCancel();
 			// Ctrl+X cancel-and-retype: restore the user's input to
 			// the libedit buffer so they can amend and resubmit.
-			if (!result.cancelledInput.empty())
+			// Also remove the cancelled turn from history so up-arrow
+			// only surfaces the amended re-submission.
+			if (!result.cancelledInput.empty()) {
+				repl::RemoveLastRecord();
 				repl::RestoreInput(result.cancelledInput);
+			}
 			continue;
 		}
 

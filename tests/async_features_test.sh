@@ -148,6 +148,32 @@ LINE_RESTORE=$(grep -n 'repl::RestoreInput' "$SESS" | head -1 | cut -d: -f1)
     || fail "RestoreInput (L$LINE_RESTORE) must appear after the failure-branch rollback (L$LINE_FAIL)"
 pass
 
+# ── B12b: RemoveLastRecord is called before RestoreInput (history clean-up) ───
+step "B12b: repl::RemoveLastRecord() is called before RestoreInput to suppress cancelled turn from history"
+grep -q 'repl::RemoveLastRecord' "$SESS" \
+    || fail "repl::RemoveLastRecord not called in $SESS"
+LINE_REMOVE=$(grep -n 'repl::RemoveLastRecord' "$SESS" | head -1 | cut -d: -f1)
+LINE_RESTORE=$(grep -n 'repl::RestoreInput' "$SESS" | head -1 | cut -d: -f1)
+[ -n "$LINE_REMOVE"  ] || fail "repl::RemoveLastRecord not found in $SESS"
+[ -n "$LINE_RESTORE" ] || fail "repl::RestoreInput not found in $SESS"
+[ "$LINE_REMOVE" -lt "$LINE_RESTORE" ] \
+    || fail "RemoveLastRecord (L$LINE_REMOVE) must precede RestoreInput (L$LINE_RESTORE)"
+pass
+
+# ── B12c: RemoveLastRecord is declared in repl.h ──────────────────────────────
+step "B12c: repl::RemoveLastRecord() is declared in repl.h"
+grep -q 'RemoveLastRecord' "$REPLH" \
+    || fail "RemoveLastRecord not declared in $REPLH"
+pass
+
+# ── B12d: RemoveLastRecord uses remove_history and free ──────────────────────
+step "B12d: RemoveLastRecord implementation calls remove_history() and free()"
+grep -q 'remove_history' "$REPL" \
+    || fail "remove_history() not called in RemoveLastRecord in $REPL"
+grep -q 'free.*removed' "$REPL" \
+    || fail "free(removed->...) not called in RemoveLastRecord in $REPL"
+pass
+
 # ── B13: RestoreInput is guarded — only called when cancelledInput non-empty ──
 step "B13: RestoreInput call is guarded by !result.cancelledInput.empty()"
 grep -q '!result\.cancelledInput\.empty()' "$SESS" \
@@ -306,6 +332,26 @@ RELOAD_STUBS=$(grep -c 'void ReloadBfsSummaries().*{}' "$CFG" || true)
 REFRESH_STUBS=$(grep -c 'void RefreshSummarySnapshot.*{}' "$CFG" || true)
 [ "$RELOAD_STUBS"  -ge 1 ] || fail "non-Haiku stub for ReloadBfsSummaries not found in $CFG"
 [ "$REFRESH_STUBS" -ge 1 ] || fail "non-Haiku stub for RefreshSummarySnapshot not found in $CFG"
+pass
+
+# ── B29b: kSnapshotLineCap = 500 is defined and used as a guard ──────────────
+step "B29b: kSnapshotLineCap = 500 guards RefreshSummarySnapshot (skips on large projects)"
+grep -q 'kSnapshotLineCap' "$CFG" \
+    || fail "kSnapshotLineCap not defined in $CFG"
+grep -q '500' "$CFG" \
+    || fail "500-file cap value not found in $CFG"
+# Guard must appear inside RefreshSummarySnapshot.
+LINE_REFRESH=$(grep -n 'void RefreshSummarySnapshot' "$CFG" | head -1 | cut -d: -f1)
+LINE_CAP=$(awk -v after="$LINE_REFRESH" \
+    'NR > after && /kSnapshotLineCap/ {print NR; exit}' "$CFG")
+[ -n "$LINE_REFRESH" ] || fail "RefreshSummarySnapshot not found in $CFG"
+[ -n "$LINE_CAP"     ] || fail "kSnapshotLineCap guard not found inside RefreshSummarySnapshot"
+pass
+
+# ── B29c: BfsSystemBlock emits a stale-cache note when at or above cap ───────
+step "B29c: BfsSystemBlock notes that mid-session refresh is skipped above 500 files"
+grep -q '500+ summaries\|500.*summaries\|kSnapshotLineCap' "$CFG" \
+    || fail "stale-cache note for large projects not found in BfsSystemBlock in $CFG"
 pass
 
 # ── B30: binary still exits cleanly (no regression from new code) ─────────────

@@ -54,6 +54,12 @@ void DrainStaleInput();
 // Append `line` to history and flush to disk. No-op on empty lines.
 void Record(const std::string& line);
 
+// Remove the most recently recorded history entry. Used to suppress
+// a Ctrl+X–cancelled turn from appearing in up-arrow history — the
+// amended re-submission is the canonical entry. No-op when history
+// is empty or stdin is not a TTY.
+void RemoveLastRecord();
+
 // Seed libedit's current edit buffer with `text` and redraw the
 // prompt, as if the user had typed it. Used by the cancel-and-retype
 // path to restore a cancelled turn's input so the user can amend it

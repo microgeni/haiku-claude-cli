@@ -97,6 +97,16 @@ void PreloadBfsSummaries() {
 void PreloadBfsSummaries() { g_bfs_loaded = true; }
 #endif
 
+// Maximum number of summary lines before per-turn refresh is skipped.
+static constexpr int kSnapshotLineCap = 500;
+
+// Count newline-terminated lines in s.
+static int count_lines(const std::string& s) {
+	int n = 0;
+	for (char c : s) if (c == '\n') ++n;
+	return n;
+}
+
 std::string BfsSystemBlock() {
 #ifdef __HAIKU__
 	if (!g_bfs_loaded) PreloadBfsSummaries();
@@ -117,6 +127,12 @@ std::string BfsSystemBlock() {
 		s += "\nFiles in this project with existing claude:summary "
 			 "(prefer ReadAttr over Read for these):\n";
 		s += g_bfs_snapshot;
+		if (count_lines(g_bfs_snapshot) >= kSnapshotLineCap) {
+			s += "(Note: project has 500+ summaries — mid-session WriteAttr "
+				 "updates to claude:summary are not reflected until the next "
+				 "session or /compact. Use ReadAttr to get the current value "
+				 "for any specific file.)\n";
+		}
 	} else {
 		s += "\n(No claude:summary attributes seeded yet — writing summaries "
 			 "for source files you read this session will let later sessions "
@@ -518,6 +534,10 @@ void ReloadBfsSummaries() {
 // (or insert) the corresponding line.
 void RefreshSummarySnapshot(const std::vector<std::string>& paths) {
 	if (paths.empty()) return;
+
+	// Skip per-turn refresh on large projects to avoid O(project)
+	// work accumulating over many turns.
+	if (count_lines(g_bfs_snapshot) >= kSnapshotLineCap) return;
 
 	for (const auto& path : paths) {
 		// Read the current claude:summary value for this path.

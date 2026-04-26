@@ -544,6 +544,24 @@ void Record(const std::string& line) {
 	}
 }
 
+void RemoveLastRecord() {
+	if (!isatty(fileno(stdin))) return;
+	if (history_length <= 0) return;
+	// remove_history() takes a 0-based offset from history_base.
+	// The most recent entry is at index history_length - 1.
+	HIST_ENTRY* removed = remove_history(history_length - 1);
+	if (removed) {
+		free(const_cast<char*>(removed->line));
+		free(removed->data);
+		free(removed);
+	}
+	// Flush the trimmed history so the removed entry is not
+	// re-read on the next session start.
+	if (!g_history_file.empty()) {
+		write_history(g_history_file.c_str());
+	}
+}
+
 void RestoreInput(const std::string& text) {
 	if (text.empty() || !isatty(fileno(stdin))) return;
 	// rl_stuff_char() is LIFO — push bytes in reverse order so the

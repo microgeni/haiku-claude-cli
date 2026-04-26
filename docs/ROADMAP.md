@@ -897,10 +897,10 @@ scratch.
 - [x] **Status-bar hint** — `ctrl+x: amend` dim label shown in
       the status bar while a turn is running; cleared on
       completion.
-- [ ] **History: don't record cancelled turns** — a turn
-      aborted via Ctrl+X should not be added to libedit history
-      or `SaveHistory`; the amended re-submission is the
-      canonical entry.
+- [x] **History: don't record cancelled turns** — `repl::RemoveLastRecord()`
+      removes the last libedit history entry and flushes to disk when
+      Ctrl+X is detected; `repl::RestoreInput` then seeds the edit buffer.
+      The amended re-submission becomes the canonical history entry.
 
 #### True non-blocking prompt (type-ahead)
 
@@ -949,11 +949,11 @@ earlier without restarting.
       `InteractiveLoop` calls `RefreshSummarySnapshot` when non-empty.
 - [x] **Full re-scan on `/compact`** — `commands.cpp` calls
       `config::ReloadBfsSummaries()` after `SaveHistory`.
-- [ ] **Session-start cap** — if the snapshot already covers
-      more than 500 files, skip the per-turn refresh and note
-      in the BFS system-prompt block that the cache may be
-      slightly stale. Keeps the refresh path O(changed) rather
-      than O(project) for large codebases.
+- [x] **Session-start cap** — `kSnapshotLineCap = 500`: `RefreshSummarySnapshot`
+      counts lines in `g_bfs_snapshot` and returns early when at or above
+      the cap. `BfsSystemBlock` appends a note telling Claude that
+      mid-session WriteAttr updates are not reflected and to use ReadAttr
+      for the current value of a specific file.
 
 **Deferred**:
 - inotify / `BPathMonitor`-based real-time watch (overkill for
