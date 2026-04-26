@@ -18,6 +18,7 @@
 #include <curl/curl.h>
 
 #include "hooks.h"
+#include "repl.h"
 #include "stats.h"
 #include "tools.h"
 #include "tui.h"
@@ -444,6 +445,7 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		};
 		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
 		if (g_active_esc_guard) g_active_esc_guard->pause();
+		repl::BlockStdin();
 		tui::PauseFlushTimer();
 		const int race_pre_lines =
 			(extra.empty()
@@ -452,8 +454,12 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 			+ 1; // the "[also awaiting Telegram]" line
 		const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
 											 &tg_answered, race_pre_lines);
-		if (g_active_esc_guard) g_active_esc_guard->resume();
 		tui::ResumeFlushTimer();
+		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+		repl::UnblockStdin();
+		repl::RequestClearEditBuffer();
+		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+		if (g_active_esc_guard) g_active_esc_guard->resume();
 		tui::PositionCursorForChat();
 
 		{
@@ -563,9 +569,22 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		"No",
 	};
 	if (g_active_esc_guard) g_active_esc_guard->pause();
+	// Block the main readline loop from reading stdin before pausing
+	// the flush timer, so SelectOption() has exclusive tty input access
+	// regardless of whether the flush timer is still running.
+	repl::BlockStdin();
 	tui::PauseFlushTimer();
 	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
 	tui::ResumeFlushTimer();
+	// Flush stale input bytes, then unblock stdin and resume guard.
+	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+	repl::UnblockStdin();
+	// Clear libedit's internal buffer: Haiku's libedit reads stdin
+	// directly, so the approval keystroke may be in its edit buffer.
+	repl::RequestClearEditBuffer();
+	// Second flush for any byte that arrived in the window between
+	// SelectOption's TCSAFLUSH and the tcflush above.
+	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
 	if (g_active_esc_guard) g_active_esc_guard->resume();
 	tui::PositionCursorForChat();
 

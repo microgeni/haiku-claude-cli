@@ -565,6 +565,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 		config::SaveHistory(messages, model, resume_name);
 		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistantText}});
+		// Discard any keystrokes typed during the turn (e.g. menu
+		// approval digits) so they don't contaminate the next prompt.
+		repl::DrainStaleInput();
 		return true;
 	};
 
@@ -639,6 +642,13 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 		tui::ShowCursor();
 		tui::PositionCursorForInput();
+
+		// If a tool menu was shown during the previous turn, libedit may
+		// have captured the approval keystroke into its internal buffer.
+		// Clear it here (on the main thread) before the next ReadMessage.
+		if (repl::ConsumeClearEditBufferRequest()) {
+			repl::ClearEditBuffer();
+		}
 
 		std::string line;
 

@@ -51,6 +51,32 @@ bool ReadMessage(const std::string& prompt,
 // the buffer is empty, then restores blocking mode. No-op on non-TTYs.
 void DrainStaleInput();
 
+// Block / unblock the main readline loop from reading stdin.
+// While blocked, raw_getc_or_wake() will not call read() on stdin,
+// giving SelectOption() exclusive access to the tty input queue.
+// Safe to call from any thread.
+void BlockStdin();
+void UnblockStdin();
+
+// Returns the real tty fd that was dup()'d at Init() time.  Used by
+// SelectOption() to read keypresses directly from the tty even when
+// STDIN_FILENO has been redirected to /dev/null by BlockStdin().
+// Returns -1 if not available (non-TTY or not yet initialised).
+int RealTtyFd();
+
+// Clear libedit's internal edit buffer.  Called after a tool permission
+// menu so any keystroke (e.g. the approval digit) that libedit captured
+// from stdin while the menu was active is discarded before the next prompt.
+// Must be called from the main thread (the thread that owns libedit).
+void ClearEditBuffer();
+
+// Request that the main readline loop clear libedit's edit buffer on its
+// next iteration.  Safe to call from any thread (worker included).
+// The main thread checks this flag at the top of ReadMessage() and clears
+// the buffer before libedit accepts any more input.
+void RequestClearEditBuffer();
+bool ConsumeClearEditBufferRequest();
+
 // Append `line` to history and flush to disk. No-op on empty lines.
 void Record(const std::string& line);
 

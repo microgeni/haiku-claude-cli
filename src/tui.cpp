@@ -574,17 +574,52 @@ void PauseFlushTimer() {
 	for (int i = 0; i < 50 && !g_flush_timer_paused_ack.load(); ++i)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-	// Flush any pending turn output now so it appears above the menu,
-	// then bypass the interceptor so SelectOption()'s std::cout writes
-	// go directly to the terminal while the timer is paused.
+	// Flush any pending turn output so it appears above the menu.
+	// FlushTurnOutput wraps output in DECSC/CUP/DECRC; after it returns
+	// the physical cursor is back at the libedit input row (DECRC).
+	// We need the cursor at the *end of turn output* (g_turn_row2,
+	// g_turn_col) so SelectOption() draws its menu from there.
 	FlushTurnOutput();
-	if (g_cout_orig_buf)
+
+	// Move the physical cursor to where turn output ended, then bypass
+	// the interceptor so SelectOption()'s std::cout writes go directly
+	// to the terminal.  Use the tracked g_turn_row2/g_turn_col; if the
+	// turn hasn't started yet (no output flushed), land at the scroll-
+	// region bottom.
+	if (g_cout_orig_buf) {
+		const int rows = TerminalRows();
+		const int scroll_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : rows;
+		const int row = g_turn_started ? g_turn_row2 : scroll_bottom;
+		const int col = g_turn_started ? g_turn_col  : 1;
+		std::string cup = "\x1b[" + std::to_string(row) + ";" +
+		                  std::to_string(col) + "H";
+		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
+		g_cout_orig_buf->pubsync();
+		// Now redirect std::cout directly to the terminal.
 		std::cout.rdbuf(g_cout_orig_buf);
+	}
 }
 
 void ResumeFlushTimer() {
-	// Reconnect the interceptor so worker output is buffered again,
-	// then wake the flush timer.
+	// Immediately move the physical cursor to chat_bottom via DirectWrite
+	// (bypasses the interceptor) so neither libedit nor the first flush
+	// accidentally writes at the summary row left by SelectOption().
+	if (g_cout_orig_buf && g_status_bar_active) {
+		if (g_term_dirty) refresh_dims();
+		const int rows = TerminalRows();
+		const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
+		const std::string cup = "\x1b[" + std::to_string(chat_bottom) + ";1H";
+		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
+		g_cout_orig_buf->pubsync();
+
+		// Set the tracker to match so FlushTurnOutput() CUPs to the
+		// same place rather than a stale pre-menu position.
+		g_turn_row2    = chat_bottom;
+		g_turn_col     = 1;
+		g_turn_started = true;
+	}
+
+	// Reconnect the interceptor so worker output is buffered again.
 	if (g_cout_orig_buf)
 		std::cout.rdbuf(&g_turn_buf);
 	g_flush_timer_paused_ack.store(false);
@@ -598,8 +633,13 @@ int SelectOption(const std::vector<std::string>& options,
 	if (options.empty()) return 0;
 	const int n = static_cast<int>(options.size());
 
+	// Use the real tty fd for all tty reads and termios operations.
+	// When BlockStdin() has redirected STDIN_FILENO to /dev/null,
+	// repl::RealTtyFd() still points to the actual terminal.
+	const int tty = (repl::RealTtyFd() >= 0) ? repl::RealTtyFd() : fileno(stdin);
+
 	// Non-TTY fallback: print numbered list and read a line.
-	if (!g_color_enabled || !isatty(fileno(stdout)) || !isatty(fileno(stdin))) {
+	if (!g_color_enabled || !isatty(fileno(stdout)) || !isatty(tty)) {
 		if (!heading.empty()) std::cout << heading << "\n";
 		for (int i = 0; i < n; ++i) {
 			std::cout << "  " << (i + 1) << ". " << options[i] << "\n";
@@ -613,14 +653,14 @@ int SelectOption(const std::vector<std::string>& options,
 		return n - 1;
 	}
 
-	// Put stdin into raw mode for single-keypress reads.
+	// Put the tty into raw mode for single-keypress reads.
 	struct termios orig {}, raw {};
-	tcgetattr(fileno(stdin), &orig);
+	tcgetattr(tty, &orig);
 	raw = orig;
 	raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
 	raw.c_cc[VMIN]  = 1;
 	raw.c_cc[VTIME] = 0;
-	tcsetattr(fileno(stdin), TCSANOW, &raw);
+	tcsetattr(tty, TCSANOW, &raw);
 
 	int sel = 0; // 0-based selected index
 
@@ -670,7 +710,7 @@ int SelectOption(const std::vector<std::string>& options,
 	// Telegram hook answered while we were setting up raw mode), skip
 	// drawing the menu entirely and return immediately so no flash occurs.
 	if (cancel && cancel->load()) {
-		tcsetattr(fileno(stdin), TCSAFLUSH, &orig);
+		tcsetattr(tty, TCSAFLUSH, &orig);
 		return -1;
 	}
 
@@ -717,7 +757,7 @@ int SelectOption(const std::vector<std::string>& options,
 		struct termios poll_raw = raw;
 		poll_raw.c_cc[VMIN]  = 0;
 		poll_raw.c_cc[VTIME] = 1; // 100 ms
-		tcsetattr(fileno(stdin), TCSANOW, &poll_raw);
+		tcsetattr(tty, TCSANOW, &poll_raw);
 	}
 
 	int chosen = n - 1; // default: last option (deny)
@@ -726,11 +766,11 @@ int SelectOption(const std::vector<std::string>& options,
 		// Check the cancel flag before each read attempt.
 		if (cancel && cancel->load()) {
 			std::cout << "\x1b[?25h" << std::flush; // restore cursor
-			tcsetattr(fileno(stdin), TCSAFLUSH, &orig);
+			tcsetattr(tty, TCSAFLUSH, &orig);
 			return -1;
 		}
 		unsigned char c = 0;
-		if (read(fileno(stdin), &c, 1) != 1) {
+		if (read(tty, &c, 1) != 1) {
 			// VMIN=0 timeout or EOF — loop to re-check cancel.
 			continue;
 		}
@@ -745,11 +785,11 @@ int SelectOption(const std::vector<std::string>& options,
 			struct termios nb = raw;
 			nb.c_cc[VMIN]  = 1;
 			nb.c_cc[VTIME] = 1; // 100 ms inter-byte timeout
-			tcsetattr(fileno(stdin), TCSANOW, &nb);
+			tcsetattr(tty, TCSANOW, &nb);
 
 			// Read the byte after ESC.
 			unsigned char intro = 0;
-			const int r1 = read(fileno(stdin), &intro, 1);
+			const int r1 = read(tty, &intro, 1);
 
 			// If it is '[' this is a CSI sequence.  Read bytes until the
 			// CSI final byte (0x40–0x7E) so that multi-byte sequences
@@ -760,7 +800,7 @@ int SelectOption(const std::vector<std::string>& options,
 			if (is_csi) {
 				while (csi.size() < 16) {
 					unsigned char b = 0;
-					if (read(fileno(stdin), &b, 1) != 1) break;
+					if (read(tty, &b, 1) != 1) break;
 					csi += static_cast<char>(b);
 					if (b >= 0x40 && b <= 0x7e) break; // final byte consumed
 				}
@@ -772,9 +812,9 @@ int SelectOption(const std::vector<std::string>& options,
 				struct termios poll_raw = raw;
 				poll_raw.c_cc[VMIN]  = 0;
 				poll_raw.c_cc[VTIME] = 1;
-				tcsetattr(fileno(stdin), TCSANOW, &poll_raw);
+				tcsetattr(tty, TCSANOW, &poll_raw);
 			} else {
-				tcsetattr(fileno(stdin), TCSANOW, &raw);
+				tcsetattr(tty, TCSANOW, &raw);
 			}
 
 			if (r1 <= 0) {
@@ -847,6 +887,8 @@ int SelectOption(const std::vector<std::string>& options,
 	// Step 4: write the compact summary on the first (now blank) row.
 	// chosen == -2 means Tab/amend: display a special label instead of
 	// indexing options[] with a negative value (which would be UB).
+	// Erase the line first as a safety measure before writing the summary.
+	std::cout << "\x1b[2K";
 	if (chosen == -2) {
 		std::cout << Dim(heading.empty() ? "  -> [amend]" : heading + " \xe2\x86\x92 [amend]");
 	} else if (!heading.empty()) {
@@ -855,13 +897,42 @@ int SelectOption(const std::vector<std::string>& options,
 		std::cout << Dim("  -> " + options[chosen]);
 	}
 
-	// Step 5: leave cursor on the row after the summary, ready for output.
-	// Use \x1b[1B\r (not \n) to avoid scrolling within DECSTBM.
-	std::cout << "\x1b[1B\r";
+	// Step 5: erase the rows that were scrolled in below the summary
+	// by the opening \n emissions, then restore cursor to the summary
+	// row so PositionCursorForChat() can reposition cleanly.
+	for (int i = 0; i < menu_rows; ++i)
+		std::cout << "\x1b[1B\r\x1b[2K";
+	if (menu_rows > 0)
+		std::cout << "\x1b[" << menu_rows << "A\r";
 
 	std::cout << "\x1b[?25h" << std::flush; // restore cursor
 
-	tcsetattr(fileno(stdin), TCSAFLUSH, &orig);
+	tcsetattr(tty, TCSAFLUSH, &orig);
+	// Paranoid drain: read any bytes that survived TCSAFLUSH/tcflush.
+	// Any echoed character from the drain might corrupt the summary
+	// row, so re-erase and reprint the summary after the drain.
+	{
+		const int fd = tty;
+		const int fl = fcntl(fd, F_GETFL);
+		if (fl != -1) {
+			fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+			char tmp[64];
+			while (::read(fd, tmp, sizeof(tmp)) > 0) {}
+			fcntl(fd, F_SETFL, fl);
+		}
+	}
+	tcflush(tty, TCIFLUSH);
+	// Re-erase and reprint the summary row now that the tty is back in
+	// cooked mode and any race-echoed bytes have been drained.
+	std::cout << "\r\x1b[2K";
+	if (chosen == -2) {
+		std::cout << Dim(heading.empty() ? "  -> [amend]" : heading + " \xe2\x86\x92 [amend]");
+	} else if (!heading.empty()) {
+		std::cout << Dim(heading + " \xe2\x86\x92 " + options[chosen]);
+	} else {
+		std::cout << Dim("  -> " + options[chosen]);
+	}
+	std::cout << std::flush;
 	return chosen;
 }
 

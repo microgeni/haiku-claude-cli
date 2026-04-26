@@ -10,6 +10,8 @@
 #include <poll.h>
 #include <string>
 #include <sys/stat.h>
+#include <termios.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -48,6 +50,16 @@ size_t      g_paste_pos = 0;
 // Both set to -1 until Init() creates them.
 int g_wake_pipe[2] = {-1, -1};
 
+// When true, stdin fd (0) is redirected to a blocking pipe so libedit's
+// internal read() calls block instead of consuming tty bytes while
+// SelectOption() is running.
+std::atomic<bool> g_stdin_blocked{false};
+
+// File descriptors used for stdin blocking.
+int g_real_tty_fd   = -1;           // dup() of the original stdin (the real tty)
+int g_block_pipe[2] = {-1, -1};     // pipe: [0]=read end (used as fd 0 when blocking),
+                                     //       [1]=write end (written to unblock libedit)
+
 // Read one raw byte from stdin, also watching g_wake_pipe[0].
 // When the wake pipe fires, flush pending output and check
 // g_turn_just_completed; if set and the edit buffer is empty,
@@ -65,22 +77,28 @@ static int raw_getc_or_wake(FILE* f) {
             return c;
         }
 
+        // When stdin is blocked for SelectOption(), only poll the wake
+        // pipe so we never race with SelectOption's read() on the same fd.
+        const bool blocked = g_stdin_blocked.load();
+        const int  nfds    = blocked ? 1 : 2;
+
         struct pollfd pfds[2];
         pfds[0].fd      = stdin_fd;
-        pfds[0].events  = POLLIN;
+        pfds[0].events  = blocked ? 0 : POLLIN;
         pfds[0].revents = 0;
         pfds[1].fd      = wake_fd;
         pfds[1].events  = POLLIN;
         pfds[1].revents = 0;
 
-        const int r = ::poll(pfds, 2, -1);
+        const int r = ::poll(pfds + (blocked ? 1 : 0), nfds, -1);
         if (r < 0) {
             if (errno == EINTR) continue;
             return EOF;
         }
 
         // Wake pipe fired — drain it, flush output, maybe inject '\r'.
-        if (pfds[1].revents & POLLIN) {
+        const struct pollfd& wake_pfd = pfds[1];
+        if (wake_pfd.revents & POLLIN) {
             char discard[64];
             ::read(wake_fd, discard, sizeof(discard));
             tui::FlushTurnOutput();
@@ -89,12 +107,12 @@ static int raw_getc_or_wake(FILE* f) {
                 return '\r';
             }
             tui::g_turn_just_completed.store(false);
-            // If stdin is also ready, fall through to read it.
-            if (!(pfds[0].revents & POLLIN)) continue;
+            // If stdin is also ready and not blocked, fall through to read it.
+            if (blocked || !(pfds[0].revents & POLLIN)) continue;
         }
 
-        // Stdin ready — read one byte.
-        if (pfds[0].revents & POLLIN) {
+        // Stdin ready — read only when not blocked for SelectOption().
+        if (!blocked && (pfds[0].revents & POLLIN)) {
             unsigned char buf;
             const ssize_t n = ::read(stdin_fd, &buf, 1);
             if (n == 1) return static_cast<int>(buf);
@@ -507,6 +525,17 @@ void Init(const std::string& history_file) {
 			::fcntl(g_wake_pipe[1], F_GETFL) | O_NONBLOCK);
 	}
 
+	// Save the real tty fd and create a blocking pipe so BlockStdin() can
+	// redirect fd 0 to g_block_pipe[0].  A pipe read() blocks when empty,
+	// so libedit's internal read(0,...) won't consume tty bytes.
+	if (isatty(fileno(stdin))) {
+		g_real_tty_fd = ::dup(fileno(stdin));
+		::pipe(g_block_pipe);
+		// Keep write end non-blocking so UnblockStdin() never stalls.
+		::fcntl(g_block_pipe[1], F_SETFL,
+			::fcntl(g_block_pipe[1], F_GETFL) | O_NONBLOCK);
+	}
+
 	rl_attempted_completion_function = slash_completion;
 
 	// Install our custom getc function.  The bracketed-paste enable
@@ -514,6 +543,20 @@ void Init(const std::string& history_file) {
 	// set up, via a single unbuffered ::write() call so there is no
 	// race between stdio-buffered and raw writes.
 	rl_getc_function = bracketed_getc;
+
+	// Install an event hook that fires while readline is waiting for
+	// input.  We use it to clear libedit's internal edit buffer when a
+	// tool permission menu has just dismissed — the approval keystroke
+	// may be in libedit's buffer even if rl_getc_function is not honoured.
+	rl_event_hook = []() -> int {
+		// Only clear when no menu is active (g_stdin_blocked=true means
+		// SelectOption is running and we must not touch libedit state).
+		if (!g_stdin_blocked.load() && ConsumeClearEditBufferRequest()) {
+			rl_replace_line("", 0);
+			rl_point = 0;
+		}
+		return 0;
+	};
 
 	// Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
 	// ReadMessage() re-prompts via backslash-continuation.
@@ -647,6 +690,66 @@ bool ReadMessage(const std::string& prompt,
 
 	out = std::move(first);
 	return true;
+}
+
+void BlockStdin() {
+	g_stdin_blocked.store(true);
+	// Replace fd 0 with the read end of g_block_pipe so that libedit's
+	// internal read(0,...) blocks (empty pipe) instead of consuming bytes
+	// from the tty while SelectOption() runs.
+	if (g_block_pipe[0] >= 0)
+		::dup2(g_block_pipe[0], STDIN_FILENO);
+	// Wake any poll() in raw_getc_or_wake that's watching the old fd 0.
+	WakeReadMessage();
+}
+
+void UnblockStdin() {
+	// Restore the real tty as fd 0 before unblocking so libedit's next
+	// read comes from the terminal, not the pipe.
+	if (g_real_tty_fd >= 0)
+		::dup2(g_real_tty_fd, STDIN_FILENO);
+	// Flush any tty bytes that arrived while stdin was blocked (e.g. the
+	// approval keystroke that SelectOption read directly from g_real_tty_fd).
+	if (isatty(STDIN_FILENO))
+		tcflush(STDIN_FILENO, TCIFLUSH);
+	g_stdin_blocked.store(false);
+	// Ask the rl_event_hook to clear libedit's edit buffer on its next call.
+	RequestClearEditBuffer();
+	// Unblock any libedit read() currently blocking on the pipe by injecting
+	// a CR.  The rl_event_hook will clear the edit buffer before libedit
+	// processes the CR, so the submitted line will be empty.
+	if (g_block_pipe[1] >= 0) {
+		const char cr = '\r';
+		::write(g_block_pipe[1], &cr, 1);
+	}
+}
+
+int RealTtyFd() {
+	return g_real_tty_fd;
+}
+
+void ClearEditBuffer() {
+	// Haiku's libedit may not honour rl_getc_function, meaning it reads
+	// stdin directly and can capture keystrokes (e.g. the approval digit
+	// from a tool menu) into its internal edit buffer.  rl_replace_line("")
+	// clears that buffer so those stale bytes don't appear in the next prompt.
+	if (!isatty(fileno(stdin))) return;
+	rl_replace_line("", 0);
+	rl_point = 0;
+}
+
+namespace {
+std::atomic<bool> g_clear_edit_buffer_requested{false};
+} // anon namespace
+
+void RequestClearEditBuffer() {
+	g_clear_edit_buffer_requested.store(true);
+	// Wake the main readline loop so it processes the request promptly.
+	WakeReadMessage();
+}
+
+bool ConsumeClearEditBufferRequest() {
+	return g_clear_edit_buffer_requested.exchange(false);
 }
 
 void DrainStaleInput() {
