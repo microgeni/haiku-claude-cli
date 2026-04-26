@@ -453,7 +453,7 @@ grep -q 'g_cout_orig_buf' "$TUI" \
     || fail "g_cout_orig_buf not used in $TUI"
 LINE_FLUSH_FN=$(grep -n 'void FlushTurnOutput' "$TUI" | head -1 | cut -d: -f1)
 ORIG_USE=$(awk -v after="$LINE_FLUSH_FN" \
-    'NR > after && NR <= after+25 && /g_cout_orig_buf/ {print NR; exit}' "$TUI")
+    'NR > after && NR <= after+80 && /g_cout_orig_buf/ {print NR; exit}' "$TUI")
 [ -n "$ORIG_USE" ] || fail "g_cout_orig_buf not used inside FlushTurnOutput body"
 pass
 

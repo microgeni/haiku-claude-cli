@@ -60,6 +60,11 @@ void Record(const std::string& line);
 // is empty or stdin is not a TTY.
 void RemoveLastRecord();
 
+// Write one byte to the internal wake pipe so a blocking ReadMessage()
+// call returns promptly. Used by the flush timer in tui.cpp to unblock
+// the poll when a turn completes, without requiring a real keypress.
+void WakeReadMessage();
+
 // Seed libedit's current edit buffer with `text` and redraw the
 // prompt, as if the user had typed it. Used by the cancel-and-retype
 // path to restore a cancelled turn's input so the user can amend it

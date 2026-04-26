@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <poll.h>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -40,11 +41,72 @@ namespace {
 std::string g_paste_buf;
 size_t      g_paste_pos = 0;
 
-// Read one raw byte from `f`, retrying on EINTR.
+// Self-pipe used to wake the blocking poll() in raw_getc_or_wake().
+// g_wake_pipe[0] = read end (polled alongside stdin).
+// g_wake_pipe[1] = write end (written by tui::WakeReadMessage()).
+// Both set to -1 until Init() creates them.
+int g_wake_pipe[2] = {-1, -1};
+
+// Read one raw byte from stdin, also watching g_wake_pipe[0].
+// When the wake pipe fires, flush pending output and check
+// g_turn_just_completed; if set and the edit buffer is empty,
+// return '\r' to simulate Enter and unblock ReadMessage().
+// Returns EOF on real EOF or unrecoverable error.
+static int raw_getc_or_wake(FILE* f) {
+    while (true) {
+        const int stdin_fd   = fileno(f);
+        const int wake_fd    = g_wake_pipe[0];
+
+        if (wake_fd < 0) {
+            // No wake pipe — fall back to plain fgetc.
+            int c;
+            do { c = fgetc(f); } while (c == EOF && errno == EINTR);
+            return c;
+        }
+
+        struct pollfd pfds[2];
+        pfds[0].fd      = stdin_fd;
+        pfds[0].events  = POLLIN;
+        pfds[0].revents = 0;
+        pfds[1].fd      = wake_fd;
+        pfds[1].events  = POLLIN;
+        pfds[1].revents = 0;
+
+        const int r = ::poll(pfds, 2, -1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return EOF;
+        }
+
+        // Wake pipe fired — drain it, flush output, maybe inject '\r'.
+        if (pfds[1].revents & POLLIN) {
+            char discard[64];
+            ::read(wake_fd, discard, sizeof(discard));
+            tui::FlushTurnOutput();
+            if (tui::g_turn_just_completed.load() && rl_end == 0) {
+                tui::g_turn_just_completed.store(false);
+                return '\r';
+            }
+            tui::g_turn_just_completed.store(false);
+            // If stdin is also ready, fall through to read it.
+            if (!(pfds[0].revents & POLLIN)) continue;
+        }
+
+        // Stdin ready — read one byte.
+        if (pfds[0].revents & POLLIN) {
+            unsigned char buf;
+            const ssize_t n = ::read(stdin_fd, &buf, 1);
+            if (n == 1) return static_cast<int>(buf);
+            if (n == 0) return EOF;
+            if (errno == EINTR || errno == EAGAIN) continue;
+            return EOF;
+        }
+    }
+}
+
+// Convenience wrapper keeping the old name for callers inside this file.
 static int raw_getc(FILE* f) {
-    int c;
-    do { c = fgetc(f); } while (c == EOF && errno == EINTR);
-    return c;
+    return raw_getc_or_wake(f);
 }
 
 // Consume characters from `f` until the CSI terminator sequence `seq`
@@ -107,6 +169,20 @@ extern "C" int bracketed_getc(FILE* f) {
     // this read returns. DECSC/DECRC in FlushTurnOutput() preserves
     // libedit's cursor on the input row.
     tui::FlushTurnOutput();
+
+    // If the flush timer detected the turn just completed, return a
+    // synthetic '\r' (Enter) so ReadMessage() returns an empty line
+    // and the main loop's drain_turn() fires — but only when the
+    // edit buffer is empty (rl_end == 0) so we don't submit partial input.
+    if (tui::g_turn_just_completed.load()) {
+        if (rl_end == 0) {
+            tui::g_turn_just_completed.store(false);
+            return '\r';
+        }
+        // Edit buffer non-empty — drain_turn() will fire when the
+        // user next presses Enter.
+        tui::g_turn_just_completed.store(false);
+    }
 
     const int c = raw_getc(f);
     if (c == EOF) return c;
@@ -382,6 +458,15 @@ void Init(const std::string& history_file) {
 		paths::EnsureParentDir(g_history_file);
 		read_history(g_history_file.c_str());
 	}
+
+	// Create the self-pipe used by WakeReadMessage() to interrupt the
+	// blocking poll() in raw_getc_or_wake().
+	if (::pipe(g_wake_pipe) == 0) {
+		// Set non-blocking on the write end so the timer thread never stalls.
+		::fcntl(g_wake_pipe[1], F_SETFL,
+			::fcntl(g_wake_pipe[1], F_GETFL) | O_NONBLOCK);
+	}
+
 	rl_attempted_completion_function = slash_completion;
 
 	// Install our custom getc function.  The bracketed-paste enable
@@ -576,6 +661,14 @@ void RestoreInput(const std::string& text) {
 	// start of the next readline() call.
 	for (int i = static_cast<int>(text.size()) - 1; i >= 0; --i) {
 		rl_stuff_char(static_cast<unsigned char>(text[i]));
+	}
+}
+
+void WakeReadMessage() {
+	if (g_wake_pipe[1] >= 0) {
+		const char b = 1;
+		const ssize_t n = ::write(g_wake_pipe[1], &b, 1);
+		(void)n;
 	}
 }
 

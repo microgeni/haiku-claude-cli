@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -57,6 +58,20 @@ void InstallSigwinchHandler();
 void BeginTurn();
 void EndTurn();
 void FlushTurnOutput();
+
+// Set to true by FlushTurnOutput when the turn-done callback fires.
+// Read by bracketed_getc in repl.cpp to inject a synthetic Enter
+// (only when the edit buffer is empty) so the main loop drains the
+// result without waiting for a real keypress. Cleared by the main
+// loop at the top of each iteration.
+extern std::atomic<bool> g_turn_just_completed;
+
+// Install a callback that the flush-timer thread calls every 16 ms to
+// check whether the worker has finished its turn.  When the callback
+// returns true the timer sets g_turn_just_completed so bracketed_getc
+// can return a synthetic Enter to unblock ReadMessage().
+// Pass nullptr to clear.
+void SetTurnDoneCheck(std::function<bool()> fn);
 
 // Fixed-bottom status frame. Carves off the bottom two rows of
 // the terminal via DECSTBM scroll region:

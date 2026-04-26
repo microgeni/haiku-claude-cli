@@ -590,6 +590,14 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		tui::BeginTurn();
 		turn_active = true;
 
+		// Install the turn-done callback so the flush timer can wake
+		// ReadMessage() when the worker finishes, without requiring a
+		// real keypress from the user.
+		tui::SetTurnDoneCheck([&worker]() -> bool {
+			std::lock_guard<std::mutex> lk(worker.fDisplayMu);
+			return !worker.fWorkerOwnsDisplay;
+		});
+
 		{
 			std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
 			worker.fWorkerOwnsDisplay = true;
