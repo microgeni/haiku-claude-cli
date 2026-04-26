@@ -35,6 +35,29 @@ int TerminalRows();
 // no-op when stdout isn't a TTY.
 void InstallSigwinchHandler();
 
+// Concurrent turn-output interception.
+//
+// While a turn is in progress the worker thread writes to std::cout
+// concurrently with libedit reading from stdin.  Direct writes would
+// corrupt the terminal because libedit also writes (to row N-2) and
+// partial ANSI sequences from either side can interleave.
+//
+// BeginTurn() redirects std::cout through an interceptor that
+// accumulates output in a mutex-protected pending buffer instead of
+// writing directly to the terminal.  FlushTurnOutput() (called by
+// the repl getcfn hook before every libedit keypress read, and also
+// from the main REPL loop after SIGWINCH) drains the buffer to the
+// scroll region using DECSC/DECRC so libedit's cursor on the input
+// row (N-2) is preserved.  EndTurn() restores std::cout and flushes
+// any remaining buffered output.
+//
+// Thread safety: FlushTurnOutput() and the worker's writes to the
+// buffer are each protected by an internal mutex. BeginTurn() and
+// EndTurn() must only be called from the main thread.
+void BeginTurn();
+void EndTurn();
+void FlushTurnOutput();
+
 // Fixed-bottom status frame. Carves off the bottom two rows of
 // the terminal via DECSTBM scroll region:
 //

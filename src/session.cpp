@@ -474,21 +474,178 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	} worker_guard{worker};
 
+	// Queued input: typed by the user while a turn was in flight.
+	// Dispatched as the next turn immediately after the current one
+	// completes, without returning to ReadMessage().
+	std::string queued_line;
+	bool        turn_active = false;   // true while worker owns display
+
+	// Helper: drain the worker result and run all post-turn bookkeeping.
+	// Called from the main loop when fWorkerOwnsDisplay has gone false.
+	// Returns false if the session should exit.
+	auto drain_turn = [&]() -> bool {
+		// Restore stdout to direct mode; flush any buffered output
+		// the worker left in the pending buffer.
+		tui::EndTurn();
+
+		// Drain the result.
+		TurnResult result;
+		{
+			std::lock_guard<std::mutex> lk(worker.fMu);
+			if (worker.fResult.has_value()) {
+				result = std::move(*worker.fResult);
+				worker.fResult.reset();
+			}
+		}
+
+		// Restore normal status bar (hint was shown while active).
+		tui::SetStatusBar(compose_status());
+
+		if (!result.ok) {
+			if (remote && remote->Running())
+				remote->MirrorCancel();
+			if (!result.cancelledInput.empty()) {
+				repl::RemoveLastRecord();
+				repl::RestoreInput(result.cancelledInput);
+			}
+			return true; // session continues
+		}
+
+		++turn_count;
+		session_input  += result.inputTokens;
+		session_output += result.outputTokens;
+		stats::RecordTurn(result.inputTokens, result.outputTokens,
+						  result.cacheRead, result.cacheWrite);
+
+		for (auto& url : result.newUrls)
+			session_urls.push_back(std::move(url));
+
+		if (!result.writtenSummaryPaths.empty())
+			config::RefreshSummarySnapshot(result.writtenSummaryPaths);
+
+		if (notify_enabled && result.elapsed >= notify_min_duration) {
+			notify::Send(
+				notify::PickPlayfulTitle(result.elapsed),
+				notify::FirstSentence(result.assistantText, 120));
+		}
+
+		if (compact_auto_threshold > 0.0) {
+			const int window  = models::DetectContextWindow(model, compact_window_override);
+			const int trigger = static_cast<int>(window * compact_auto_threshold);
+			if (result.inputTokens >= trigger) {
+				char note[160];
+				std::snprintf(note, sizeof(note),
+					"[auto-compact: context at %d%% (%d / %d tokens) — compacting now]",
+					(result.inputTokens * 100) / window,
+					result.inputTokens, window);
+				std::cout << tui::Meta(note) << "\n";
+				commands::LoopCtx ac_ctx{auth, max_tokens, custom_system, prices, model,
+				                         turn_count, session_input, session_output, messages,
+				                         session_urls, notify_enabled, notify_min_duration,
+				                         [&]() { tui::SetStatusBar(compose_status()); }};
+				ac_ctx.auto_compact          = true;
+				ac_ctx.resume_name           = resume_name;
+				ac_ctx.compact_auto_threshold  = compact_auto_threshold;
+				ac_ctx.compact_window_override = compact_window_override;
+				std::string dummy;
+				commands::Dispatch("/compact", ac_ctx, dummy);
+			}
+		}
+
+		config::LogLine("turn " + std::to_string(turn_count)
+				 + " model=" + model
+				 + " in=" + std::to_string(result.inputTokens)
+				 + " out=" + std::to_string(result.outputTokens)
+				 + " cache_r=" + std::to_string(result.cacheRead)
+				 + " cache_w=" + std::to_string(result.cacheWrite));
+
+		tui::SetStatusBar(compose_status());
+
+		if (remote && remote->Running())
+			remote->MirrorToPrimary(result.assistantText);
+
+		config::SaveHistory(messages, model, resume_name);
+		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistantText}});
+		return true;
+	};
+
+	// Helper: enqueue a turn to the worker and install the output
+	// interceptor so worker writes go through the pending buffer.
+	auto dispatch_turn = [&](std::string line,
+	                         std::string api_content,
+	                         json snapshot,
+	                         std::string system_for_turn) {
+		TurnJob job;
+		job.userText     = line;
+		job.apiContent   = std::move(api_content);
+		job.snapshot     = std::move(snapshot);
+		job.model        = model;
+		job.maxTokens    = max_tokens;
+		job.auth         = auth;
+		job.systemPrompt = std::move(system_for_turn);
+		job.hasTelegram  = (remote && remote->Running());
+
+		// Install the stdout interceptor before waking the worker so
+		// the very first byte it writes goes into the pending buffer.
+		tui::BeginTurn();
+		turn_active = true;
+
+		{
+			std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+			worker.fWorkerOwnsDisplay = true;
+		}
+		{
+			std::lock_guard<std::mutex> lk(worker.fMu);
+			worker.fPendingJob = std::move(job);
+		}
+		worker.fJobCv.notify_one();
+
+		tui::SetStatusBar(compose_status()
+			+ "  " + tui::Dim("ctrl+x: amend · typing queues next"));
+	};
+
 	while (true) {
+		// ── Check whether the active turn has finished ────────────────
+		// Do this at the top of every iteration so we drain the result
+		// whether we return from ReadMessage (user typed) or loop back
+		// after a queued input.
+		if (turn_active) {
+			bool done;
+			{
+				std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+				done = !worker.fWorkerOwnsDisplay;
+			}
+			if (done) {
+				turn_active = false;
+				if (!drain_turn()) break; // session exit
+			}
+		}
+
 		// Resize events rebuild the scroll region and redraw the
 		// fixed rows so the frame stays correct after the user
 		// drags the terminal window.
-		if (tui::ConsumeResizePending()) tui::RedrawStatusBar();
+		if (tui::ConsumeResizePending()) {
+			// Flush buffered turn output before redrawing so the
+			// scroll region is consistent.
+			tui::FlushTurnOutput();
+			tui::RedrawStatusBar();
+		}
 		tui::ShowCursor();
 		tui::PositionCursorForInput();
 
 		std::string line;
-		if (!pending.empty()) {
+
+		// ── Drain queued input (typed while turn was running) ─────────
+		if (!queued_line.empty()) {
+			line = std::move(queued_line);
+			queued_line.clear();
+			tui::ClearInputRow();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
+			tui::PositionCursorForChat();
+		} else if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
-			// Erase the input row, echo "> line" into the scroll
-			// region at N-4 (where \n scrolls it into history),
-			// then position at N-4 for spinner / response.
 			tui::ClearInputRow();
 			tui::PositionCursorForChat();
 			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
@@ -499,15 +656,24 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			// cursor down but does NOT trigger a DECSTBM scroll (N-2
 			// is outside the scroll region). "> hi" stays at N-2.
 			//
-			// After ReadMessage() returns we:
-			//  1. Erase N-2 (wipes "> hi" from the fixed row).
-			//  2. Echo "> hi\n" at the scroll-region bottom N-4 so
-			//     it scrolls into history.
-			//  3. Position cursor at N-4 for spinner / response.
+			// While a turn is active, FlushTurnOutput() fires inside
+			// bracketed_getc (before each blocking read) so streamed
+			// response chunks appear in the scroll region while the
+			// user types on row N-2.
 			if (!repl::ReadMessage(tui::UserPrompt(),
 									tui::ContinuationPrompt(),
 									line)) {
 				tui::ClearInputRow();
+				// EOF / Ctrl+D — wait for any active turn to finish
+				// before breaking so we don't orphan the worker.
+				if (turn_active) {
+					std::unique_lock<std::mutex> dlk(worker.fDisplayMu);
+					worker.fDisplayCv.wait(dlk, [&]{
+						return !worker.fWorkerOwnsDisplay;
+					});
+					dlk.unlock();
+					drain_turn();
+				}
 				break;
 			}
 			tui::ClearInputRow();
@@ -519,7 +685,28 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
 			line.pop_back();
 		}
-		if (line.empty()) continue;
+		if (line.empty()) {
+			// If a turn just finished and produced an empty queued
+			// line, loop back to check turn completion again.
+			continue;
+		}
+
+		// ── If a turn is still active, queue the line ─────────────────
+		// The user typed while the previous turn was streaming.
+		// Hold the line and loop back — drain_turn() at the top of
+		// the next iteration will drain the result, then the queued
+		// line will be dispatched without going back to ReadMessage().
+		if (turn_active) {
+			// Only queue one line; if the user types more before the
+			// turn finishes, silently drop extras (they can retype).
+			if (queued_line.empty()) {
+				queued_line = line;
+				std::cout << tui::Dim("[queued — waiting for response to finish]") << "\n";
+			} else {
+				std::cout << tui::Dim("[already queued — please wait]") << "\n";
+			}
+			continue;
+		}
 
 		// Drag-and-drop from Tracker: if libedit hands back a line
 		// that's purely one-or-more absolute paths that all exist on
@@ -675,150 +862,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			continue;
 		}
 
-		// ── Dispatch the turn to the background worker ──────────────
-		// The worker owns stdout (spinner + streamed reply) from the
-		// moment Enqueue() is called until it signals fDisplayCv.
-		// The main thread blocks here on fDisplayCv, which keeps the
-		// design single-queue (one outstanding turn at a time) while
-		// freeing us from having to manage the StreamProgress lifetime
-		// on the stack here.
-		{
-			TurnJob job;
-			job.userText    = line;
-			job.apiContent  = std::move(api_content);
-			job.snapshot    = snapshot;
-			job.model       = model;
-			job.maxTokens   = max_tokens;
-			job.auth        = auth;
-			job.systemPrompt = system_for_turn;
-			job.hasTelegram  = (remote && remote->Running());
-
-			// Mark display as owned by the worker before waking it,
-			// so there is no window where both threads think they own
-			// the display.
-			{
-				std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
-				worker.fWorkerOwnsDisplay = true;
-			}
-			{
-				std::lock_guard<std::mutex> lk(worker.fMu);
-				worker.fPendingJob = std::move(job);
-			}
-			worker.fJobCv.notify_one();
-			// Show ctrl+x:amend hint in the status bar while the
-			// worker is running so the binding is discoverable.
-			tui::SetStatusBar(compose_status()
-				+ "  " + tui::Dim("ctrl+x: amend"));
-		}
-
-		// Wait until the worker has finished streaming the response
-		// and has released display ownership.
-		{
-			std::unique_lock<std::mutex> dlk(worker.fDisplayMu);
-			worker.fDisplayCv.wait(dlk, [&]{
-				return !worker.fWorkerOwnsDisplay;
-			});
-		}
-		// Restore the normal status bar (without the hint) now that
-		// the turn is complete and we own the display again.
-		tui::SetStatusBar(compose_status());
-
-		// Drain the result posted by the worker.
-		TurnResult result;
-		{
-			std::lock_guard<std::mutex> lk(worker.fMu);
-			if (worker.fResult.has_value()) {
-				result = std::move(*worker.fResult);
-				worker.fResult.reset();
-			}
-		}
-
-		const double elapsed = result.elapsed;
-
-		if (!result.ok) {
-			// messages[] was already rolled back by the worker.
-			if (remote && remote->Running())
-				remote->MirrorCancel();
-			// Ctrl+X cancel-and-retype: restore the user's input to
-			// the libedit buffer so they can amend and resubmit.
-			// Also remove the cancelled turn from history so up-arrow
-			// only surfaces the amended re-submission.
-			if (!result.cancelledInput.empty()) {
-				repl::RemoveLastRecord();
-				repl::RestoreInput(result.cancelledInput);
-			}
-			continue;
-		}
-
-		++turn_count;
-		session_input  += result.inputTokens;
-		session_output += result.outputTokens;
-		stats::RecordTurn(result.inputTokens, result.outputTokens,
-						  result.cacheRead, result.cacheWrite);
-
-		// Append newly-discovered URLs to the session list.
-		// The worker already deduped against session_urls.
-		for (auto& url : result.newUrls)
-			session_urls.push_back(std::move(url));
-
-		// Refresh the BFS summary snapshot for any paths whose
-		// claude:summary attribute was written during this turn.
-		// O(changed) — no full filesystem walk needed.
-		if (!result.writtenSummaryPaths.empty())
-			config::RefreshSummarySnapshot(result.writtenSummaryPaths);
-
-		// Desktop notification for slow turns.
-		if (notify_enabled && elapsed >= notify_min_duration) {
-			notify::Send(
-				notify::PickPlayfulTitle(elapsed),
-				notify::FirstSentence(result.assistantText, 120));
-		}
-
-		// Auto-compact: if this turn's input-token count crosses
-		// the threshold share of the model's context window, fire
-		// /compact immediately (no confirmation prompt).
-		if (compact_auto_threshold > 0.0) {
-			const int window = models::DetectContextWindow(model, compact_window_override);
-			const int trigger = static_cast<int>(window * compact_auto_threshold);
-			if (result.inputTokens >= trigger) {
-				char note[160];
-				std::snprintf(note, sizeof(note),
-					"[auto-compact: context at %d%% (%d / %d tokens) — compacting now]",
-					(result.inputTokens * 100) / window,
-					result.inputTokens, window);
-				std::cout << tui::Meta(note) << "\n";
-				commands::LoopCtx ac_ctx{auth, max_tokens, custom_system, prices, model,
-				                         turn_count, session_input, session_output, messages,
-				                         session_urls, notify_enabled, notify_min_duration,
-				                         [&]() { tui::SetStatusBar(compose_status()); }};
-				ac_ctx.auto_compact          = true;
-				ac_ctx.resume_name           = resume_name;
-				ac_ctx.compact_auto_threshold  = compact_auto_threshold;
-				ac_ctx.compact_window_override = compact_window_override;
-				std::string dummy;
-				commands::Dispatch("/compact", ac_ctx, dummy);
-			}
-		}
-
-		config::LogLine("turn " + std::to_string(turn_count)
-				 + " model=" + model
-				 + " in=" + std::to_string(result.inputTokens)
-				 + " out=" + std::to_string(result.outputTokens)
-				 + " cache_r=" + std::to_string(result.cacheRead)
-				 + " cache_w=" + std::to_string(result.cacheWrite));
-
-		// Push the updated session counters into the fixed-bottom
-		// status row.
-		tui::SetStatusBar(compose_status());
-
-		// Mirror the local turn to the primary Telegram chat.
-		if (remote && remote->Running()) {
-			remote->MirrorToPrimary(result.assistantText);
-		}
-
-		config::SaveHistory(messages, model, resume_name);
-
-		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistantText}});
+		dispatch_turn(line, std::move(api_content), std::move(snapshot), system_for_turn);
 	}
 	return 0;
 }

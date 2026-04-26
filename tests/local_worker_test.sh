@@ -84,11 +84,13 @@ LINE_JOB=$(grep -n 'fPendingJob = std::move' "$SRC" | head -1 | cut -d: -f1)
 pass
 
 # ── A6: Main thread waits on fDisplayCv for !fWorkerOwnsDisplay ───────────────
-step "A6: main thread waits on fDisplayCv with predicate !fWorkerOwnsDisplay"
+step "A6: fDisplayCv.wait used for Ctrl+D/EOF drain path (turn completion wait)"
+# The non-blocking design polls fWorkerOwnsDisplay at the top of the loop;
+# the only remaining fDisplayCv.wait is in the EOF/Ctrl+D drain path.
 grep -q 'fDisplayCv.wait' "$SRC" \
-    || fail "fDisplayCv.wait not found in $SRC"
-grep -q '!worker\.fWorkerOwnsDisplay' "$SRC" \
-    || fail "wait predicate '!worker.fWorkerOwnsDisplay' not found in $SRC"
+    || fail "fDisplayCv.wait not found in $SRC (needed for EOF drain)"
+grep -q 'fWorkerOwnsDisplay' "$SRC" \
+    || fail "fWorkerOwnsDisplay not referenced in $SRC"
 pass
 
 # ── A7: Worker releases display under fDisplayMu, then notifies fDisplayCv ────
@@ -186,26 +188,24 @@ grep -q 'fShutdown && !w\.fPendingJob\.has_value()' "$SRC" \
     || fail "shutdown drain check 'fShutdown && !w.fPendingJob.has_value()' not found in $SRC"
 pass
 
-# ── A14: Snapshot is taken before worker push_back, not after ─────────────────
+# ── A14: Snapshot is taken before dispatch, not after ─────────────────────────
 step "A14: job.snapshot is the pre-turn messages[] (captured before user push_back)"
-# The main thread captures the snapshot and passes it in TurnJob.
+# The main thread captures the snapshot and passes it to dispatch_turn.
 # The worker then does push_back(user-turn) using job.apiContent.
-# Verify that in the main-thread dispatch block, 'const json snapshot = messages'
-# appears before 'job.snapshot = snapshot' (i.e. job is built from snapshot).
+# Verify that 'const json snapshot = messages' appears in the file and that
+# job.snapshot is assigned from it (inside the dispatch_turn lambda or call site).
 LINE_SNAP=$(grep -n 'const json snapshot = messages' "$SRC" | head -1 | cut -d: -f1)
-LINE_JOB_SNAP=$(grep -n 'job\.snapshot.*=.*snapshot' "$SRC" | grep -v 'fMessages' | head -1 | cut -d: -f1)
+LINE_JOB_SNAP=$(grep -n 'job\.snapshot.*=.*snapshot\|job\.snapshot.*=.*std::move(snapshot' "$SRC" \
+    | grep -v 'fMessages' | head -1 | cut -d: -f1)
 [ -n "$LINE_SNAP"     ] || fail "'const json snapshot = messages' not found in $SRC"
-[ -n "$LINE_JOB_SNAP" ] || fail "job.snapshot = snapshot assignment not found in $SRC"
-[ "$LINE_SNAP" -lt "$LINE_JOB_SNAP" ] \
-    || fail "snapshot capture (L$LINE_SNAP) must precede job.snapshot assignment (L$LINE_JOB_SNAP)"
-# Worker push_back uses the snapshot-based job, not a direct messages.push_back in main.
-# Verify: between snapshot capture and job enqueue, there is NO messages.push_back.
-LINE_NOTIFY=$(grep -n 'worker\.fJobCv\.notify_one()' "$SRC" | head -1 | cut -d: -f1)
-[ -n "$LINE_NOTIFY" ] || fail "worker.fJobCv.notify_one() not found in $SRC"
-BAD=$(awk -v s="$LINE_SNAP" -v e="$LINE_NOTIFY" \
+[ -n "$LINE_JOB_SNAP" ] || fail "job.snapshot assignment not found in $SRC"
+# Worker push_back must not exist in main thread between snapshot and dispatch call.
+LINE_DISPATCH=$(grep -n 'dispatch_turn(' "$SRC" | head -1 | cut -d: -f1)
+[ -n "$LINE_DISPATCH" ] || fail "dispatch_turn() call not found in $SRC"
+BAD=$(awk -v s="$LINE_SNAP" -v e="$LINE_DISPATCH" \
     'NR>s && NR<e && /messages\.push_back/' "$SRC")
 [ -z "$BAD" ] \
-    || fail "messages.push_back found between snapshot and notify — main thread must not push user turn directly"
+    || fail "messages.push_back found between snapshot capture and dispatch_turn() call"
 pass
 
 # ── A15: WorkerGuard uses notify_all, not notify_one, for shutdown ─────────────
@@ -230,31 +230,30 @@ pass
 
 # ── A17: Post-turn uses TurnResult field names (not api::SendResult names) ─────
 step "A17: post-turn bookkeeping uses result.inputTokens/outputTokens (not input_tokens)"
-# After the worker refactor the main thread reads TurnResult, not api::SendResult.
-# The old snake_case names (input_tokens, output_tokens) must not appear in the
-# post-turn block (between fDisplayCv.wait and the closing brace of the turn loop).
-LINE_WAIT=$(grep -n 'fDisplayCv\.wait' "$SRC" | head -1 | cut -d: -f1)
+# The drain_turn lambda must use TurnResult camelCase names.
+# The old snake_case names (input_tokens, output_tokens) must not appear
+# in the drain_turn lambda body.
+LINE_DRAIN=$(grep -n 'auto drain_turn' "$SRC" | head -1 | cut -d: -f1)
 LINE_SAVE=$(grep -n 'config::SaveHistory' "$SRC" | tail -1 | cut -d: -f1)
-[ -n "$LINE_WAIT" ] || fail "fDisplayCv.wait not found"
-[ -n "$LINE_SAVE" ] || fail "config::SaveHistory not found"
-BAD=$(awk -v s="$LINE_WAIT" -v e="$LINE_SAVE" \
+[ -n "$LINE_DRAIN" ] || fail "drain_turn lambda not found in $SRC"
+[ -n "$LINE_SAVE"  ] || fail "config::SaveHistory not found in $SRC"
+BAD=$(awk -v s="$LINE_DRAIN" -v e="$LINE_SAVE" \
     'NR>=s && NR<=e && /result\.input_tokens|result\.output_tokens/' "$SRC")
 [ -z "$BAD" ] \
-    || fail "old api::SendResult field names found in post-turn block — use TurnResult names"
+    || fail "old api::SendResult field names found in drain_turn — use TurnResult names"
 pass
 
 # ── A18: URL harvest uses result.newUrls (deduped by worker) ──────────────────
 step "A18: main thread uses result.newUrls for URL list (worker already deduped)"
 grep -q 'result\.newUrls' "$SRC" \
     || fail "result.newUrls not referenced in $SRC"
-# The old per-turn notify::ExtractUrls call should NOT appear in the post-turn
-# main-thread block (between fDisplayCv.wait and SaveHistory).
-LINE_WAIT=$(grep -n 'fDisplayCv\.wait' "$SRC" | head -1 | cut -d: -f1)
+# notify::ExtractUrls must not appear in drain_turn (belongs in LocalWorkerFunc).
+LINE_DRAIN=$(grep -n 'auto drain_turn' "$SRC" | head -1 | cut -d: -f1)
 LINE_SAVE=$(grep -n 'config::SaveHistory' "$SRC" | tail -1 | cut -d: -f1)
-BAD=$(awk -v s="$LINE_WAIT" -v e="$LINE_SAVE" \
+BAD=$(awk -v s="$LINE_DRAIN" -v e="$LINE_SAVE" \
     'NR>=s && NR<=e && /notify::ExtractUrls/' "$SRC")
 [ -z "$BAD" ] \
-    || fail "notify::ExtractUrls called in main-thread post-turn block — URL extraction belongs in LocalWorkerFunc"
+    || fail "notify::ExtractUrls called in drain_turn — URL extraction belongs in LocalWorkerFunc"
 pass
 
 # ── A19: hooks::Fire(Stop) uses result.assistantText ──────────────────────────
@@ -273,13 +272,15 @@ pass
 
 # ── A20: config::SaveHistory is called after each successful turn ──────────────
 step "A20: config::SaveHistory is called in the post-turn success path"
-# SaveHistory must appear after the 'if (!result.ok)' failure branch continue.
-LINE_FAIL=$(grep -n '// messages\[\] was already rolled back' "$SRC" | head -1 | cut -d: -f1)
-LINE_SAVE=$(grep -n 'config::SaveHistory' "$SRC" | tail -1 | cut -d: -f1)
-[ -n "$LINE_FAIL" ] || fail "rollback comment not found — cannot determine failure branch location"
-[ -n "$LINE_SAVE" ] || fail "config::SaveHistory not found in $SRC"
-[ "$LINE_SAVE" -gt "$LINE_FAIL" ] \
-    || fail "config::SaveHistory (L$LINE_SAVE) must appear after failure branch (L$LINE_FAIL)"
+# SaveHistory must appear in the drain_turn lambda, after the !result.ok
+# early-return path.
+LINE_DRAIN=$(grep -n 'auto drain_turn' "$SRC" | head -1 | cut -d: -f1)
+LINE_FAIL_RETURN=$(awk -v after="$LINE_DRAIN" \
+    'NR > after && /return true.*session continues\|MirrorCancel/ {print NR; exit}' "$SRC")
+LINE_SAVE=$(awk -v after="${LINE_FAIL_RETURN:-0}" \
+    'NR > after && /config::SaveHistory/ {print NR; exit}' "$SRC")
+[ -n "$LINE_DRAIN"  ] || fail "drain_turn lambda not found in $SRC"
+[ -n "$LINE_SAVE"   ] || fail "config::SaveHistory not found after failure path in $SRC"
 pass
 
 # ── A21: stats::RecordTurn receives cacheRead/cacheWrite from TurnResult ───────
@@ -299,19 +300,18 @@ echo "$RECORD_BLOCK" | grep -q 'cacheWrite' \
 pass
 
 # ── A22: Display lock acquired before job lock during enqueue (lock ordering) ──
-step "A22: enqueue acquires fDisplayMu before fMu (prevents ABBA deadlock)"
-# The dispatch block must acquire fDisplayMu (for fWorkerOwnsDisplay=true)
-# before it acquires fMu (for fPendingJob assignment).
-# We verify line ordering: lock_guard(fDisplayMu) < lock_guard(fMu).
-LINE_LOOP=$(grep -n 'int InteractiveLoop' "$SRC" | head -1 | cut -d: -f1)
-LINE_DISP=$(awk -v after="$LINE_LOOP" \
+step "A22: dispatch_turn acquires fDisplayMu before fMu (prevents ABBA deadlock)"
+# The dispatch_turn lambda must acquire fDisplayMu (fWorkerOwnsDisplay=true)
+# before fMu (fPendingJob assignment). Verify line ordering within the lambda.
+LINE_DISPATCH_LAMBDA=$(grep -n 'auto dispatch_turn' "$SRC" | head -1 | cut -d: -f1)
+LINE_DISP=$(awk -v after="$LINE_DISPATCH_LAMBDA" \
     'NR > after && /lock_guard.*fDisplayMu/ {print NR; exit}' "$SRC")
 LINE_JOBMU=$(awk -v after="${LINE_DISP:-0}" \
     'NR > after && /lock_guard.*fMu/ {print NR; exit}' "$SRC")
-[ -n "$LINE_DISP"  ] || fail "lock_guard(fDisplayMu) not found in enqueue block"
+[ -n "$LINE_DISP"  ] || fail "lock_guard(fDisplayMu) not found in dispatch_turn"
 [ -n "$LINE_JOBMU" ] || fail "lock_guard(fMu) not found after lock_guard(fDisplayMu)"
 [ "$LINE_DISP" -lt "$LINE_JOBMU" ] \
-    || fail "fDisplayMu (L$LINE_DISP) must be locked before fMu (L$LINE_JOBMU) to respect lock ordering"
+    || fail "fDisplayMu (L$LINE_DISP) must be locked before fMu (L$LINE_JOBMU)"
 pass
 
 # ── A23: Worker loops and accepts multiple sequential jobs ─────────────────────

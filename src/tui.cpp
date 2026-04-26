@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
+#include <mutex>
+#include <streambuf>
+#include <string>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -44,6 +47,103 @@ bool detect_color_support() {
 
 void Init() {
 	g_color_enabled = detect_color_support();
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent-output pending buffer.
+//
+// When a turn is in progress the main thread is inside libedit's
+// readline() call while the worker thread is streaming the response.
+// Both write to stdout (libedit on row N-2; the worker to the scroll
+// region).  Writing concurrently corrupts the terminal state.
+//
+// Solution: while a turn is active, std::cout is redirected through
+// TurnOutputBuf which accumulates worker output in g_turn_pending
+// (under g_turn_pending_mu).  The repl getcfn hook (called by libedit
+// before every keypress read) flushes g_turn_pending to the scroll
+// region using DECSC/DECRC so libedit's cursor on row N-2 is
+// undisturbed.
+//
+// BeginTurn() installs the interceptor; EndTurn() removes it and
+// flushes any remaining buffered output.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::mutex   g_turn_pending_mu;
+std::string  g_turn_pending;
+std::streambuf* g_cout_orig_buf = nullptr;
+
+// Custom streambuf: while active, all cout writes go to g_turn_pending.
+class TurnOutputBuf : public std::streambuf {
+public:
+	// Write a sequence of characters into the pending buffer.
+	std::streamsize xsputn(const char* s, std::streamsize n) override {
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		g_turn_pending.append(s, static_cast<size_t>(n));
+		return n;
+	}
+	// Single-character write (fallback path used by some libc impls).
+	int overflow(int c) override {
+		if (c == EOF) return c;
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		g_turn_pending.push_back(static_cast<char>(c));
+		return c;
+	}
+};
+
+TurnOutputBuf g_turn_buf;
+
+} // namespace
+
+// Flush buffered turn output to the scroll region using DECSC/DECRC
+// so libedit's cursor on the input row (N-2) is preserved.
+// Must be called with g_turn_pending_mu NOT held.
+void FlushTurnOutput() {
+	std::string chunk;
+	{
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		if (g_turn_pending.empty()) return;
+		chunk.swap(g_turn_pending);
+	}
+	// DECSC — save cursor (position + attributes).
+	// Write the chunk into the scroll region (cursor is already there
+	// from the last write, or at the scroll-region bottom on first call).
+	// DECRC — restore cursor to where libedit left it (input row N-2).
+	// We write directly to the original cout buf (bypassing the
+	// interceptor) so there is no re-entrant buffering.
+	if (g_cout_orig_buf) {
+		const std::string out = "\x1b""7" + chunk + "\x1b""8";
+		g_cout_orig_buf->sputn(out.data(), static_cast<std::streamsize>(out.size()));
+		// Flush the underlying stream buffer.
+		g_cout_orig_buf->pubsync();
+	} else {
+		// No interceptor installed — write directly.
+		std::cout << chunk;
+		std::cout.flush();
+	}
+}
+
+void BeginTurn() {
+	if (!isatty(fileno(stdout))) return;
+	if (g_cout_orig_buf) return; // already installed
+	{
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		g_turn_pending.clear();
+	}
+	// Redirect cout through the interceptor.
+	g_cout_orig_buf = std::cout.rdbuf(&g_turn_buf);
+}
+
+void EndTurn() {
+	if (!g_cout_orig_buf) return;
+	// Restore cout to the original buffer first, then flush so the
+	// remaining pending output goes to the real terminal.
+	std::cout.rdbuf(g_cout_orig_buf);
+	g_cout_orig_buf = nullptr;
+	// Flush whatever the worker left in the buffer.
+	FlushTurnOutput();
+	std::cout.flush();
 }
 
 namespace {

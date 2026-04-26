@@ -101,6 +101,13 @@ extern "C" int bracketed_getc(FILE* f) {
     if (g_paste_pos < g_paste_buf.size())
         return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
 
+    // Flush any pending worker output to the scroll region before
+    // blocking on read. This is the safe window: libedit has finished
+    // its previous redraw and will not touch the terminal until after
+    // this read returns. DECSC/DECRC in FlushTurnOutput() preserves
+    // libedit's cursor on the input row.
+    tui::FlushTurnOutput();
+
     const int c = raw_getc(f);
     if (c == EOF) return c;
 
