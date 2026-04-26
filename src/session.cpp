@@ -477,7 +477,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// Queued input: typed by the user while a turn was in flight.
 	// Dispatched as the next turn immediately after the current one
 	// completes, without returning to ReadMessage().
-	std::string queued_line;
 	bool        turn_active = false;   // true while worker owns display
 
 	// Helper: drain the worker result and run all post-turn bookkeeping.
@@ -609,7 +608,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		worker.fJobCv.notify_one();
 
 		tui::SetStatusBar(compose_status()
-			+ "  " + tui::Dim("ctrl+x: amend · typing queues next"));
+			+ "  " + tui::Dim("ctrl+x: amend · enter waits"));
 	};
 
 	while (true) {
@@ -643,15 +642,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 		std::string line;
 
-		// ── Drain queued input (typed while turn was running) ─────────
-		if (!queued_line.empty()) {
-			line = std::move(queued_line);
-			queued_line.clear();
-			tui::ClearInputRow();
-			tui::PositionCursorForChat();
-			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
-			tui::PositionCursorForChat();
-		} else if (!pending.empty()) {
+		if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
 			tui::ClearInputRow();
@@ -699,21 +690,23 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			continue;
 		}
 
-		// ── If a turn is still active, queue the line ─────────────────
-		// The user typed while the previous turn was streaming.
-		// Hold the line and loop back — drain_turn() at the top of
-		// the next iteration will drain the result, then the queued
-		// line will be dispatched without going back to ReadMessage().
+		// ── If a turn is still active, wait for it to finish ────────
+		// We must drain before doing anything — slash commands need
+		// stdout restored (EndTurn) before they can print or show menus,
+		// and normal prompts need the conversation to be sequential.
 		if (turn_active) {
-			// Only queue one line; if the user types more before the
-			// turn finishes, silently drop extras (they can retype).
-			if (queued_line.empty()) {
-				queued_line = line;
-				std::cout << tui::Dim("[queued — waiting for response to finish]") << "\n";
-			} else {
-				std::cout << tui::Dim("[already queued — please wait]") << "\n";
+			{
+				std::unique_lock<std::mutex> dlk(worker.fDisplayMu);
+				worker.fDisplayCv.wait(dlk, [&]{
+					return !worker.fWorkerOwnsDisplay;
+				});
 			}
-			continue;
+			turn_active = false;
+			if (!drain_turn()) break;
+			// Re-echo the user's input so it appears in scroll history.
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
+			tui::PositionCursorForChat();
 		}
 
 		// Drag-and-drop from Tracker: if libedit hands back a line

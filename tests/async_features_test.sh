@@ -181,8 +181,8 @@ grep -q '!result\.cancelledInput\.empty()' "$SESS" \
 pass
 
 # ── B14: status bar shows ctrl+x hint while worker is active ─────────────────
-step "B14: status bar is updated with ctrl+x: amend hint after job is enqueued"
-grep -q 'ctrl+x: amend\|ctrl+x:amend' "$SESS" \
+step "B14: status bar is updated with ctrl+x hint after job is enqueued"
+grep -q 'ctrl+x.*amend\|ctrl+x:amend' "$SESS" \
     || fail "ctrl+x: amend hint not found in $SESS"
 # The hint must appear after notify_one() (i.e. after the job is dispatched).
 LINE_NOTIFY=$(grep -n 'worker\.fJobCv\.notify_one()' "$SESS" | head -1 | cut -d: -f1)
@@ -519,12 +519,16 @@ BETWEEN=$(awk -v s="$LINE_DISPATCH_LAMBDA" -v e="$LINE_DRAIN_LAMBDA" \
     || fail "unconditional fDisplayCv.wait found in dispatch path — main thread should not block"
 pass
 
-# ── C14: Queued input is stored and dispatched after current turn finishes ─────
-step "C14: queued_line holds user input typed during a turn and is dispatched next iteration"
-grep -q 'queued_line' "$SESS" \
-    || fail "queued_line variable not found in $SESS"
-grep -q '\[queued\|queued.*waiting\|queued_line\.empty' "$SESS" \
-    || fail "queued-line dispatch or annotation not found in $SESS"
+# ── C14: Input while turn active waits for turn completion ────────────────────
+step "C14: input while turn active blocks on fDisplayCv.wait until worker finishes"
+grep -q 'fDisplayCv\.wait' "$SESS" \
+    || fail "fDisplayCv.wait not found in $SESS"
+# The blocking wait in the turn_active block ensures drain happens before dispatch.
+LINE_ACTIVE=$(grep -n 'If a turn is still active' "$SESS" | head -1 | cut -d: -f1)
+LINE_WAIT=$(awk -v after="${LINE_ACTIVE:-0}" \
+    'NR > after && NR <= after+15 && /fDisplayCv\.wait/ {print NR; exit}' "$SESS")
+[ -n "$LINE_ACTIVE" ] || fail "'If a turn is still active' comment not found in $SESS"
+[ -n "$LINE_WAIT"   ] || fail "fDisplayCv.wait not found within 15 lines of turn_active block"
 pass
 
 # ── C15: EOF / Ctrl+D drains active turn before breaking ──────────────────────
