@@ -874,7 +874,7 @@ returning to `ReadMessage()`. This milestone lifts that
 constraint so the user can type the next prompt — or cancel the
 current one — while the response is still streaming.
 
-#### Cancel-and-retype (Ctrl+X)
+#### Cancel-and-retype (Ctrl+X) ✓
 
 A dedicated keypress (Ctrl+X, distinct from ESC/Ctrl+C which
 discard the turn) cancels the in-flight request and restores
@@ -883,25 +883,20 @@ editing. Use case: you press Enter, immediately notice a typo
 or missing context, and want to amend without retyping from
 scratch.
 
-- [ ] **`repl::RestoreInput(line)`** — new function that writes
-      a string into libedit's current line buffer and redraws
-      the prompt, as if the user had typed it. Used by the
-      cancel-and-retype path to seed the next prompt with the
-      previous turn's text.
-- [ ] **Ctrl+X binding in cbreak monitor** — the ESC-watch
-      thread (already running during curl streams) is extended
-      to watch for `0x18` (Ctrl+X). On match: set
-      `g_interrupted` (aborts curl, same as ESC/Ctrl+C), then
-      post the cancelled `userText` string to a new
-      `fCancelledInput` field on `LocalWorker`. Main thread
-      reads it after drain and calls `repl::RestoreInput`.
-- [ ] **`TurnResult.cancelledInput`** — optional string; set by
-      the worker when the turn was interrupted via Ctrl+X (not
-      plain ESC). Main thread checks it and calls
-      `repl::RestoreInput` before looping back to `ReadMessage`.
-- [ ] **Status-bar hint** — while a turn is running, the status
-      bar shows `ctrl+x: amend` alongside the existing
-      `esc: cancel` hint so the new binding is discoverable.
+- [x] **`repl::RestoreInput(line)`** — pushes bytes in reverse
+      via `rl_stuff_char` so libedit's LIFO queue drains
+      left-to-right into the edit buffer at the start of the
+      next `readline()` call.
+- [x] **Ctrl+X binding in cbreak monitor** — the ESC-watch
+      thread watches for `0x18`; sets `g_cancel_retype = 1` and
+      `g_interrupted = 1`. Worker records `job.userText` into
+      `TurnResult.cancelledInput` and clears `g_cancel_retype`.
+- [x] **`TurnResult.cancelledInput`** — set by the worker on
+      Ctrl+X. `InteractiveLoop` calls `repl::RestoreInput` when
+      non-empty before looping back to `ReadMessage`.
+- [x] **Status-bar hint** — `ctrl+x: amend` dim label shown in
+      the status bar while a turn is running; cleared on
+      completion.
 - [ ] **History: don't record cancelled turns** — a turn
       aborted via Ctrl+X should not be added to libedit history
       or `SaveHistory`; the amended re-submission is the
@@ -936,7 +931,7 @@ explicitly queues it).
 
 ---
 
-### v1.4.1 — BFS summary snapshot background refresh
+### v1.4.1 — BFS summary snapshot background refresh ✓
 
 The `claude:summary` snapshot loaded at session start grows
 stale as Claude writes new `WriteAttr` calls during the session.
@@ -944,27 +939,16 @@ A background refresh keeps the in-process cache consistent so
 later turns in the same session benefit from summaries written
 earlier without restarting.
 
-The `LocalWorker` thread provides a natural hook: immediately
-after `SaveHistory` the worker has finished its bookkeeping and
-is about to go idle. That window is the right place to re-scan
-changed attributes without blocking the main thread.
-
-- [ ] **`config::RefreshSummarySnapshot(changed_paths)`** — new
-      function that accepts a list of paths whose `claude:summary`
-      attribute may have changed and updates only those entries in
-      the process-scoped snapshot cache, avoiding a full
-      filesystem walk. Called by the worker after each successful
-      turn.
-- [ ] **`WriteAttr` result carries changed paths** — when
-      `SendWithTools` processes a `WriteAttr` tool call that
-      touches the `claude:summary` attribute, the path is
-      appended to a `TurnResult.writtenSummaryPaths` vector.
-      The worker passes this to `RefreshSummarySnapshot` before
-      posting the result.
-- [ ] **Full re-scan on `/compact`** — compaction rewrites the
-      conversation but doesn't change files; a full re-scan is
-      cheap enough (one `catattr` per tracked file, <300 ms for
-      a 17-file project) to run as a post-compact hook.
+- [x] **`config::RefreshSummarySnapshot(changed_paths)`** —
+      O(changed) per-path update via `catattr`; removes old line
+      by prefix match, inserts new value if valid UTF-8.
+- [x] **`TurnResult.writtenSummaryPaths`** — `SendWithTools`
+      accumulates paths from successful `WriteAttr claude:summary`
+      calls in a thread-local vector; `api::DrainWrittenSummaryPaths()`
+      returns and clears it. Worker stores it in `TurnResult`;
+      `InteractiveLoop` calls `RefreshSummarySnapshot` when non-empty.
+- [x] **Full re-scan on `/compact`** — `commands.cpp` calls
+      `config::ReloadBfsSummaries()` after `SaveHistory`.
 - [ ] **Session-start cap** — if the snapshot already covers
       more than 500 files, skip the per-turn refresh and note
       in the BFS system-prompt block that the cache may be
