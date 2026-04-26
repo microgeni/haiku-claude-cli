@@ -59,6 +59,13 @@ void BeginTurn();
 void EndTurn();
 void FlushTurnOutput();
 
+// Pause / resume the flush-timer thread so SelectOption() has
+// exclusive access to stdout and stdin without concurrent rendering
+// corrupting the menu or leaking terminal query responses into the
+// input queue.  No-ops when no turn is active (safe to call always).
+void PauseFlushTimer();
+void ResumeFlushTimer();
+
 // Set to true by FlushTurnOutput when the turn-done callback fires.
 // Read by bracketed_getc in repl.cpp to inject a synthetic Enter
 // (only when the edit buffer is empty) so the main loop drains the

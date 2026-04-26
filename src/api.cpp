@@ -444,6 +444,7 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		};
 		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
 		if (g_active_esc_guard) g_active_esc_guard->pause();
+		tui::PauseFlushTimer();
 		const int race_pre_lines =
 			(extra.empty()
 				? 1
@@ -452,12 +453,20 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
 											 &tg_answered, race_pre_lines);
 		if (g_active_esc_guard) g_active_esc_guard->resume();
+		tui::ResumeFlushTimer();
 		tui::PositionCursorForChat();
 
 		{
 			std::unique_lock<std::mutex> lk(race_mu);
 			if (!tg_answered.load()) {
-				if (picked == 1) {
+				if (picked == -2) {
+					// Tab/amend: cancel turn and restore input to edit buffer.
+					g_cancel_retype = 1;
+					g_interrupted   = 1;
+					if (denial_reason)
+						*denial_reason = "user chose to amend the prompt";
+					result = Permission::Deny;
+				} else if (picked == 1) {
 					AlwaysAllowed().insert(tool_name);
 					result = Permission::Allow;
 				} else if (picked == 0) {
@@ -554,12 +563,22 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		"No",
 	};
 	if (g_active_esc_guard) g_active_esc_guard->pause();
+	tui::PauseFlushTimer();
 	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
+	tui::ResumeFlushTimer();
 	if (g_active_esc_guard) g_active_esc_guard->resume();
 	tui::PositionCursorForChat();
 
 	if (g_interrupted && picked >= static_cast<int>(choices.size()) - 1) {
 		if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
+		return Permission::Deny;
+	}
+	if (picked == -2) {
+		// Tab pressed — "amend": cancel the turn and restore the user's
+		// original input to the edit buffer so they can retype/edit it.
+		g_cancel_retype = 1;
+		g_interrupted   = 1;
+		if (denial_reason) *denial_reason = "user chose to amend the prompt";
 		return Permission::Deny;
 	}
 	if (picked == 1) {

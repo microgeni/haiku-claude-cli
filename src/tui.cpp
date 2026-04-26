@@ -108,6 +108,14 @@ TurnOutputBuf g_turn_buf;
 std::atomic<bool> g_flush_timer_running{false};
 std::thread       g_flush_timer_thread;
 
+// Pause/resume flag for the flush timer.  When g_flush_timer_paused is
+// true the timer loop spins on a short sleep without calling
+// FlushTurnOutput() or touching stdout, giving SelectOption() exclusive
+// access to the terminal.  g_flush_timer_paused_ack is set by the
+// timer loop once it has acknowledged the pause.
+std::atomic<bool> g_flush_timer_paused    {false};
+std::atomic<bool> g_flush_timer_paused_ack{false};
+
 // Scroll-region cursor tracking across flushes. Set to scroll-region
 // bottom col 1 on the first flush; updated by simulating cursor movement
 // through each chunk so subsequent flushes CUP to the correct position.
@@ -233,10 +241,21 @@ void BeginTurn() {
 	// newline into libedit's input queue so the main loop wakes up and
 	// calls drain_turn() without requiring a real keypress.
 	g_flush_timer_running.store(true);
+	g_flush_timer_paused.store(false);
+	g_flush_timer_paused_ack.store(false);
 	g_flush_timer_thread = std::thread([]() {
 		while (g_flush_timer_running.load()) {
+			// When paused, spin without touching stdout so SelectOption()
+			// has exclusive access to the terminal.
+			if (g_flush_timer_paused.load()) {
+				g_flush_timer_paused_ack.store(true);
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				continue;
+			}
+			g_flush_timer_paused_ack.store(false);
 			std::this_thread::sleep_for(std::chrono::milliseconds(16));
 			if (!g_flush_timer_running.load()) break;
+			if (g_flush_timer_paused.load())  continue; // re-check after sleep
 			FlushTurnOutput();
 			// When the turn finishes, set g_turn_just_completed so
 			// bracketed_getc can return a synthetic '\r' on its next
@@ -544,6 +563,32 @@ void ShowCursor() {
 	if (!g_color_enabled) return;
 	if (!isatty(fileno(stdout))) return;
 	DirectWrite("\x1b[?25h");
+}
+
+void PauseFlushTimer() {
+	if (!g_flush_timer_running.load()) return;
+	g_flush_timer_paused.store(true);
+	// Wait until the timer loop acknowledges the pause so we know it
+	// is no longer mid-FlushTurnOutput() when SelectOption() starts.
+	// Worst-case wait: one 16 ms sleep + one 10 ms spin cycle ≈ 30 ms.
+	for (int i = 0; i < 50 && !g_flush_timer_paused_ack.load(); ++i)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+	// Flush any pending turn output now so it appears above the menu,
+	// then bypass the interceptor so SelectOption()'s std::cout writes
+	// go directly to the terminal while the timer is paused.
+	FlushTurnOutput();
+	if (g_cout_orig_buf)
+		std::cout.rdbuf(g_cout_orig_buf);
+}
+
+void ResumeFlushTimer() {
+	// Reconnect the interceptor so worker output is buffered again,
+	// then wake the flush timer.
+	if (g_cout_orig_buf)
+		std::cout.rdbuf(&g_turn_buf);
+	g_flush_timer_paused_ack.store(false);
+	g_flush_timer_paused.store(false);
 }
 
 int SelectOption(const std::vector<std::string>& options,
