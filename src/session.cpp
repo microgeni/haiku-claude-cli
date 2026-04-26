@@ -4,13 +4,17 @@
 #include <chrono>
 #include <cctype>
 #include <climits>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -105,6 +109,176 @@ bool line_is_path_drop(const std::string& line,
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// LocalWorker — runs SendWithTools (and post-turn bookkeeping that must stay
+// on the same thread as the API call) on a background thread so the main
+// thread can return to ReadMessage() immediately after the user presses Enter.
+//
+// Ownership protocol:
+//   • fWorkerOwnsDisplay == true  → worker is writing to stdout; main thread
+//     must not call ReadMessage() or print anything.
+//   • fWorkerOwnsDisplay == false → main thread owns stdout; worker is idle.
+//
+// Lifecycle: created once at InteractiveLoop entry, destroyed at exit.
+//   Enqueue() hands a job to the worker and sets fWorkerOwnsDisplay = true.
+//   The worker sets it back to false when it finishes, then posts the result.
+//   The main thread waits on fDisplayCv, drains the result, then shows the
+//   prompt again.
+// ---------------------------------------------------------------------------
+
+struct TurnJob {
+	// Inputs — snapshot taken at enqueue time.
+	std::string     userText;       // raw user message (display copy)
+	std::string     apiContent;     // may differ (attachment preamble prepended)
+	json            snapshot;       // messages[] before this turn (for rollback)
+	std::string     model;
+	int             maxTokens;
+	config::Auth    auth;
+	std::string     systemPrompt;
+	bool            hasTelegram;    // true → call Mirror*/Acquire/Release
+};
+
+struct TurnResult {
+	bool            ok          = false;
+	int             exitCode    = 0;
+	int             inputTokens = 0;
+	int             outputTokens= 0;
+	int             cacheRead   = 0;
+	int             cacheWrite  = 0;
+	double          elapsed     = 0.0;
+	std::string     assistantText;
+	std::vector<std::string> newUrls;
+};
+
+// All fields accessed from both threads are protected by fMu except
+// fWorkerOwnsDisplay which has its own mutex so the main thread can
+// wait on it without holding fMu.
+struct LocalWorker {
+	// ── job queue (main → worker) ─────────────────────────────────
+	std::mutex              fMu;
+	std::condition_variable fJobCv;
+	std::optional<TurnJob>  fPendingJob;   // at most one job queued
+	bool                    fShutdown = false;
+
+	// ── result (worker → main) ────────────────────────────────────
+	std::condition_variable fResultCv;
+	std::optional<TurnResult> fResult;
+
+	// ── display ownership ─────────────────────────────────────────
+	// Separate mutex so the main thread can do a clean wait without
+	// holding fMu (which the worker also needs).
+	std::mutex              fDisplayMu;
+	std::condition_variable fDisplayCv;
+	bool                    fWorkerOwnsDisplay = false;
+
+	// ── back-pointers set before thread starts ────────────────────
+	// These are the InteractiveLoop-owned variables the worker writes.
+	// Access is safe because the main thread waits on fDisplayCv
+	// (i.e. is idle) while the worker is running.
+	json*                   fMessages       = nullptr;
+	int*                    fTurnCount      = nullptr;
+	int*                    fSessionInput   = nullptr;
+	int*                    fSessionOutput  = nullptr;
+	std::vector<std::string>* fSessionUrls  = nullptr;
+	std::string*            fModel          = nullptr;  // read-only during turn
+	std::string*            fResumeName     = nullptr;
+	const json*             fPrices         = nullptr;
+	bool*                   fNotifyEnabled  = nullptr;
+	double*                 fNotifyMinDur   = nullptr;
+	double                  fCompactThresh  = 0.0;
+	int                     fCompactWindow  = 0;
+	config::Auth*           fAuth           = nullptr;  // read-only during turn
+	std::string*            fCustomSystem   = nullptr;  // read-only during turn
+	telegram::RemoteControl* fRemote        = nullptr;  // may be null
+	std::function<void()>   fUpdateStatus;
+
+	std::thread             fThread;
+};
+
+// The background thread function. Loops waiting for jobs, executes
+// SendWithTools, posts the result, then idles.
+static void LocalWorkerFunc(LocalWorker& w)
+{
+	while (true) {
+		// Wait for a job or shutdown signal.
+		TurnJob job;
+		{
+			std::unique_lock<std::mutex> lk(w.fMu);
+			w.fJobCv.wait(lk, [&]{
+				return w.fPendingJob.has_value() || w.fShutdown;
+			});
+			if (w.fShutdown && !w.fPendingJob.has_value()) break;
+			job = std::move(*w.fPendingJob);
+			w.fPendingJob.reset();
+		}
+
+		// ── Execute the turn ──────────────────────────────────────
+		TurnResult result;
+		const auto turn_start = std::chrono::steady_clock::now();
+
+		api::StreamProgress stream_progress;
+
+		if (job.hasTelegram && w.fRemote) {
+			w.fRemote->AcquireTurn();
+			api::g_stream_progress = &stream_progress;
+			w.fRemote->MirrorPrompt(job.userText);
+			w.fRemote->StartThinkingUpdater(&stream_progress);
+		}
+
+		// Append user turn to the shared messages array.
+		// Safe: main thread is waiting on fDisplayCv and not touching
+		// fMessages while fWorkerOwnsDisplay == true.
+		w.fMessages->push_back({{"role", "user"}, {"content", job.apiContent}});
+
+		const api::SendResult api_result = api::SendWithTools(
+			job.auth, job.model, job.maxTokens,
+			*w.fMessages, job.systemPrompt);
+
+		if (job.hasTelegram && w.fRemote) {
+			w.fRemote->StopThinkingUpdater();
+			api::g_stream_progress = nullptr;
+			w.fRemote->ReleaseTurn();
+		}
+
+		result.elapsed     = std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - turn_start).count();
+		result.exitCode    = api_result.exit_code;
+		result.ok          = (api_result.exit_code == 0);
+		result.inputTokens = api_result.input_tokens;
+		result.outputTokens= api_result.output_tokens;
+		result.cacheRead   = api_result.cache_read_input_tokens;
+		result.cacheWrite  = api_result.cache_creation_input_tokens;
+		result.assistantText = api_result.assistant_text;
+
+		if (!result.ok) {
+			// Roll messages back to the snapshot so the failed turn
+			// is not permanently in the history.
+			*w.fMessages = job.snapshot;
+		} else {
+			// Extract URLs for /open.
+			for (auto& url : notify::ExtractUrls(result.assistantText)) {
+				if (std::find(w.fSessionUrls->begin(), w.fSessionUrls->end(), url)
+						== w.fSessionUrls->end()) {
+					result.newUrls.push_back(url);
+				}
+			}
+		}
+
+		// ── Post result, release display ──────────────────────────
+		{
+			std::lock_guard<std::mutex> lk(w.fMu);
+			w.fResult = std::move(result);
+		}
+		w.fResultCv.notify_one();
+
+		{
+			std::lock_guard<std::mutex> lk(w.fDisplayMu);
+			w.fWorkerOwnsDisplay = false;
+		}
+		w.fDisplayCv.notify_all();
+	}
+}
 
 std::string ComposeAttachmentPreamble(const std::vector<std::string>& paths) {
 	if (paths.empty()) return {};
