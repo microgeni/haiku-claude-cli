@@ -11,6 +11,7 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <poll.h>
 #include <sstream>
 #include <streambuf>
 #include <string>
@@ -624,7 +625,7 @@ int SelectOption(const std::vector<std::string>& options,
 	// Telegram hook answered while we were setting up raw mode), skip
 	// drawing the menu entirely and return immediately so no flash occurs.
 	if (cancel && cancel->load()) {
-		tcsetattr(fileno(stdin), TCSANOW, &orig);
+		tcsetattr(fileno(stdin), TCSAFLUSH, &orig);
 		return -1;
 	}
 
@@ -645,21 +646,40 @@ int SelectOption(const std::vector<std::string>& options,
 	// The heading row is (cursor_row); at most (cursor_row - 1) rows
 	// exist above it inside the scroll region, so cap pre_lines.
 	{
+		// Drain any stale bytes in the input queue (e.g. leftover CPR
+		// responses from a previous call) before sending the DSR so we
+		// don't mis-parse an old response as the current one.
+		{
+			struct pollfd pfd{};
+			pfd.fd     = fileno(stdin);
+			pfd.events = POLLIN;
+			char discard[64];
+			while (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))
+				::read(fileno(stdin), discard, sizeof(discard));
+		}
+
 		// Flush the render first, then query cursor position.
 		// We read on stdin which is already in raw mode (set above).
 		std::cout << "\x1b[6n" << std::flush;
 		// Read the CPR response: ESC [ row ; col R
+		// Use a poll()-based loop with per-byte 200 ms timeout so we
+		// handle fragmented responses (partial reads) reliably and don't
+		// block forever when the terminal doesn't respond.
 		char buf[32] = {};
 		int  pos     = 0;
-		// Give the terminal up to 500 ms total; each read() uses VMIN=1
-		// so it blocks until a byte arrives (stdin is still in raw mode
-		// with VMIN=1/VTIME=0 at this point).
 		bool got_r = false;
-		while (pos < 31 && !got_r) {
-			unsigned char ch = 0;
-			if (read(fileno(stdin), &ch, 1) != 1) break;
-			buf[pos++] = static_cast<char>(ch);
-			if (ch == 'R') got_r = true;
+		{
+			const int fd = fileno(stdin);
+			struct pollfd pfd{};
+			pfd.fd     = fd;
+			pfd.events = POLLIN;
+			while (pos < 31 && !got_r) {
+				if (::poll(&pfd, 1, 200) <= 0) break; // timeout or error
+				unsigned char ch = 0;
+				if (::read(fd, &ch, 1) != 1) break;
+				buf[pos++] = static_cast<char>(ch);
+				if (ch == 'R') got_r = true;
+			}
 		}
 		// Parse \x1b[row;colR
 		if (got_r) {
@@ -704,7 +724,7 @@ int SelectOption(const std::vector<std::string>& options,
 		// Check the cancel flag before each read attempt.
 		if (cancel && cancel->load()) {
 			std::cout << "\x1b[?25h" << std::flush; // restore cursor
-			tcsetattr(fileno(stdin), TCSANOW, &orig);
+			tcsetattr(fileno(stdin), TCSAFLUSH, &orig);
 			return -1;
 		}
 		unsigned char c = 0;
@@ -804,7 +824,7 @@ int SelectOption(const std::vector<std::string>& options,
 
 	std::cout << "\x1b[?25h" << std::flush; // restore cursor
 
-	tcsetattr(fileno(stdin), TCSANOW, &orig);
+	tcsetattr(fileno(stdin), TCSAFLUSH, &orig);
 	return chosen;
 }
 

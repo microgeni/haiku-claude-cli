@@ -1,6 +1,7 @@
 #include "repl.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -270,8 +271,47 @@ extern "C" int bracketed_getc(FILE* f) {
         return 0;
     }
 
-    // Not a bracketed-paste sequence — stash ESC '[' + everything we
-    // accumulated into g_paste_buf so libedit sees the full sequence.
+    // Not a bracketed-paste sequence.  Before replaying to libedit,
+    // check whether the accumulated bytes look like a CPR (Cursor
+    // Position Report): \e[row;colR.  CPR responses are emitted by
+    // the terminal in reply to \x1b[6n (DSR) sent by SelectOption's
+    // pre_lines adjustment logic.  If they arrive here it means a
+    // previous SelectOption call didn't fully drain its CPR response
+    // from the input queue.  Returning \e to libedit would corrupt
+    // its key FSM (it would wait for a continuation byte and swallow
+    // the user's next real keystroke as an escape sequence, causing
+    // the prompt to vanish).  Discard silently and loop.
+    //
+    // A CPR ends with 'R' and contains only digits and ';' after '['.
+    // acc already holds everything after "ESC ["; check that it ends
+    // with 'R' and contains only digits/semicolons.
+    {
+        bool looks_like_cpr = !acc.empty() && acc.back() == 'R';
+        if (looks_like_cpr) {
+            for (size_t ci = 0; ci + 1 < acc.size(); ++ci) {
+                const char ch = acc[ci];
+                if (!std::isdigit(static_cast<unsigned char>(ch)) && ch != ';') {
+                    looks_like_cpr = false;
+                    break;
+                }
+            }
+        }
+        if (looks_like_cpr) {
+            // Silently discard the CPR and ask for the next real byte.
+            g_paste_buf.clear();
+            g_paste_pos = 0;
+            // Tail-call: re-enter bracketed_getc so the next byte is
+            // returned normally.  We can't just `continue` from here
+            // (we're not in a loop), so recurse once.  Stack depth is
+            // bounded because a second CPR in a row is astronomically
+            // unlikely and only real input follows.
+            return bracketed_getc(f);
+        }
+    }
+
+    // Not a bracketed-paste sequence and not a CPR — stash ESC '[' +
+    // everything we accumulated into g_paste_buf so libedit sees the
+    // full sequence.
     g_paste_buf.clear();
     g_paste_buf.push_back('[');
     g_paste_buf.append(acc);
