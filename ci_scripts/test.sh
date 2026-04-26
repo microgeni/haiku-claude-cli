@@ -47,5 +47,9 @@ step "telegram/console interaction tests"
 bash tests/telegram_console_test.sh
 echo "PASS"
 
+step "LocalWorker async-dispatch tests"
+bash tests/local_worker_test.sh
+echo "PASS"
+
 echo
 echo "=== all tests passed ==="
