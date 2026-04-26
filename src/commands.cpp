@@ -481,6 +481,10 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 		// Persist the compacted history so the next --resume or
 		// crash-recovery loads the pruned state.
 		config::SaveHistory(ctx.messages, ctx.model, ctx.resume_name);
+		// Full BFS snapshot re-scan: compaction may have triggered
+		// WriteAttr calls; reload so the next turn's system prompt
+		// reflects all summaries written this session.
+		config::ReloadBfsSummaries();
 		if (ctx.redraw_status) ctx.redraw_status();
 		return SlashAction::Continue;
 	}

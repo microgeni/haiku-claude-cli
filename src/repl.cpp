@@ -544,4 +544,14 @@ void Record(const std::string& line) {
 	}
 }
 
+void RestoreInput(const std::string& text) {
+	if (text.empty() || !isatty(fileno(stdin))) return;
+	// rl_stuff_char() is LIFO — push bytes in reverse order so the
+	// queue drains left-to-right into libedit's edit buffer at the
+	// start of the next readline() call.
+	for (int i = static_cast<int>(text.size()) - 1; i >= 0; --i) {
+		rl_stuff_char(static_cast<unsigned char>(text[i]));
+	}
+}
+
 } // namespace repl

@@ -149,6 +149,13 @@ struct TurnResult {
 	double          elapsed     = 0.0;
 	std::string     assistantText;
 	std::vector<std::string> newUrls;
+	// Paths whose claude:summary BFS attribute was written during this
+	// turn (via WriteAttr tool calls). Used to refresh the in-process
+	// snapshot without a full filesystem walk.
+	std::vector<std::string> writtenSummaryPaths;
+	// When non-empty, the turn was cancelled via Ctrl+X and this is
+	// the user's original input — restore it to the edit buffer.
+	std::string     cancelledInput;
 };
 
 // All fields accessed from both threads are protected by fMu except
@@ -251,6 +258,14 @@ static void LocalWorkerFunc(LocalWorker& w)
 		result.cacheWrite  = api_result.cache_creation_input_tokens;
 		result.assistantText = api_result.assistant_text;
 
+		// If the turn was cancelled via Ctrl+X, record the original
+		// user text so InteractiveLoop can restore it to the edit
+		// buffer. Clear g_cancel_retype so the next turn starts clean.
+		if (g_cancel_retype) {
+			result.cancelledInput = job.userText;
+			g_cancel_retype = 0;
+		}
+
 		if (!result.ok) {
 			// Roll messages back to the snapshot so the failed turn
 			// is not permanently in the history.
@@ -263,6 +278,9 @@ static void LocalWorkerFunc(LocalWorker& w)
 					result.newUrls.push_back(url);
 				}
 			}
+			// Collect paths whose claude:summary was written this turn
+			// so the main thread can refresh the in-process snapshot.
+			result.writtenSummaryPaths = api::DrainWrittenSummaryPaths();
 		}
 
 		// ── Post result, release display ──────────────────────────
@@ -687,6 +705,10 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 				worker.fPendingJob = std::move(job);
 			}
 			worker.fJobCv.notify_one();
+			// Show ctrl+x:amend hint in the status bar while the
+			// worker is running so the binding is discoverable.
+			tui::SetStatusBar(compose_status()
+				+ "  " + tui::Dim("ctrl+x: amend"));
 		}
 
 		// Wait until the worker has finished streaming the response
@@ -697,6 +719,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 				return !worker.fWorkerOwnsDisplay;
 			});
 		}
+		// Restore the normal status bar (without the hint) now that
+		// the turn is complete and we own the display again.
+		tui::SetStatusBar(compose_status());
 
 		// Drain the result posted by the worker.
 		TurnResult result;
@@ -714,6 +739,10 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			// messages[] was already rolled back by the worker.
 			if (remote && remote->Running())
 				remote->MirrorCancel();
+			// Ctrl+X cancel-and-retype: restore the user's input to
+			// the libedit buffer so they can amend and resubmit.
+			if (!result.cancelledInput.empty())
+				repl::RestoreInput(result.cancelledInput);
 			continue;
 		}
 
@@ -727,6 +756,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		// The worker already deduped against session_urls.
 		for (auto& url : result.newUrls)
 			session_urls.push_back(std::move(url));
+
+		// Refresh the BFS summary snapshot for any paths whose
+		// claude:summary attribute was written during this turn.
+		// O(changed) — no full filesystem walk needed.
+		if (!result.writtenSummaryPaths.empty())
+			config::RefreshSummarySnapshot(result.writtenSummaryPaths);
 
 		// Desktop notification for slow turns.
 		if (notify_enabled && elapsed >= notify_min_duration) {

@@ -54,6 +54,13 @@ void DrainStaleInput();
 // Append `line` to history and flush to disk. No-op on empty lines.
 void Record(const std::string& line);
 
+// Seed libedit's current edit buffer with `text` and redraw the
+// prompt, as if the user had typed it. Used by the cancel-and-retype
+// path to restore a cancelled turn's input so the user can amend it
+// without retyping from scratch. No-op when stdin is not a TTY or
+// when `text` is empty.
+void RestoreInput(const std::string& text);
+
 } // namespace repl
 
 #endif

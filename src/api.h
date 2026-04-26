@@ -133,6 +133,13 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
                          int max_tokens, json& messages,
                          const std::string& custom_system);
 
+// Drain and return the list of file paths whose claude:summary BFS
+// attribute was written by WriteAttr tool calls during the most recent
+// SendWithTools invocation on this thread. The internal list is cleared
+// on each call so subsequent calls return only new additions.
+// No-op (returns empty vector) on non-Haiku platforms.
+std::vector<std::string> DrainWrittenSummaryPaths();
+
 } // namespace api
 
 // Shared cancellation flag — set by the SIGINT handler and the Esc
@@ -140,5 +147,11 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 // tool runner in tools.cpp. Must be at global scope (external
 // linkage) for that cross-TU access.
 extern volatile sig_atomic_t g_interrupted;
+
+// Set by the Ctrl+X branch of EscInterruptGuard to distinguish a
+// cancel-and-retype interrupt from a plain ESC/Ctrl+C cancel.
+// Cleared by InteractiveLoop after it restores the input buffer.
+// Same external-linkage requirement as g_interrupted.
+extern volatile sig_atomic_t g_cancel_retype;
 
 #endif

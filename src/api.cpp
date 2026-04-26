@@ -24,9 +24,18 @@
 
 // Shared cancellation flag used across tools.cpp and api.cpp. Lives
 // at global scope so the SIGINT handler (C callback) can write it.
-volatile sig_atomic_t g_interrupted = 0;
+volatile sig_atomic_t g_interrupted  = 0;
+
+// Set when Ctrl+X (0x18) is detected during a streaming turn.
+// Signals "cancel and restore input" to InteractiveLoop.
+volatile sig_atomic_t g_cancel_retype = 0;
 
 namespace api {
+
+// Thread-local accumulator for WriteAttr calls that touch
+// claude:summary during a SendWithTools invocation. Drained by
+// DrainWrittenSummaryPaths() after each turn.
+static thread_local std::vector<std::string> tl_written_summary_paths;
 
 // Definitions for the globals declared in api.h.
 StreamProgress* g_stream_progress = nullptr;
@@ -114,6 +123,13 @@ public:
 				// press during streaming doesn't kill the turn.
 				if (n == 1 && buf[0] == '\x1b') {
 					g_interrupted = 1;
+					return;
+				}
+				// Ctrl+X (0x18) — cancel and restore input to the
+				// edit buffer ("amend" rather than discard).
+				if (n == 1 && buf[0] == '\x18') {
+					g_cancel_retype = 1;
+					g_interrupted   = 1;
 					return;
 				}
 			}
@@ -1134,6 +1150,20 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 					tres.content);
 			}
 
+			// Track WriteAttr calls that touch claude:summary so the
+			// LocalWorker can refresh the in-process snapshot after
+			// the turn without a full filesystem walk.
+#ifdef __HAIKU__
+			if (tname == "WriteAttr" && !tres.is_error) {
+				const std::string attr_name = tinput.value("name", std::string{});
+				if (attr_name == "claude:summary") {
+					const std::string attr_path = tinput.value("path", std::string{});
+					if (!attr_path.empty())
+						tl_written_summary_paths.push_back(attr_path);
+				}
+			}
+#endif
+
 			// For BFS-native tools, measure actual bytes saved by
 			// stat-ing the target file(s) and subtracting the tool's
 			// own output size.
@@ -1179,6 +1209,12 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 		}
 		messages.push_back({{"role", "user"}, {"content", tool_results}});
 	}
+}
+
+std::vector<std::string> DrainWrittenSummaryPaths() {
+	std::vector<std::string> out;
+	out.swap(tl_written_summary_paths);
+	return out;
 }
 
 } // namespace api
