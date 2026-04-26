@@ -420,6 +420,42 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// after each turn by notify::ExtractUrls; consumed by `/open`.
 	std::vector<std::string> session_urls;
 
+	// ── LocalWorker — background thread for API calls ──────────────
+	// Wire back-pointers before starting the thread.  All pointed-to
+	// variables are declared above and outlive the worker thread which
+	// is joined before InteractiveLoop returns.
+	LocalWorker worker;
+	worker.fMessages       = &messages;
+	worker.fTurnCount      = &turn_count;
+	worker.fSessionInput   = &session_input;
+	worker.fSessionOutput  = &session_output;
+	worker.fSessionUrls    = &session_urls;
+	worker.fModel          = &model;
+	worker.fResumeName     = const_cast<std::string*>(&resume_name);
+	worker.fPrices         = &prices;
+	worker.fNotifyEnabled  = &notify_enabled;
+	worker.fNotifyMinDur   = &notify_min_duration;
+	worker.fCompactThresh  = compact_auto_threshold;
+	worker.fCompactWindow  = compact_window_override;
+	worker.fAuth           = &auth;
+	worker.fCustomSystem   = const_cast<std::string*>(&custom_system);
+	worker.fRemote         = remote.get();   // updated via lambda below
+	worker.fUpdateStatus   = [&]() { tui::SetStatusBar(compose_status()); };
+	worker.fThread = std::thread(LocalWorkerFunc, std::ref(worker));
+
+	// Ensure the worker thread is stopped and joined on any exit path.
+	struct WorkerGuard {
+		LocalWorker& w;
+		~WorkerGuard() {
+			{
+				std::lock_guard<std::mutex> lk(w.fMu);
+				w.fShutdown = true;
+			}
+			w.fJobCv.notify_all();
+			if (w.fThread.joinable()) w.fThread.join();
+		}
+	} worker_guard{worker};
+
 	while (true) {
 		// Resize events rebuild the scroll region and redraw the
 		// fixed rows so the frame stays correct after the user
@@ -508,6 +544,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 				if (want_off) {
 					if (currently_running) {
 						remote->Stop();
+						worker.fRemote = nullptr;
 						std::cout << tui::Meta("[remote control: telegram poller stopped]") << "\n";
 						config::LogLine("remote control stopped from /remote-control" +
 								 (arg.empty() ? std::string(" (toggle)") : std::string(" off")));
@@ -538,6 +575,8 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 									std::cout << tui::Meta("[remote control: telegram poller started]") << "\n";
 									config::LogLine("remote control started from /remote-control");
 									tui::SetStatusBar(compose_status());
+									// Keep the worker's remote pointer in sync.
+									worker.fRemote = remote.get();
 									// Share a read-only snapshot of the local
 									// messages array with the Telegram bridge so
 									// Claude sees both sides of the conversation
@@ -608,102 +647,92 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			pending_paths.clear();
 		}
 		const json snapshot = messages;
-		messages.push_back({{"role", "user"}, {"content", api_content}});
 
-		const auto turn_start = std::chrono::steady_clock::now();
 		const std::string system_for_turn = config::ComposeSystem(custom_system);
 		// Refresh the OAuth token if it's about to expire so
 		// long-running REPL sessions don't fail mid-conversation.
 		auth = config::ResolveAuth();
 		if (auth.kind == config::AuthKind::None) {
 			std::cout << "\n" << tui::Meta("[error: authentication expired — run /exit and `claude login`]") << "\n";
-			messages = snapshot;
 			continue;
 		}
 
-		// StreamProgress lives here so its lifetime covers the
-		// entire window [AcquireTurn … ReleaseTurn].
-		api::StreamProgress stream_progress;
-		api::SendResult result;
+		// ── Dispatch the turn to the background worker ──────────────
+		// The worker owns stdout (spinner + streamed reply) from the
+		// moment Enqueue() is called until it signals fDisplayCv.
+		// The main thread blocks here on fDisplayCv, which keeps the
+		// design single-queue (one outstanding turn at a time) while
+		// freeing us from having to manage the StreamProgress lifetime
+		// on the stack here.
+		{
+			TurnJob job;
+			job.userText    = line;
+			job.apiContent  = std::move(api_content);
+			job.snapshot    = snapshot;
+			job.model       = model;
+			job.maxTokens   = max_tokens;
+			job.auth        = auth;
+			job.systemPrompt = system_for_turn;
+			job.hasTelegram  = (remote && remote->Running());
 
-		if (remote && remote->Running()) {
-			// Correct ordering for bidirectional Telegram/console turns:
-			//
-			//  1. AcquireTurn() — block until any running Telegram
-			//     turn finishes.  Everything below is protected by
-			//     the turn lock so no Telegram turn can start.
-			//
-			//  2. Set g_stream_progress while the lock is held so
-			//     a Telegram turn that starts right after
-			//     ReleaseTurn() cannot race our assignment.
-			//
-			//  3. MirrorPrompt() — now safe: no Telegram updater
-			//     thread is running, and g_stream_progress already
-			//     points to our StreamProgress.
-			//
-			//  4. StartThinkingUpdater(&stream_progress) — pass the
-			//     pointer directly; the thread never touches the
-			//     global and cannot pick up a stale or wrong object.
-			//
-			//  5. SendWithTools()
-			//
-			//  6. StopThinkingUpdater() — joins the updater thread
-			//     while we still hold the turn lock and while
-			//     stream_progress is still on our stack.
-			//
-			//  7. g_stream_progress = nullptr — nulled before
-			//     ReleaseTurn() so an incoming Telegram turn never
-			//     races our write.
-			//
-			//  8. ReleaseTurn() — Telegram turns may now proceed;
-			//     g_stream_progress is guaranteed null.
-			//
-			//  9. MirrorToPrimary() / MirrorCancel() — outside the
-			//     lock, just Telegram API calls.
-			remote->AcquireTurn();
-			api::g_stream_progress = &stream_progress;
-			remote->MirrorPrompt(line);
-			remote->StartThinkingUpdater(&stream_progress);
-			result = api::SendWithTools(auth, model, max_tokens, messages, system_for_turn);
-			remote->StopThinkingUpdater();
-			api::g_stream_progress = nullptr;
-			remote->ReleaseTurn();
-		} else {
-			result = api::SendWithTools(auth, model, max_tokens, messages, system_for_turn);
+			// Mark display as owned by the worker before waking it,
+			// so there is no window where both threads think they own
+			// the display.
+			{
+				std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+				worker.fWorkerOwnsDisplay = true;
+			}
+			{
+				std::lock_guard<std::mutex> lk(worker.fMu);
+				worker.fPendingJob = std::move(job);
+			}
+			worker.fJobCv.notify_one();
 		}
 
-		const double elapsed = std::chrono::duration<double>(
-			std::chrono::steady_clock::now() - turn_start).count();
+		// Wait until the worker has finished streaming the response
+		// and has released display ownership.
+		{
+			std::unique_lock<std::mutex> dlk(worker.fDisplayMu);
+			worker.fDisplayCv.wait(dlk, [&]{
+				return !worker.fWorkerOwnsDisplay;
+			});
+		}
 
-		if (result.exit_code != 0) {
-			messages = snapshot;
+		// Drain the result posted by the worker.
+		TurnResult result;
+		{
+			std::lock_guard<std::mutex> lk(worker.fMu);
+			if (worker.fResult.has_value()) {
+				result = std::move(*worker.fResult);
+				worker.fResult.reset();
+			}
+		}
+
+		const double elapsed = result.elapsed;
+
+		if (!result.ok) {
+			// messages[] was already rolled back by the worker.
 			if (remote && remote->Running())
 				remote->MirrorCancel();
 			continue;
 		}
 
 		++turn_count;
-		session_input  += result.input_tokens;
-		session_output += result.output_tokens;
-		stats::RecordTurn(result.input_tokens, result.output_tokens,
-						  result.cache_read_input_tokens,
-						  result.cache_creation_input_tokens);
+		session_input  += result.inputTokens;
+		session_output += result.outputTokens;
+		stats::RecordTurn(result.inputTokens, result.outputTokens,
+						  result.cacheRead, result.cacheWrite);
 
-		// Harvest any URLs Claude mentioned so `/open N` can launch
-		// them later. Dedup in insertion order so the index stays
-		// stable across turns.
-		for (auto& url : notify::ExtractUrls(result.assistant_text)) {
-			if (std::find(session_urls.begin(), session_urls.end(), url)
-				== session_urls.end()) {
-				session_urls.push_back(std::move(url));
-			}
-		}
+		// Append newly-discovered URLs to the session list.
+		// The worker already deduped against session_urls.
+		for (auto& url : result.newUrls)
+			session_urls.push_back(std::move(url));
 
 		// Desktop notification for slow turns.
 		if (notify_enabled && elapsed >= notify_min_duration) {
 			notify::Send(
 				notify::PickPlayfulTitle(elapsed),
-				notify::FirstSentence(result.assistant_text, 120));
+				notify::FirstSentence(result.assistantText, 120));
 		}
 
 		// Auto-compact: if this turn's input-token count crosses
@@ -712,12 +741,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		if (compact_auto_threshold > 0.0) {
 			const int window = models::DetectContextWindow(model, compact_window_override);
 			const int trigger = static_cast<int>(window * compact_auto_threshold);
-			if (result.input_tokens >= trigger) {
+			if (result.inputTokens >= trigger) {
 				char note[160];
 				std::snprintf(note, sizeof(note),
 					"[auto-compact: context at %d%% (%d / %d tokens) — compacting now]",
-					(result.input_tokens * 100) / window,
-					result.input_tokens, window);
+					(result.inputTokens * 100) / window,
+					result.inputTokens, window);
 				std::cout << tui::Meta(note) << "\n";
 				commands::LoopCtx ac_ctx{auth, max_tokens, custom_system, prices, model,
 				                         turn_count, session_input, session_output, messages,
@@ -732,19 +761,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			}
 		}
 
-		char cache_tail[64] = {0};
-		const int c_read  = result.cache_read_input_tokens;
-		const int c_write = result.cache_creation_input_tokens;
-		if (c_read > 0 || c_write > 0) {
-			std::snprintf(cache_tail, sizeof(cache_tail),
-				"  \xC2\xB7 cache R:%d W:%d", c_read, c_write);
-		}
 		config::LogLine("turn " + std::to_string(turn_count)
 				 + " model=" + model
-				 + " in=" + std::to_string(result.input_tokens)
-				 + " out=" + std::to_string(result.output_tokens)
-				 + " cache_r=" + std::to_string(c_read)
-				 + " cache_w=" + std::to_string(c_write));
+				 + " in=" + std::to_string(result.inputTokens)
+				 + " out=" + std::to_string(result.outputTokens)
+				 + " cache_r=" + std::to_string(result.cacheRead)
+				 + " cache_w=" + std::to_string(result.cacheWrite));
 
 		// Push the updated session counters into the fixed-bottom
 		// status row.
@@ -752,12 +774,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 		// Mirror the local turn to the primary Telegram chat.
 		if (remote && remote->Running()) {
-			remote->MirrorToPrimary(result.assistant_text);
+			remote->MirrorToPrimary(result.assistantText);
 		}
 
 		config::SaveHistory(messages, model, resume_name);
 
-		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistant_text}});
+		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistantText}});
 	}
 	return 0;
 }
