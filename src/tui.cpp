@@ -614,7 +614,7 @@ int SelectOption(const std::vector<std::string>& options,
 		}
 		// Footer hint row.
 		std::cout << "\x1b[2K"
-		          << " " << Dim("Esc to cancel \xC2\xB7 Tab to amend");
+		          << " " << Dim("Tab: amend \xC2\xB7 Shift+Tab: allow all \xC2\xB7 Esc: cancel");
 		// Return cursor to heading row.
 		const int rows_up = heading_rows + n + kFooterRows - 1;
 		if (rows_up > 0) std::cout << "\x1b[" << rows_up << "A";
@@ -641,69 +641,26 @@ int SelectOption(const std::vector<std::string>& options,
 	// row 1 and the teardown erase starts from the wrong position,
 	// leaving stale option lines on screen.
 	//
-	// Fix: query the actual cursor row (DSR \x1b[6n → CPR \x1b[r;cR).
-	// The scroll-region bottom is (TerminalRows() - kStatusBarRows).
-	// The heading row is (cursor_row); at most (cursor_row - 1) rows
-	// exist above it inside the scroll region, so cap pre_lines.
+	// Safe cap: the scroll region occupies rows 1..(N-kStatusBarRows).
+	// Inside that region the menu itself takes (menu_rows) lines.  Any
+	// pre_lines content that was scrolled in from above the menu can
+	// occupy at most (scroll_region_height - menu_rows) rows.  Cap
+	// pre_lines to that value so the upward cursor move in teardown can
+	// never overshoot the scroll-region top.
+	//
+	// Note: we previously queried the cursor row via DSR (\x1b[6n) to
+	// get the exact row, but the CPR response bytes leaked into libedit's
+	// input buffer on some terminals (particularly tmux), corrupting the
+	// next prompt.  The conservative cap below is always correct.
 	{
-		// Drain any stale bytes in the input queue (e.g. leftover CPR
-		// responses from a previous call) before sending the DSR so we
-		// don't mis-parse an old response as the current one.
-		{
-			struct pollfd pfd{};
-			pfd.fd     = fileno(stdin);
-			pfd.events = POLLIN;
-			char discard[64];
-			while (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))
-				::read(fileno(stdin), discard, sizeof(discard));
-		}
-
-		// Flush the render first, then query cursor position.
-		// We read on stdin which is already in raw mode (set above).
-		std::cout << "\x1b[6n" << std::flush;
-		// Read the CPR response: ESC [ row ; col R
-		// Use a poll()-based loop with per-byte 200 ms timeout so we
-		// handle fragmented responses (partial reads) reliably and don't
-		// block forever when the terminal doesn't respond.
-		char buf[32] = {};
-		int  pos     = 0;
-		bool got_r = false;
-		{
-			const int fd = fileno(stdin);
-			struct pollfd pfd{};
-			pfd.fd     = fd;
-			pfd.events = POLLIN;
-			while (pos < 31 && !got_r) {
-				if (::poll(&pfd, 1, 200) <= 0) break; // timeout or error
-				unsigned char ch = 0;
-				if (::read(fd, &ch, 1) != 1) break;
-				buf[pos++] = static_cast<char>(ch);
-				if (ch == 'R') got_r = true;
-			}
-		}
-		// Parse \x1b[row;colR
-		if (got_r) {
-			int cur_row = 0, cur_col = 0;
-			// buf starts with ESC [ or just [
-			const char* p = buf;
-			while (*p && *p != '[') ++p;
-			if (*p == '[') {
-				++p;
-				cur_row = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
-				if (*p == ';') {
-					++p;
-					cur_col = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
-				}
-				(void)cur_col;
-			}
-			if (cur_row > 0) {
-				// Rows available above the heading row (1-indexed): cur_row - 1.
-				// But row 1 is the scroll region top, so we can move at most
-				// cur_row - 1 rows upward before hitting the top of the screen.
-				const int rows_above = cur_row - 1;
-				if (pre_lines > rows_above)
-					pre_lines = rows_above;
-			}
+		const int rows = TerminalRows();
+		if (rows > kStatusBarRows) {
+			const int scroll_height = rows - kStatusBarRows;
+			const int max_pre = scroll_height - menu_rows;
+			if (max_pre < 0)
+				pre_lines = 0;
+			else if (pre_lines > max_pre)
+				pre_lines = max_pre;
 		}
 	}
 
@@ -735,20 +692,35 @@ int SelectOption(const std::vector<std::string>& options,
 
 		if (c == 0x1b) {
 			// Escape sequence or bare Esc.
-			unsigned char seq[2] = {};
-			// Use VMIN=1 VTIME=1: block until a byte arrives or 100 ms
-			// elapses.  VMIN=0 VTIME=1 is a polling read — on a real
-			// terminal it can return 0 immediately even when the rest of
-			// the CSI sequence ([ A/B) is already in the kernel buffer,
-			// because tcsetattr flushes the old settings before the bytes
-			// land.  VMIN=1 guarantees we wait for the byte.
+			//
+			// Use VMIN=1 VTIME=1 so read() blocks until a byte arrives
+			// or 100 ms elapses.  VMIN=0 VTIME=1 can return immediately
+			// even when bytes are already in the kernel buffer because
+			// tcsetattr flushes pending settings first.
 			struct termios nb = raw;
 			nb.c_cc[VMIN]  = 1;
 			nb.c_cc[VTIME] = 1; // 100 ms inter-byte timeout
 			tcsetattr(fileno(stdin), TCSANOW, &nb);
-			const int r1 = read(fileno(stdin), &seq[0], 1);
-			const int r2 = (r1 == 1 && seq[0] == '[')
-						 ? read(fileno(stdin), &seq[1], 1) : 0;
+
+			// Read the byte after ESC.
+			unsigned char intro = 0;
+			const int r1 = read(fileno(stdin), &intro, 1);
+
+			// If it is '[' this is a CSI sequence.  Read bytes until the
+			// CSI final byte (0x40–0x7E) so that multi-byte sequences
+			// like CPR \x1b[1;1R are fully consumed and never left in
+			// the tty buffer to corrupt libedit's input on return.
+			std::string csi; // bytes after '['
+			bool is_csi = (r1 == 1 && intro == '[');
+			if (is_csi) {
+				while (csi.size() < 16) {
+					unsigned char b = 0;
+					if (read(fileno(stdin), &b, 1) != 1) break;
+					csi += static_cast<char>(b);
+					if (b >= 0x40 && b <= 0x7e) break; // final byte consumed
+				}
+			}
+
 			// Restore the correct mode: poll mode if cancel is set,
 			// blocking mode otherwise.
 			if (cancel) {
@@ -764,17 +736,33 @@ int SelectOption(const std::vector<std::string>& options,
 				// Bare Esc → deny (last option).
 				chosen = n - 1;
 				done   = true;
-			} else if (r1 == 1 && seq[0] == '[' && r2 == 1) {
-				if (seq[1] == 'A') { // Up arrow
+			} else if (is_csi && !csi.empty()) {
+				const unsigned char final_byte =
+					static_cast<unsigned char>(csi.back());
+				if (final_byte == 'A') { // Up arrow   \x1b[A
 					if (sel > 0) --sel;
 					render();
-				} else if (seq[1] == 'B') { // Down arrow
+				} else if (final_byte == 'B') { // Down arrow  \x1b[B
 					if (sel < n - 1) ++sel;
 					render();
+				} else if (final_byte == 'Z') { // Shift+Tab   \x1b[Z
+					if (n > 1) {
+						sel    = 1;
+						chosen = 1;
+						render();
+					} else {
+						chosen = 0;
+					}
+					done = true;
 				}
+				// Any other CSI (CPR \x1b[r;cR, focus events, etc.)
+				// has already been fully consumed above — silently ignore.
 			}
 		} else if (c == '\r' || c == '\n') {
 			chosen = sel;
+			done   = true;
+		} else if (c == '\t') { // Tab → amend (cancel-and-retype sentinel)
+			chosen = -2;
 			done   = true;
 		} else if (c >= '1' && c <= '9') {
 			const int idx = static_cast<int>(c - '1');
@@ -812,7 +800,11 @@ int SelectOption(const std::vector<std::string>& options,
 	std::cout << "\r";
 
 	// Step 4: write the compact summary on the first (now blank) row.
-	if (!heading.empty()) {
+	// chosen == -2 means Tab/amend: display a special label instead of
+	// indexing options[] with a negative value (which would be UB).
+	if (chosen == -2) {
+		std::cout << Dim(heading.empty() ? "  -> [amend]" : heading + " \xe2\x86\x92 [amend]");
+	} else if (!heading.empty()) {
 		std::cout << Dim(heading + " \xe2\x86\x92 " + options[chosen]);
 	} else {
 		std::cout << Dim("  -> " + options[chosen]);
