@@ -579,7 +579,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 	// Helper: enqueue a turn to the worker and install the output
 	// interceptor so worker writes go through the pending buffer.
-	auto dispatch_turn = [&](std::string line,
+	auto dispatch_turn = [&](const std::string& line,
 	                         std::string api_content,
 	                         json snapshot,
 	                         std::string system_for_turn) {
