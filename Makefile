@@ -122,9 +122,13 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	    exit 1; \
 	}
 	rm -rf "$(PKG_STAGE)"
-	mkdir -p "$(PKG_STAGE)/bin" "$(PKG_STAGE)/documentation/man/man1"
+	mkdir -p "$(PKG_STAGE)/bin" \
+	         "$(PKG_STAGE)/documentation/man/man1" \
+	         "$(PKG_STAGE)/documentation/packages/claude-cli"
 	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
-	cp docs/claude.1 "$(PKG_STAGE)/documentation/man/man1/claude.1"
+	cp docs/claude.1  "$(PKG_STAGE)/documentation/man/man1/claude.1"
+	cp CHANGELOG.md   "$(PKG_STAGE)/documentation/packages/claude-cli/CHANGELOG.md"
+	cp README.md      "$(PKG_STAGE)/documentation/packages/claude-cli/ReadMe.md"
 	@if [ -f "$(ICON_HVIF)" ]; then \
 	    echo "  staging icon to data/claude-cli/icon.hvif"; \
 	    mkdir -p "$(PKG_STAGE)/data/claude-cli"; \
