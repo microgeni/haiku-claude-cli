@@ -88,12 +88,27 @@ int main(int argc, char* argv[]) {
 	tui::Init();
 	tui::InstallSigwinchHandler();
 
-	// Crash-safe teardown. std::atexit fires on normal return,
-	// exit(), and unhandled exceptions (via terminate). Signal
-	// handlers for SIGTERM call it explicitly before re-raising so
-	// Ctrl+C out of a REPL also restores the scroll region.
+	// Crash-safe teardown.
+	//
+	// std::atexit fires on normal return and exit().  It is the primary
+	// cleanup path for /quit and Ctrl+D: the REPL loop breaks, the
+	// StatusFrameGuard destructor runs repl::Deinit()+TeardownStatusBar(),
+	// InteractiveLoop returns, main() returns, and atexit fires as a
+	// belt-and-suspenders no-op (g_saved_termios_valid is already false).
+	//
+	// SIGTERM / SIGINT handlers below call the same teardown directly and
+	// then re-raise with SIG_DFL so the process exits with the correct
+	// signal status.  This covers:
+	//   • SIGTERM  — external kill / system shutdown
+	//   • SIGINT   — Ctrl+C while NOT inside InteractiveLoop (e.g. login
+	//                flow, one-shot mode, or the tiny window between
+	//                InteractiveLoop returning and main() returning).
+	//                Inside InteractiveLoop, api::InterruptGuard installs
+	//                its own SIGINT handler that just sets g_interrupted=1
+	//                so the turn aborts gracefully; that handler is removed
+	//                when InteractiveLoop returns, reinstating this one.
 	std::atexit([]() {
-		repl::Deinit();           // disable bracketed paste mode
+		repl::Deinit();
 		tui::TeardownStatusBar();
 	});
 	{
@@ -110,9 +125,7 @@ int main(int argc, char* argv[]) {
 		sigemptyset(&sa.sa_mask);
 		sa.sa_flags = 0;
 		sigaction(SIGTERM, &sa, nullptr);
-		// Note: we deliberately do NOT install this for SIGINT
-		// because api::InterruptGuard already has a SIGINT handler
-		// that sets g_interrupted.
+		sigaction(SIGINT,  &sa, nullptr);
 	}
 
 	if (argc >= 2) {
