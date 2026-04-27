@@ -2,7 +2,7 @@ name			claude_cli
 version			@VERSION@-@BUILD@
 architecture		x86_64
 summary			"Native Claude CLI for Haiku OS"
-description		"A native Claude client for Haiku OS." It treats Haiku as a first-class platform, not an afterthought."
+description		"A native Claude client for Haiku OS. It treats Haiku as a first-class platform, not an afterthought."
 packager		"Daniel Benjaminsson <daniel@microgeni.se>"
 vendor			"Microgeni AB"
 copyrights		"2026 Microgeni AB"
