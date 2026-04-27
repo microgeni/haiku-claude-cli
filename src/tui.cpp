@@ -601,22 +601,31 @@ void PauseFlushTimer() {
 }
 
 void ResumeFlushTimer() {
-	// Immediately move the physical cursor to chat_bottom via DirectWrite
-	// (bypasses the interceptor) so neither libedit nor the first flush
-	// accidentally writes at the summary row left by SelectOption().
+	// After SelectOption() the physical cursor is at the summary row inside
+	// the scroll region.  We need DECSC (inside FlushTurnOutput) to save
+	// libedit's input row (N-2) so that DECRC restores there correctly.
+	//
+	// Fix: park the physical cursor at the input row (N-2) via DirectWrite
+	// before re-enabling the flush timer.  FlushTurnOutput() will then
+	// DECSC(N-2), CUP to chat_bottom (via g_turn_row2), emit output, and
+	// DECRC back to N-2 — keeping libedit's cursor position intact.
 	if (g_cout_orig_buf && g_status_bar_active) {
 		if (g_term_dirty) refresh_dims();
-		const int rows = TerminalRows();
+		const int rows        = TerminalRows();
 		const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
-		const std::string cup = "\x1b[" + std::to_string(chat_bottom) + ";1H";
-		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
-		g_cout_orig_buf->pubsync();
+		const int input_row   = rows > 2 ? rows - 2 : rows; // N-2 (fixed input row)
 
-		// Set the tracker to match so FlushTurnOutput() CUPs to the
-		// same place rather than a stale pre-menu position.
+		// Update the output-position tracker to chat_bottom so the next
+		// FlushTurnOutput() CUPs there rather than a stale pre-menu position.
 		g_turn_row2    = chat_bottom;
 		g_turn_col     = 1;
 		g_turn_started = true;
+
+		// Park the physical cursor at the input row so DECSC inside
+		// FlushTurnOutput() saves N-2 and DECRC restores there.
+		const std::string cup = "\x1b[" + std::to_string(input_row) + ";1H";
+		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
+		g_cout_orig_buf->pubsync();
 	}
 
 	// Reconnect the interceptor so worker output is buffered again.
