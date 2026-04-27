@@ -80,15 +80,21 @@ int xfer_callback(void* /*clientp*/,
 class EscInterruptGuard {
 public:
 	EscInterruptGuard() {
-		if (!isatty(STDIN_FILENO)) return;
-		if (tcgetattr(STDIN_FILENO, &fSaved) != 0) return;
+		// Always operate on the real tty fd, not STDIN_FILENO, because
+		// BlockStdin() may redirect STDIN_FILENO to a blocking pipe while
+		// we are alive.  repl::RealTtyFd() returns the dup()'d tty fd
+		// created at Init() time, which is always the actual terminal.
+		const int tty = repl::RealTtyFd() >= 0 ? repl::RealTtyFd() : STDIN_FILENO;
+		if (!isatty(tty)) return;
+		fTtyFd = tty;
+		if (tcgetattr(fTtyFd, &fSaved) != 0) return;
 		fSavedValid = true;
 
 		termios raw = fSaved;
 		raw.c_lflag &= ~(ICANON | ECHO);
 		raw.c_cc[VMIN]  = 0;
 		raw.c_cc[VTIME] = 0;
-		if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+		if (tcsetattr(fTtyFd, TCSANOW, &raw) != 0) {
 			fSavedValid = false;
 			return;
 		}
@@ -106,7 +112,7 @@ public:
 				fPausedAck.store(false);
 
 				struct pollfd pfd {};
-				pfd.fd     = STDIN_FILENO;
+				pfd.fd     = fTtyFd;  // always poll the real tty
 				pfd.events = POLLIN;
 				const int r = ::poll(&pfd, 1, 100);
 				if (!fRunning.load() || fPaused.load()) continue;
@@ -114,7 +120,7 @@ public:
 				if (!(pfd.revents & POLLIN)) continue;
 
 				char buf[16];
-				const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+				const ssize_t n = ::read(fTtyFd, buf, sizeof(buf));
 				if (n <= 0) continue;
 
 				// A bare ESC keypress arrives as a single 0x1B byte.
@@ -141,7 +147,7 @@ public:
 		fRunning.store(false);
 		if (fThread.joinable()) fThread.join();
 		if (fSavedValid) {
-			tcsetattr(STDIN_FILENO, TCSANOW, &fSaved);
+			tcsetattr(fTtyFd, TCSANOW, &fSaved);
 		}
 	}
 
@@ -171,6 +177,7 @@ private:
 	std::thread       fThread;
 	termios           fSaved {};
 	bool              fSavedValid = false;
+	int               fTtyFd     = STDIN_FILENO; // real tty fd (never the block pipe)
 };
 
 // Pointer to the currently active EscInterruptGuard (if any). Set

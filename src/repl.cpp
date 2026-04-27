@@ -60,6 +60,12 @@ int g_real_tty_fd   = -1;           // dup() of the original stdin (the real tty
 int g_block_pipe[2] = {-1, -1};     // pipe: [0]=read end (used as fd 0 when blocking),
                                      //       [1]=write end (written to unblock libedit)
 
+// Original terminal settings saved at Init() time — before libedit or
+// EscInterruptGuard touch them.  Restored by Deinit() as a safety net
+// so the shell always inherits a sane (cooked+echo) tty.
+struct termios g_saved_termios {};
+bool           g_saved_termios_valid = false;
+
 // Read one raw byte from stdin, also watching g_wake_pipe[0].
 // When the wake pipe fires, flush pending output and check
 // g_turn_just_completed; if set and the edit buffer is empty,
@@ -517,6 +523,14 @@ void Init(const std::string& history_file) {
 		read_history(g_history_file.c_str());
 	}
 
+	// Snapshot the tty settings right now, before libedit or
+	// EscInterruptGuard touch them.  Deinit() restores this as
+	// a safety net so the shell always inherits a sane tty.
+	if (isatty(fileno(stdin))) {
+		if (tcgetattr(fileno(stdin), &g_saved_termios) == 0)
+			g_saved_termios_valid = true;
+	}
+
 	// Create the self-pipe used by WakeReadMessage() to interrupt the
 	// blocking poll() in raw_getc_or_wake().
 	if (::pipe(g_wake_pipe) == 0) {
@@ -628,6 +642,17 @@ void Deinit() {
 	// Mirror the isatty() guard from init() — no-op on non-TTY.
 	if (isatty(fileno(stdin))) {
 		::write(fileno(stdout), "\x1b[?2004l", 8);
+	}
+
+	// Restore the original tty settings saved at Init() time.
+	// libedit and EscInterruptGuard both modify termios during normal
+	// operation; each is supposed to restore on its own clean exit,
+	// but as a belt-and-suspenders safety net we explicitly restore
+	// the pre-session state here so the shell always inherits a
+	// sane cooked/echo tty regardless of how we exited.
+	if (g_saved_termios_valid && isatty(fileno(stdin))) {
+		tcsetattr(fileno(stdin), TCSAFLUSH, &g_saved_termios);
+		g_saved_termios_valid = false;
 	}
 
 	// Drain any bytes the terminal queued in response to our escape
