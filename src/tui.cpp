@@ -476,7 +476,7 @@ void TeardownStatusBar() {
 	g_status_bar_active = false;
 
 	const int rows = g_cached_term_rows > 0 ? g_cached_term_rows : 24;
-	std::cout << "\x1b[r"                         // reset scroll region
+	std::cout << "\x1b[r"                         // reset scroll region to full terminal
 			  << "\x1b[" << (rows - 3) << ";1H"
 			  << "\x1b[2K"                        // clear top separator row
 			  << "\x1b[" << (rows - 2) << ";1H"
@@ -485,8 +485,9 @@ void TeardownStatusBar() {
 			  << "\x1b[2K"                        // clear bottom separator row
 			  << "\x1b[" << rows << ";1H"
 			  << "\x1b[2K"                        // clear status row
-			  << "\x1b[" << rows << ";1H"
-			  << "\x1b[?25h"                      // show cursor (safety)
+			  << "\x1b[?25h"                      // restore cursor visibility
+			  << "\n"                              // advance past the cleared area so
+			                                      // the shell prompt starts on a fresh line
 			  << std::flush;
 }
 

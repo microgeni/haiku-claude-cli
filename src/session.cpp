@@ -392,7 +392,13 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// doesn't bleed into the new session's scroll area.
 	tui::InstallStatusBar(compose_status());
 	struct StatusFrameGuard {
-		~StatusFrameGuard() { tui::TeardownStatusBar(); }
+		~StatusFrameGuard() {
+			// Disable bracketed paste and drain stale input BEFORE
+			// resetting the scroll region so the terminal is in a clean
+			// state when the shell takes over.
+			repl::Deinit();
+			tui::TeardownStatusBar();
+		}
 	} status_frame_guard;
 
 	// Welcome text and optional resume header appear inside the

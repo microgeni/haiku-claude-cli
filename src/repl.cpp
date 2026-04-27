@@ -616,11 +616,32 @@ void Init(const std::string& history_file) {
 }
 
 void Deinit() {
+	// If BlockStdin() redirected fd 0 to the blocking pipe (e.g. the
+	// process is exiting while a tool permission menu was showing),
+	// restore the real tty as stdin so the shell inherits a sane fd 0.
+	if (g_real_tty_fd >= 0 && !isatty(STDIN_FILENO)) {
+		::dup2(g_real_tty_fd, STDIN_FILENO);
+		g_stdin_blocked.store(false);
+	}
+
 	// Disable bracketed paste mode so the terminal is left clean.
 	// Mirror the isatty() guard from init() — no-op on non-TTY.
 	if (isatty(fileno(stdin))) {
 		::write(fileno(stdout), "\x1b[?2004l", 8);
 	}
+
+	// Drain any bytes the terminal queued in response to our escape
+	// sequences (scroll-region setup, bracketed-paste enable, etc.)
+	// so the shell doesn't see stale bytes after we exit.
+	DrainStaleInput();
+
+	// Close the internal pipe fds so they don't leak into child processes
+	// spawned by the shell after we exit.
+	if (g_wake_pipe[0] >= 0) { ::close(g_wake_pipe[0]); g_wake_pipe[0] = -1; }
+	if (g_wake_pipe[1] >= 0) { ::close(g_wake_pipe[1]); g_wake_pipe[1] = -1; }
+	if (g_block_pipe[0] >= 0) { ::close(g_block_pipe[0]); g_block_pipe[0] = -1; }
+	if (g_block_pipe[1] >= 0) { ::close(g_block_pipe[1]); g_block_pipe[1] = -1; }
+	if (g_real_tty_fd >= 0) { ::close(g_real_tty_fd); g_real_tty_fd = -1; }
 }
 
 void SetSlashCommands(const std::vector<std::string>& names) {
