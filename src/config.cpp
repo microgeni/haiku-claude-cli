@@ -17,7 +17,7 @@
 
 namespace config {
 
-const char* const kVersion      = "1.6.2";
+const char* const kVersion      = "1.7.0";
 const char* const kDefaultModel = "claude-sonnet-4-6";
 const char* const kApiVersion   = "2023-06-01";
 const char* const kOAuthBeta    = "oauth-2025-04-20";
@@ -97,6 +97,16 @@ void PreloadBfsSummaries() {
 void PreloadBfsSummaries() { g_bfs_loaded = true; }
 #endif
 
+// Maximum number of summary lines before per-turn refresh is skipped.
+static constexpr int kSnapshotLineCap = 500;
+
+// Count newline-terminated lines in s.
+static int count_lines(const std::string& s) {
+	int n = 0;
+	for (char c : s) if (c == '\n') ++n;
+	return n;
+}
+
 std::string BfsSystemBlock() {
 #ifdef __HAIKU__
 	if (!g_bfs_loaded) PreloadBfsSummaries();
@@ -117,6 +127,12 @@ std::string BfsSystemBlock() {
 		s += "\nFiles in this project with existing claude:summary "
 			 "(prefer ReadAttr over Read for these):\n";
 		s += g_bfs_snapshot;
+		if (count_lines(g_bfs_snapshot) >= kSnapshotLineCap) {
+			s += "(Note: project has 500+ summaries — mid-session WriteAttr "
+				 "updates to claude:summary are not reflected until the next "
+				 "session or /compact. Use ReadAttr to get the current value "
+				 "for any specific file.)\n";
+		}
 	} else {
 		s += "\n(No claude:summary attributes seeded yet — writing summaries "
 			 "for source files you read this session will let later sessions "
@@ -498,6 +514,85 @@ void AutoWriteSummaryIfMissing(const std::string& path,
 }
 #else
 void AutoWriteSummaryIfMissing(const std::string&, const std::string&) {}
+#endif
+
+#ifdef __HAIKU__
+// Re-run the full filesystem walk and replace g_bfs_snapshot.
+// Called after /compact so summaries written during the session are
+// reflected in the next system-prompt composition.
+void ReloadBfsSummaries() {
+	g_bfs_loaded   = false;
+	g_bfs_snapshot.clear();
+	PreloadBfsSummaries();
+}
+
+// Update individual entries in g_bfs_snapshot for a specific set of
+// paths whose claude:summary attribute may have been written or changed
+// during this session.  Avoids a full filesystem walk — O(changed).
+// Each entry in the snapshot has the form "<path> :: <summary>\n".
+// For each changed path we read its current attribute and replace
+// (or insert) the corresponding line.
+void RefreshSummarySnapshot(const std::vector<std::string>& paths) {
+	if (paths.empty()) return;
+
+	// Skip per-turn refresh on large projects to avoid O(project)
+	// work accumulating over many turns.
+	if (count_lines(g_bfs_snapshot) >= kSnapshotLineCap) return;
+
+	for (const auto& path : paths) {
+		// Read the current claude:summary value for this path.
+		std::string value;
+		FILE* p = popen(  // flawfinder: ignore
+			("catattr -d claude:summary " + ShellSingleQuote(path)
+			 + " 2>/dev/null").c_str(), "r");
+		if (p) {
+			char buf[1024];
+			while (std::fgets(buf, sizeof(buf), p)) {
+				const size_t n = std::strlen(buf);
+				if (n > 0 && buf[n-1] == '\n') {
+					value.append(buf, n - 1);
+				} else {
+					value.append(buf, n);
+				}
+			}
+			pclose(p);
+		}
+
+		// Build the canonical snapshot line prefix for this path.
+		const std::string prefix = path + " :: ";
+
+		// Remove any existing line for this path from the snapshot.
+		std::string updated;
+		updated.reserve(g_bfs_snapshot.size() + prefix.size() + value.size() + 1);
+		size_t pos = 0;
+		while (pos < g_bfs_snapshot.size()) {
+			const size_t nl  = g_bfs_snapshot.find('\n', pos);
+			const size_t end = (nl == std::string::npos)
+				? g_bfs_snapshot.size()
+				: nl + 1;
+			const std::string line = g_bfs_snapshot.substr(pos, end - pos);
+			if (line.rfind(prefix, 0) != 0) {
+				updated.append(line);
+			}
+			pos = end;
+		}
+
+		// Insert the new entry (only when the attribute has a value
+		// and contains valid UTF-8).
+		if (!value.empty() && IsValidUtf8(value.c_str(), value.size())) {
+			updated += prefix + value + "\n";
+		}
+
+		g_bfs_snapshot = std::move(updated);
+	}
+
+	// Ensure the snapshot is marked loaded so BfsSystemBlock()
+	// doesn't trigger a fresh full walk on the next ComposeSystem call.
+	g_bfs_loaded = true;
+}
+#else
+void ReloadBfsSummaries() {}
+void RefreshSummarySnapshot(const std::vector<std::string>&) {}
 #endif
 
 } // namespace config

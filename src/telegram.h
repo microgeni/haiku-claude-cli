@@ -185,6 +185,16 @@ public:
 	// silo behaviour where each Telegram user has independent context.
 	void SetSharedHistory(std::function<nlohmann::json()> provider);
 
+	// Register a write-back callback invoked (under the turn lock)
+	// after each successful Telegram-origin turn. The two arguments
+	// are the user message and the assistant message that were just
+	// exchanged, both as JSON objects with "role"/"content" keys.
+	// Wire this up alongside SetSharedHistory so the local REPL's
+	// messages[] array (and thus its scroll history) is kept in sync
+	// with remote turns.
+	void SetSharedHistoryAppender(
+		std::function<void(nlohmann::json, nlohmann::json)> appender);
+
 	// Mirror a locally-initiated turn to the primary Telegram chat.
 	// Call order (all called from the local REPL turn, after
 	// AcquireTurn() so the turn lock is already held):
@@ -241,6 +251,10 @@ private:
 	// Set via SetSharedHistory(); null means each Telegram user has
 	// independent context (the original silo behaviour).
 	std::function<nlohmann::json()> fSharedHistory;
+	// Optional write-back: called after each successful Telegram turn
+	// to append the user+assistant pair to the local REPL messages[].
+	// Set via SetSharedHistoryAppender().
+	std::function<void(nlohmann::json, nlohmann::json)> fSharedHistoryAppend;
 	std::map<int64_t, nlohmann::json> fUserMessages;
 	std::atomic<bool>            fRunning { false };
 	std::thread                  fPoller;

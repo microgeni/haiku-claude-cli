@@ -865,6 +865,105 @@ as they stream in and launch them with one slash command.
       and both the interactive REPL and the Telegram bridge's
       local prompt.
 
+### v1.4 — True async input (type while Claude thinks)
+
+The `LocalWorker` thread introduced in v1.6.3 moves
+`SendWithTools` off the main thread, but the main thread still
+blocks on `fDisplayCv` waiting for the turn to finish before
+returning to `ReadMessage()`. This milestone lifts that
+constraint so the user can type the next prompt — or cancel the
+current one — while the response is still streaming.
+
+#### Cancel-and-retype (Ctrl+X) ✓
+
+A dedicated keypress (Ctrl+X, distinct from ESC/Ctrl+C which
+discard the turn) cancels the in-flight request and restores
+the user's last submitted text to the libedit input buffer for
+editing. Use case: you press Enter, immediately notice a typo
+or missing context, and want to amend without retyping from
+scratch.
+
+- [x] **`repl::RestoreInput(line)`** — pushes bytes in reverse
+      via `rl_stuff_char` so libedit's LIFO queue drains
+      left-to-right into the edit buffer at the start of the
+      next `readline()` call.
+- [x] **Ctrl+X binding in cbreak monitor** — the ESC-watch
+      thread watches for `0x18`; sets `g_cancel_retype = 1` and
+      `g_interrupted = 1`. Worker records `job.userText` into
+      `TurnResult.cancelledInput` and clears `g_cancel_retype`.
+- [x] **`TurnResult.cancelledInput`** — set by the worker on
+      Ctrl+X. `InteractiveLoop` calls `repl::RestoreInput` when
+      non-empty before looping back to `ReadMessage`.
+- [x] **Status-bar hint** — `ctrl+x: amend` dim label shown in
+      the status bar while a turn is running; cleared on
+      completion.
+- [x] **History: don't record cancelled turns** — `repl::RemoveLastRecord()`
+      removes the last libedit history entry and flushes to disk when
+      Ctrl+X is detected; `repl::RestoreInput` then seeds the edit buffer.
+      The amended re-submission becomes the canonical history entry.
+
+#### True non-blocking prompt (type-ahead)
+
+Return to `ReadMessage()` immediately after enqueuing, so the
+user can compose the next message while the current one streams.
+The incoming keystrokes are buffered by libedit; the turn is
+submitted only after the worker signals completion (or the user
+explicitly queues it).
+
+- [ ] **`fWorkerOwnsDisplay` as a tri-state** — idle / streaming
+      / done. When streaming, libedit still shows the prompt but
+      keypresses are buffered rather than echoed over the stream.
+      When done, the buffer is flushed into the active line.
+- [ ] **Double-Enter to queue** — if the user finishes typing
+      and presses Enter while a turn is still running, the new
+      prompt is held in `fQueuedInput` on `LocalWorker`. As soon
+      as the current result is drained the next job is enqueued
+      without returning to `ReadMessage()`.
+- [ ] **Visual separation** — a dim `[queued]` annotation on the
+      input row while the previous turn is still streaming so the
+      user knows their input is staged, not submitted yet.
+
+**Deferred within this milestone**:
+- Streaming the worker's output interleaved with user keystrokes
+  (requires a full split-screen TUI; deferred to a later milestone).
+- Multi-turn queue depth > 1 (one staged turn is the common case;
+  a queue of N opens questions about rollback semantics).
+
+---
+
+### v1.4.1 — BFS summary snapshot background refresh ✓
+
+The `claude:summary` snapshot loaded at session start grows
+stale as Claude writes new `WriteAttr` calls during the session.
+A background refresh keeps the in-process cache consistent so
+later turns in the same session benefit from summaries written
+earlier without restarting.
+
+- [x] **`config::RefreshSummarySnapshot(changed_paths)`** —
+      O(changed) per-path update via `catattr`; removes old line
+      by prefix match, inserts new value if valid UTF-8.
+- [x] **`TurnResult.writtenSummaryPaths`** — `SendWithTools`
+      accumulates paths from successful `WriteAttr claude:summary`
+      calls in a thread-local vector; `api::DrainWrittenSummaryPaths()`
+      returns and clears it. Worker stores it in `TurnResult`;
+      `InteractiveLoop` calls `RefreshSummarySnapshot` when non-empty.
+- [x] **Full re-scan on `/compact`** — `commands.cpp` calls
+      `config::ReloadBfsSummaries()` after `SaveHistory`.
+- [x] **Session-start cap** — `kSnapshotLineCap = 500`: `RefreshSummarySnapshot`
+      counts lines in `g_bfs_snapshot` and returns early when at or above
+      the cap. `BfsSystemBlock` appends a note telling Claude that
+      mid-session WriteAttr updates are not reflected and to use ReadAttr
+      for the current value of a specific file.
+
+**Deferred**:
+- inotify / `BPathMonitor`-based real-time watch (overkill for
+  the common single-session workflow; the per-turn refresh covers
+  99 % of cases).
+- Purging stale entries for deleted files (rare; harmless —
+  a miss on a deleted file just returns an empty result).
+
+---
+
 ## Haiku-native extras
 
 Features that don't exist in Claude Code but would make this CLI feel

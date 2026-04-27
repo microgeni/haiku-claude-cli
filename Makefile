@@ -33,7 +33,7 @@ OPENSSL_LIBS   := $(shell $(PKG_CONFIG) --libs   openssl     2>/dev/null || echo
 LIBEDIT_CFLAGS := $(shell $(PKG_CONFIG) --cflags libedit     2>/dev/null)
 LIBEDIT_LIBS   := $(shell $(PKG_CONFIG) --libs   libedit     2>/dev/null || echo -ledit)
 
-CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) $(LIBEDIT_CFLAGS) -pthread
+CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) $(LIBEDIT_CFLAGS) -pthread -D_DEFAULT_SOURCE
 LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread
 
 SRCDIR   := src
@@ -57,7 +57,7 @@ ICON_HVIF ?= assets/claude-icon.hvif
 APP_SIG   ?= application/x-vnd.Microgeni-claude-cli
 
 PKG_NAME    ?= claude_cli
-PKG_VERSION ?= 1.6.2
+PKG_VERSION ?= 1.7.0
 PKG_BUILD   ?= 1
 PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
@@ -122,9 +122,13 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	    exit 1; \
 	}
 	rm -rf "$(PKG_STAGE)"
-	mkdir -p "$(PKG_STAGE)/bin" "$(PKG_STAGE)/documentation/man/man1"
+	mkdir -p "$(PKG_STAGE)/bin" \
+	         "$(PKG_STAGE)/documentation/man/man1" \
+	         "$(PKG_STAGE)/documentation/packages/claude-cli"
 	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
-	cp docs/claude.1 "$(PKG_STAGE)/documentation/man/man1/claude.1"
+	cp docs/claude.1  "$(PKG_STAGE)/documentation/man/man1/claude.1"
+	cp CHANGELOG.md   "$(PKG_STAGE)/documentation/packages/claude-cli/CHANGELOG.md"
+	cp README.md      "$(PKG_STAGE)/documentation/packages/claude-cli/ReadMe.md"
 	@if [ -f "$(ICON_HVIF)" ]; then \
 	    echo "  staging icon to data/claude-cli/icon.hvif"; \
 	    mkdir -p "$(PKG_STAGE)/data/claude-cli"; \

@@ -1,16 +1,27 @@
 #include "tui.h"
+#include "repl.h"
 
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
 #include <fcntl.h>
+#include <functional>
 #include <iostream>
+#include <mutex>
+#include <poll.h>
+#include <sstream>
+#include <streambuf>
+#include <string>
 #include <sys/ioctl.h>
 #include <termios.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_set>
+
+#include <editline/readline.h>
 
 namespace tui {
 namespace {
@@ -44,6 +55,242 @@ bool detect_color_support() {
 
 void Init() {
 	g_color_enabled = detect_color_support();
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent-output pending buffer.
+//
+// When a turn is in progress the main thread is inside libedit's
+// readline() call while the worker thread is streaming the response.
+// Both write to stdout (libedit on row N-2; the worker to the scroll
+// region).  Writing concurrently corrupts the terminal state.
+//
+// Solution: while a turn is active, std::cout is redirected through
+// TurnOutputBuf which accumulates worker output in g_turn_pending
+// (under g_turn_pending_mu).  The repl getcfn hook (called by libedit
+// before every keypress read) flushes g_turn_pending to the scroll
+// region using DECSC/DECRC so libedit's cursor on row N-2 is
+// undisturbed.
+//
+// BeginTurn() installs the interceptor; EndTurn() removes it and
+// flushes any remaining buffered output.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::mutex   g_turn_pending_mu;
+std::string  g_turn_pending;
+std::streambuf* g_cout_orig_buf = nullptr;
+
+// Custom streambuf: while active, all cout writes go to g_turn_pending.
+class TurnOutputBuf : public std::streambuf {
+public:
+	// Write a sequence of characters into the pending buffer.
+	std::streamsize xsputn(const char* s, std::streamsize n) override {
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		g_turn_pending.append(s, static_cast<size_t>(n));
+		return n;
+	}
+	// Single-character write (fallback path used by some libc impls).
+	int overflow(int c) override {
+		if (c == EOF) return c;
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		g_turn_pending.push_back(static_cast<char>(c));
+		return c;
+	}
+};
+
+TurnOutputBuf g_turn_buf;
+
+// Flush timer: wakes every ~16 ms while a turn is active and calls
+// FlushTurnOutput() so the response appears even when the user is not
+// typing (keystroke-driven flushing alone produces no output at idle).
+std::atomic<bool> g_flush_timer_running{false};
+std::thread       g_flush_timer_thread;
+
+// Pause/resume flag for the flush timer.  When g_flush_timer_paused is
+// true the timer loop spins on a short sleep without calling
+// FlushTurnOutput() or touching stdout, giving SelectOption() exclusive
+// access to the terminal.  g_flush_timer_paused_ack is set by the
+// timer loop once it has acknowledged the pause.
+std::atomic<bool> g_flush_timer_paused    {false};
+std::atomic<bool> g_flush_timer_paused_ack{false};
+
+// Scroll-region cursor tracking across flushes. Set to scroll-region
+// bottom col 1 on the first flush; updated by simulating cursor movement
+// through each chunk so subsequent flushes CUP to the correct position.
+bool g_turn_started = false;
+int  g_turn_row2    = 0;
+int  g_turn_col     = 1;
+
+// Callback installed by session.cpp so the flush timer can detect when
+// the worker has finished and inject a synthetic keypress to unblock
+// ReadMessage(). Cleared by EndTurn().
+std::function<bool()> g_turn_done_check;
+
+} // namespace
+
+// Exposed so session.cpp can clear it at the top of the main loop.
+std::atomic<bool> g_turn_just_completed{false};
+
+// Write directly to the real terminal fd, bypassing the interceptor.
+// Used by SetStatusBar and other fixed-frame drawing functions that
+// must reach the terminal even while a turn is active.
+static void DirectWrite(const std::string& s) {
+	if (s.empty()) return;
+	if (g_cout_orig_buf) {
+		g_cout_orig_buf->sputn(s.data(), static_cast<std::streamsize>(s.size()));
+		g_cout_orig_buf->pubsync();
+	} else {
+		const ssize_t n = ::write(fileno(stdout), s.data(), s.size());
+		(void)n;
+	}
+}
+
+// Flush buffered turn output to the scroll region.
+// Uses absolute CUP positioning to place output correctly in the scroll
+// region, then returns the cursor to the input row (N-2).
+// Safe to call from any thread; must NOT be called with g_turn_pending_mu held.
+void FlushTurnOutput() {
+	std::string chunk;
+	{
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		if (g_turn_pending.empty()) return;
+		chunk.swap(g_turn_pending);
+	}
+
+	// Build the output sequence:
+	//   1. DECSC — save libedit's cursor (input row N-2 col C)
+	//   2. CUP to g_turn_col/row — resume from where last flush ended
+	//   3. chunk
+	//   4. DECRC — restore libedit's cursor
+	//
+	// After step 3 the terminal cursor is at some position inside the
+	// scroll region.  We can't query it, so we track g_turn_col/row by
+	// simulating cursor movement from the chunk content.  Newlines
+	// within the scroll region scroll normally; \r resets column to 1;
+	// printable chars advance the column.  We don't handle all CSI
+	// sequences but handle the common ones the spinner and renderer emit.
+
+	// Simulate cursor movement through chunk to update g_turn_col/row.
+	const int rows = TerminalRows();
+	const int scroll_bottom = rows > 4 ? rows - 4 : rows - 1;
+
+	// On the very first flush, start at scroll-region bottom col 1.
+	if (!g_turn_started) {
+		g_turn_col = 1;
+		g_turn_row2 = scroll_bottom;
+		g_turn_started = true;
+	}
+
+	std::string out;
+	out.reserve(32 + chunk.size());
+	out += "\x1b""7";    // DECSC — save libedit's cursor
+
+	// CUP to tracked scroll-region position.
+	out += "\x1b[" + std::to_string(g_turn_row2) + ";" + std::to_string(g_turn_col) + "H";
+	out += chunk;
+
+	// Simulate cursor movement through chunk.
+	bool in_esc = false;
+	bool in_csi = false;
+	for (unsigned char c : chunk) {
+		if (in_csi) {
+			if (c >= 0x40 && c <= 0x7E) in_csi = in_esc = false;
+		} else if (in_esc) {
+			if (c == '[') in_csi = true; else in_esc = false;
+		} else if (c == '\x1b') {
+			in_esc = true;
+		} else if (c == '\r') {
+			g_turn_col = 1;
+		} else if (c == '\n') {
+			g_turn_col = 1;
+			if (g_turn_row2 < scroll_bottom) ++g_turn_row2;
+			// else scroll region scrolls — row stays at bottom
+		} else if (c >= 0x20 && c < 0x7F) {
+			++g_turn_col; // approximate; ignores UTF-8 multi-byte
+		}
+	}
+
+	out += "\x1b""8";    // DECRC — restore libedit's cursor
+
+	if (g_cout_orig_buf) {
+		g_cout_orig_buf->sputn(out.data(), static_cast<std::streamsize>(out.size()));
+		g_cout_orig_buf->pubsync();
+	} else {
+		const ssize_t n = ::write(fileno(stdout), out.data(), out.size());
+		(void)n;
+	}
+}
+
+void BeginTurn() {
+	if (!isatty(fileno(stdout))) return;
+	if (g_cout_orig_buf) return; // already installed
+	{
+		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
+		g_turn_pending.clear();
+	}
+	g_turn_started = false;  // reset first-flush sentinel
+	g_turn_row2    = 0;
+	g_turn_col     = 1;
+	// Redirect cout through the interceptor.
+	g_cout_orig_buf = std::cout.rdbuf(&g_turn_buf);
+
+	// Start the flush timer so output appears without requiring keystrokes.
+	// The timer also watches for turn completion and injects a synthetic
+	// newline into libedit's input queue so the main loop wakes up and
+	// calls drain_turn() without requiring a real keypress.
+	g_flush_timer_running.store(true);
+	g_flush_timer_paused.store(false);
+	g_flush_timer_paused_ack.store(false);
+	g_flush_timer_thread = std::thread([]() {
+		while (g_flush_timer_running.load()) {
+			// When paused, spin without touching stdout so SelectOption()
+			// has exclusive access to the terminal.
+			if (g_flush_timer_paused.load()) {
+				g_flush_timer_paused_ack.store(true);
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				continue;
+			}
+			g_flush_timer_paused_ack.store(false);
+			std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			if (!g_flush_timer_running.load()) break;
+			if (g_flush_timer_paused.load())  continue; // re-check after sleep
+			FlushTurnOutput();
+			// When the turn finishes, set g_turn_just_completed so
+			// bracketed_getc can return a synthetic '\r' on its next
+			// call, waking ReadMessage() with an empty line so the
+			// main loop's drain_turn() fires without a real keypress.
+			if (g_turn_done_check && g_turn_done_check()) {
+				g_turn_just_completed.store(true);
+				// Wake the blocking poll() in raw_getc_or_wake() so
+				// bracketed_getc can return a synthetic '\r' and the
+				// main loop's drain_turn() fires without a real keypress.
+				repl::WakeReadMessage();
+				g_flush_timer_running.store(false);
+				break;
+			}
+		}
+	});
+}
+
+void EndTurn() {
+	// Stop the flush timer first so it doesn't race with the restore.
+	g_flush_timer_running.store(false);
+	if (g_flush_timer_thread.joinable())
+		g_flush_timer_thread.join();
+	g_turn_done_check = nullptr;
+
+	if (!g_cout_orig_buf) return;
+	// Restore cout to the original buffer, then flush remaining output.
+	std::cout.rdbuf(g_cout_orig_buf);
+	g_cout_orig_buf = nullptr;
+	FlushTurnOutput();
+	std::cout.flush();
+}
+
+void SetTurnDoneCheck(std::function<bool()> fn) {
+	g_turn_done_check = std::move(fn);
 }
 
 namespace {
@@ -128,7 +375,8 @@ namespace {
 
 // Build the ANSI sequences for drawing the fixed frame. Pulled out
 // so both InstallStatusBar and RedrawStatusBar share the logic.
-// Caller is responsible for flushing stdout after calling.
+// Writes directly to the real terminal (bypasses the TurnOutputBuf
+// interceptor) so status bar updates are visible during active turns.
 // Four rows are drawn:
 //   row N-3 : top separator   (─── between scroll chat and input)
 //   row N-2 : input row       (blank here; libedit draws "> " on demand)
@@ -137,34 +385,39 @@ namespace {
 void draw_fixed_frame(int rows, int cols, const std::string& status) {
 	if (rows < kStatusBarRows + 1) return;
 
-	// Save cursor. DECSC / DECRC (\e7 / \e8) are more reliable
-	// across xterm and Haiku Terminal than CSI s/u.
-	std::cout << "\x1b""7";
-
 	std::string rule;
 	rule.reserve(cols * 3);
 	for (int i = 0; i < cols; ++i) rule += "\xE2\x94\x80"; // ─
 
-	// Row N-3: top separator.
-	std::cout << "\x1b[" << (rows - 3) << ";1H"
-			  << "\x1b[2K"
-			  << Muted(rule);
+	// Build into a string then DirectWrite so the interceptor does
+	// not swallow status-bar updates into the pending buffer.
+	std::string out;
+	out.reserve(256 + cols * 6);
 
-	// Row N-2: input row — clear it; libedit redraws "> " when active.
-	std::cout << "\x1b[" << (rows - 2) << ";1H"
-			  << "\x1b[2K";
+	out += "\x1b""7";                              // DECSC
 
-	// Row N-1: bottom separator.
-	std::cout << "\x1b[" << (rows - 1) << ";1H"
-			  << "\x1b[2K"
-			  << Muted(rule);
+	out += "\x1b[";
+	out += std::to_string(rows - 3);
+	out += ";1H\x1b[2K";
+	out += Muted(rule);                            // row N-3 separator
 
-	// Row N: status content.
-	std::cout << "\x1b[" << rows << ";1H"
-			  << "\x1b[2K"
-			  << status;
+	out += "\x1b[";
+	out += std::to_string(rows - 2);
+	out += ";1H\x1b[2K";                          // row N-2 input (blank)
 
-	std::cout << "\x1b""8";
+	out += "\x1b[";
+	out += std::to_string(rows - 1);
+	out += ";1H\x1b[2K";
+	out += Muted(rule);                            // row N-1 separator
+
+	out += "\x1b[";
+	out += std::to_string(rows);
+	out += ";1H\x1b[2K";
+	out += status;                                 // row N status
+
+	out += "\x1b""8";                             // DECRC
+
+	DirectWrite(out);
 }
 
 // Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows)
@@ -209,7 +462,6 @@ void SetStatusBar(const std::string& status) {
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
-	std::cout.flush();
 }
 
 void RedrawStatusBar() {
@@ -217,7 +469,6 @@ void RedrawStatusBar() {
 	refresh_dims();
 	apply_scroll_region(g_cached_term_rows);
 	draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
-	std::cout.flush();
 }
 
 void TeardownStatusBar() {
@@ -225,7 +476,7 @@ void TeardownStatusBar() {
 	g_status_bar_active = false;
 
 	const int rows = g_cached_term_rows > 0 ? g_cached_term_rows : 24;
-	std::cout << "\x1b[r"                         // reset scroll region
+	std::cout << "\x1b[r"                         // reset scroll region to full terminal
 			  << "\x1b[" << (rows - 3) << ";1H"
 			  << "\x1b[2K"                        // clear top separator row
 			  << "\x1b[" << (rows - 2) << ";1H"
@@ -234,8 +485,9 @@ void TeardownStatusBar() {
 			  << "\x1b[2K"                        // clear bottom separator row
 			  << "\x1b[" << rows << ";1H"
 			  << "\x1b[2K"                        // clear status row
-			  << "\x1b[" << rows << ";1H"
-			  << "\x1b[?25h"                      // show cursor (safety)
+			  << "\x1b[?25h"                      // restore cursor visibility
+			  << "\n"                              // advance past the cleared area so
+			                                      // the shell prompt starts on a fresh line
 			  << std::flush;
 }
 
@@ -264,33 +516,32 @@ void EmitChatRule() {
 void PositionCursorForInput() {
 	// Move cursor to the fixed input row (N-2) so libedit can draw
 	// the "> " prompt there. This row is outside the scroll region.
+	// Uses DirectWrite so it works even during an active turn.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
 	const int input_row = g_cached_term_rows - 2; // N-2 (fixed)
-	std::cout << "\x1b[" << input_row << ";1H" << "\x1b[2K" << std::flush;
+	DirectWrite("\x1b[" + std::to_string(input_row) + ";1H\x1b[2K");
 }
 
 void ClearInputRow() {
 	// Erase the fixed input row (N-2) ready for libedit to redraw.
+	// Uses DirectWrite so it works even during an active turn.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
 	const int input_row = g_cached_term_rows - 2; // N-2
-	std::cout << "\x1b[" << input_row << ";1H"
-			  << "\x1b[2K" << std::flush;
+	DirectWrite("\x1b[" + std::to_string(input_row) + ";1H\x1b[2K");
 }
 
 void RepaintInputRow(const std::string& prompt) {
-	// Write the prompt string directly onto the fixed input row (N-2)
-	// so it is visible while libedit is blocked. libedit will
-	// overwrite this on its next redraw — no coordination needed.
+	// Write the prompt string directly onto the fixed input row (N-2).
+	// Uses DirectWrite so it works even during an active turn.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
 	const int input_row = g_cached_term_rows - 2; // N-2
-	std::cout << "\x1b[" << input_row << ";1H"
-			  << "\x1b[2K" << prompt << std::flush;
+	DirectWrite("\x1b[" + std::to_string(input_row) + ";1H\x1b[2K" + prompt);
 }
 
 void PositionCursorForChat() {
@@ -306,13 +557,83 @@ void PositionCursorForChat() {
 void HideCursor() {
 	if (!g_color_enabled) return;
 	if (!isatty(fileno(stdout))) return;
-	std::cout << "\x1b[?25l" << std::flush;
+	DirectWrite("\x1b[?25l");
 }
 
 void ShowCursor() {
 	if (!g_color_enabled) return;
 	if (!isatty(fileno(stdout))) return;
-	std::cout << "\x1b[?25h" << std::flush;
+	DirectWrite("\x1b[?25h");
+}
+
+void PauseFlushTimer() {
+	if (!g_flush_timer_running.load()) return;
+	g_flush_timer_paused.store(true);
+	// Wait until the timer loop acknowledges the pause so we know it
+	// is no longer mid-FlushTurnOutput() when SelectOption() starts.
+	// Worst-case wait: one 16 ms sleep + one 10 ms spin cycle ≈ 30 ms.
+	for (int i = 0; i < 50 && !g_flush_timer_paused_ack.load(); ++i)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+	// Flush any pending turn output so it appears above the menu.
+	// FlushTurnOutput wraps output in DECSC/CUP/DECRC; after it returns
+	// the physical cursor is back at the libedit input row (DECRC).
+	// We need the cursor at the *end of turn output* (g_turn_row2,
+	// g_turn_col) so SelectOption() draws its menu from there.
+	FlushTurnOutput();
+
+	// Move the physical cursor to where turn output ended, then bypass
+	// the interceptor so SelectOption()'s std::cout writes go directly
+	// to the terminal.  Use the tracked g_turn_row2/g_turn_col; if the
+	// turn hasn't started yet (no output flushed), land at the scroll-
+	// region bottom.
+	if (g_cout_orig_buf) {
+		const int rows = TerminalRows();
+		const int scroll_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : rows;
+		const int row = g_turn_started ? g_turn_row2 : scroll_bottom;
+		const int col = g_turn_started ? g_turn_col  : 1;
+		std::string cup = "\x1b[" + std::to_string(row) + ";" +
+		                  std::to_string(col) + "H";
+		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
+		g_cout_orig_buf->pubsync();
+		// Now redirect std::cout directly to the terminal.
+		std::cout.rdbuf(g_cout_orig_buf);
+	}
+}
+
+void ResumeFlushTimer() {
+	// After SelectOption() the physical cursor is at the summary row inside
+	// the scroll region.  We need DECSC (inside FlushTurnOutput) to save
+	// libedit's input row (N-2) so that DECRC restores there correctly.
+	//
+	// Fix: park the physical cursor at the input row (N-2) via DirectWrite
+	// before re-enabling the flush timer.  FlushTurnOutput() will then
+	// DECSC(N-2), CUP to chat_bottom (via g_turn_row2), emit output, and
+	// DECRC back to N-2 — keeping libedit's cursor position intact.
+	if (g_cout_orig_buf && g_status_bar_active) {
+		if (g_term_dirty) refresh_dims();
+		const int rows        = TerminalRows();
+		const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
+		const int input_row   = rows > 2 ? rows - 2 : rows; // N-2 (fixed input row)
+
+		// Update the output-position tracker to chat_bottom so the next
+		// FlushTurnOutput() CUPs there rather than a stale pre-menu position.
+		g_turn_row2    = chat_bottom;
+		g_turn_col     = 1;
+		g_turn_started = true;
+
+		// Park the physical cursor at the input row so DECSC inside
+		// FlushTurnOutput() saves N-2 and DECRC restores there.
+		const std::string cup = "\x1b[" + std::to_string(input_row) + ";1H";
+		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
+		g_cout_orig_buf->pubsync();
+	}
+
+	// Reconnect the interceptor so worker output is buffered again.
+	if (g_cout_orig_buf)
+		std::cout.rdbuf(&g_turn_buf);
+	g_flush_timer_paused_ack.store(false);
+	g_flush_timer_paused.store(false);
 }
 
 int SelectOption(const std::vector<std::string>& options,
@@ -322,8 +643,13 @@ int SelectOption(const std::vector<std::string>& options,
 	if (options.empty()) return 0;
 	const int n = static_cast<int>(options.size());
 
+	// Use the real tty fd for all tty reads and termios operations.
+	// When BlockStdin() has redirected STDIN_FILENO to /dev/null,
+	// repl::RealTtyFd() still points to the actual terminal.
+	const int tty = (repl::RealTtyFd() >= 0) ? repl::RealTtyFd() : fileno(stdin);
+
 	// Non-TTY fallback: print numbered list and read a line.
-	if (!g_color_enabled || !isatty(fileno(stdout)) || !isatty(fileno(stdin))) {
+	if (!g_color_enabled || !isatty(fileno(stdout)) || !isatty(tty)) {
 		if (!heading.empty()) std::cout << heading << "\n";
 		for (int i = 0; i < n; ++i) {
 			std::cout << "  " << (i + 1) << ". " << options[i] << "\n";
@@ -337,14 +663,14 @@ int SelectOption(const std::vector<std::string>& options,
 		return n - 1;
 	}
 
-	// Put stdin into raw mode for single-keypress reads.
+	// Put the tty into raw mode for single-keypress reads.
 	struct termios orig {}, raw {};
-	tcgetattr(fileno(stdin), &orig);
+	tcgetattr(tty, &orig);
 	raw = orig;
 	raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
 	raw.c_cc[VMIN]  = 1;
 	raw.c_cc[VTIME] = 0;
-	tcsetattr(fileno(stdin), TCSANOW, &raw);
+	tcsetattr(tty, TCSANOW, &raw);
 
 	int sel = 0; // 0-based selected index
 
@@ -383,7 +709,7 @@ int SelectOption(const std::vector<std::string>& options,
 		}
 		// Footer hint row.
 		std::cout << "\x1b[2K"
-		          << " " << Dim("Esc to cancel \xC2\xB7 Tab to amend");
+		          << " " << Dim("Tab: amend \xC2\xB7 Shift+Tab: allow all \xC2\xB7 Esc: cancel");
 		// Return cursor to heading row.
 		const int rows_up = heading_rows + n + kFooterRows - 1;
 		if (rows_up > 0) std::cout << "\x1b[" << rows_up << "A";
@@ -394,7 +720,7 @@ int SelectOption(const std::vector<std::string>& options,
 	// Telegram hook answered while we were setting up raw mode), skip
 	// drawing the menu entirely and return immediately so no flash occurs.
 	if (cancel && cancel->load()) {
-		tcsetattr(fileno(stdin), TCSANOW, &orig);
+		tcsetattr(tty, TCSAFLUSH, &orig);
 		return -1;
 	}
 
@@ -410,50 +736,26 @@ int SelectOption(const std::vector<std::string>& options,
 	// row 1 and the teardown erase starts from the wrong position,
 	// leaving stale option lines on screen.
 	//
-	// Fix: query the actual cursor row (DSR \x1b[6n → CPR \x1b[r;cR).
-	// The scroll-region bottom is (TerminalRows() - kStatusBarRows).
-	// The heading row is (cursor_row); at most (cursor_row - 1) rows
-	// exist above it inside the scroll region, so cap pre_lines.
+	// Safe cap: the scroll region occupies rows 1..(N-kStatusBarRows).
+	// Inside that region the menu itself takes (menu_rows) lines.  Any
+	// pre_lines content that was scrolled in from above the menu can
+	// occupy at most (scroll_region_height - menu_rows) rows.  Cap
+	// pre_lines to that value so the upward cursor move in teardown can
+	// never overshoot the scroll-region top.
+	//
+	// Note: we previously queried the cursor row via DSR (\x1b[6n) to
+	// get the exact row, but the CPR response bytes leaked into libedit's
+	// input buffer on some terminals (particularly tmux), corrupting the
+	// next prompt.  The conservative cap below is always correct.
 	{
-		// Flush the render first, then query cursor position.
-		// We read on stdin which is already in raw mode (set above).
-		std::cout << "\x1b[6n" << std::flush;
-		// Read the CPR response: ESC [ row ; col R
-		char buf[32] = {};
-		int  pos     = 0;
-		// Give the terminal up to 500 ms total; each read() uses VMIN=1
-		// so it blocks until a byte arrives (stdin is still in raw mode
-		// with VMIN=1/VTIME=0 at this point).
-		bool got_r = false;
-		while (pos < 31 && !got_r) {
-			unsigned char ch = 0;
-			if (read(fileno(stdin), &ch, 1) != 1) break;
-			buf[pos++] = static_cast<char>(ch);
-			if (ch == 'R') got_r = true;
-		}
-		// Parse \x1b[row;colR
-		if (got_r) {
-			int cur_row = 0, cur_col = 0;
-			// buf starts with ESC [ or just [
-			const char* p = buf;
-			while (*p && *p != '[') ++p;
-			if (*p == '[') {
-				++p;
-				cur_row = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
-				if (*p == ';') {
-					++p;
-					cur_col = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
-				}
-				(void)cur_col;
-			}
-			if (cur_row > 0) {
-				// Rows available above the heading row (1-indexed): cur_row - 1.
-				// But row 1 is the scroll region top, so we can move at most
-				// cur_row - 1 rows upward before hitting the top of the screen.
-				const int rows_above = cur_row - 1;
-				if (pre_lines > rows_above)
-					pre_lines = rows_above;
-			}
+		const int rows = TerminalRows();
+		if (rows > kStatusBarRows) {
+			const int scroll_height = rows - kStatusBarRows;
+			const int max_pre = scroll_height - menu_rows;
+			if (max_pre < 0)
+				pre_lines = 0;
+			else if (pre_lines > max_pre)
+				pre_lines = max_pre;
 		}
 	}
 
@@ -465,7 +767,7 @@ int SelectOption(const std::vector<std::string>& options,
 		struct termios poll_raw = raw;
 		poll_raw.c_cc[VMIN]  = 0;
 		poll_raw.c_cc[VTIME] = 1; // 100 ms
-		tcsetattr(fileno(stdin), TCSANOW, &poll_raw);
+		tcsetattr(tty, TCSANOW, &poll_raw);
 	}
 
 	int chosen = n - 1; // default: last option (deny)
@@ -474,57 +776,88 @@ int SelectOption(const std::vector<std::string>& options,
 		// Check the cancel flag before each read attempt.
 		if (cancel && cancel->load()) {
 			std::cout << "\x1b[?25h" << std::flush; // restore cursor
-			tcsetattr(fileno(stdin), TCSANOW, &orig);
+			tcsetattr(tty, TCSAFLUSH, &orig);
 			return -1;
 		}
 		unsigned char c = 0;
-		if (read(fileno(stdin), &c, 1) != 1) {
+		if (read(tty, &c, 1) != 1) {
 			// VMIN=0 timeout or EOF — loop to re-check cancel.
 			continue;
 		}
 
 		if (c == 0x1b) {
 			// Escape sequence or bare Esc.
-			unsigned char seq[2] = {};
-			// Use VMIN=1 VTIME=1: block until a byte arrives or 100 ms
-			// elapses.  VMIN=0 VTIME=1 is a polling read — on a real
-			// terminal it can return 0 immediately even when the rest of
-			// the CSI sequence ([ A/B) is already in the kernel buffer,
-			// because tcsetattr flushes the old settings before the bytes
-			// land.  VMIN=1 guarantees we wait for the byte.
+			//
+			// Use VMIN=1 VTIME=1 so read() blocks until a byte arrives
+			// or 100 ms elapses.  VMIN=0 VTIME=1 can return immediately
+			// even when bytes are already in the kernel buffer because
+			// tcsetattr flushes pending settings first.
 			struct termios nb = raw;
 			nb.c_cc[VMIN]  = 1;
 			nb.c_cc[VTIME] = 1; // 100 ms inter-byte timeout
-			tcsetattr(fileno(stdin), TCSANOW, &nb);
-			const int r1 = read(fileno(stdin), &seq[0], 1);
-			const int r2 = (r1 == 1 && seq[0] == '[')
-						 ? read(fileno(stdin), &seq[1], 1) : 0;
+			tcsetattr(tty, TCSANOW, &nb);
+
+			// Read the byte after ESC.
+			unsigned char intro = 0;
+			const int r1 = read(tty, &intro, 1);
+
+			// If it is '[' this is a CSI sequence.  Read bytes until the
+			// CSI final byte (0x40–0x7E) so that multi-byte sequences
+			// like CPR \x1b[1;1R are fully consumed and never left in
+			// the tty buffer to corrupt libedit's input on return.
+			std::string csi; // bytes after '['
+			bool is_csi = (r1 == 1 && intro == '[');
+			if (is_csi) {
+				while (csi.size() < 16) {
+					unsigned char b = 0;
+					if (read(tty, &b, 1) != 1) break;
+					csi += static_cast<char>(b);
+					if (b >= 0x40 && b <= 0x7e) break; // final byte consumed
+				}
+			}
+
 			// Restore the correct mode: poll mode if cancel is set,
 			// blocking mode otherwise.
 			if (cancel) {
 				struct termios poll_raw = raw;
 				poll_raw.c_cc[VMIN]  = 0;
 				poll_raw.c_cc[VTIME] = 1;
-				tcsetattr(fileno(stdin), TCSANOW, &poll_raw);
+				tcsetattr(tty, TCSANOW, &poll_raw);
 			} else {
-				tcsetattr(fileno(stdin), TCSANOW, &raw);
+				tcsetattr(tty, TCSANOW, &raw);
 			}
 
 			if (r1 <= 0) {
 				// Bare Esc → deny (last option).
 				chosen = n - 1;
 				done   = true;
-			} else if (r1 == 1 && seq[0] == '[' && r2 == 1) {
-				if (seq[1] == 'A') { // Up arrow
+			} else if (is_csi && !csi.empty()) {
+				const unsigned char final_byte =
+					static_cast<unsigned char>(csi.back());
+				if (final_byte == 'A') { // Up arrow   \x1b[A
 					if (sel > 0) --sel;
 					render();
-				} else if (seq[1] == 'B') { // Down arrow
+				} else if (final_byte == 'B') { // Down arrow  \x1b[B
 					if (sel < n - 1) ++sel;
 					render();
+				} else if (final_byte == 'Z') { // Shift+Tab   \x1b[Z
+					if (n > 1) {
+						sel    = 1;
+						chosen = 1;
+						render();
+					} else {
+						chosen = 0;
+					}
+					done = true;
 				}
+				// Any other CSI (CPR \x1b[r;cR, focus events, etc.)
+				// has already been fully consumed above — silently ignore.
 			}
 		} else if (c == '\r' || c == '\n') {
 			chosen = sel;
+			done   = true;
+		} else if (c == '\t') { // Tab → amend (cancel-and-retype sentinel)
+			chosen = -2;
 			done   = true;
 		} else if (c >= '1' && c <= '9') {
 			const int idx = static_cast<int>(c - '1');
@@ -562,19 +895,54 @@ int SelectOption(const std::vector<std::string>& options,
 	std::cout << "\r";
 
 	// Step 4: write the compact summary on the first (now blank) row.
-	if (!heading.empty()) {
+	// chosen == -2 means Tab/amend: display a special label instead of
+	// indexing options[] with a negative value (which would be UB).
+	// Erase the line first as a safety measure before writing the summary.
+	std::cout << "\x1b[2K";
+	if (chosen == -2) {
+		std::cout << Dim(heading.empty() ? "  -> [amend]" : heading + " \xe2\x86\x92 [amend]");
+	} else if (!heading.empty()) {
 		std::cout << Dim(heading + " \xe2\x86\x92 " + options[chosen]);
 	} else {
 		std::cout << Dim("  -> " + options[chosen]);
 	}
 
-	// Step 5: leave cursor on the row after the summary, ready for output.
-	// Use \x1b[1B\r (not \n) to avoid scrolling within DECSTBM.
-	std::cout << "\x1b[1B\r";
+	// Step 5: erase the rows that were scrolled in below the summary
+	// by the opening \n emissions, then restore cursor to the summary
+	// row so PositionCursorForChat() can reposition cleanly.
+	for (int i = 0; i < menu_rows; ++i)
+		std::cout << "\x1b[1B\r\x1b[2K";
+	if (menu_rows > 0)
+		std::cout << "\x1b[" << menu_rows << "A\r";
 
 	std::cout << "\x1b[?25h" << std::flush; // restore cursor
 
-	tcsetattr(fileno(stdin), TCSANOW, &orig);
+	tcsetattr(tty, TCSAFLUSH, &orig);
+	// Paranoid drain: read any bytes that survived TCSAFLUSH/tcflush.
+	// Any echoed character from the drain might corrupt the summary
+	// row, so re-erase and reprint the summary after the drain.
+	{
+		const int fd = tty;
+		const int fl = fcntl(fd, F_GETFL);
+		if (fl != -1) {
+			fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+			char tmp[64];
+			while (::read(fd, tmp, sizeof(tmp)) > 0) {}
+			fcntl(fd, F_SETFL, fl);
+		}
+	}
+	tcflush(tty, TCIFLUSH);
+	// Re-erase and reprint the summary row now that the tty is back in
+	// cooked mode and any race-echoed bytes have been drained.
+	std::cout << "\r\x1b[2K";
+	if (chosen == -2) {
+		std::cout << Dim(heading.empty() ? "  -> [amend]" : heading + " \xe2\x86\x92 [amend]");
+	} else if (!heading.empty()) {
+		std::cout << Dim(heading + " \xe2\x86\x92 " + options[chosen]);
+	} else {
+		std::cout << Dim("  -> " + options[chosen]);
+	}
+	std::cout << std::flush;
 	return chosen;
 }
 

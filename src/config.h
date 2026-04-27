@@ -88,6 +88,17 @@ std::string ShellSingleQuote(const std::string& s);
 void AutoWriteSummaryIfMissing(const std::string& path,
                                 const std::string& content);
 
+// Force a full re-scan of the project's claude:summary attributes,
+// replacing the in-process snapshot. Call after /compact so
+// summaries written during the session appear in the next turn's
+// system prompt. No-op on non-Haiku platforms.
+void ReloadBfsSummaries();
+
+// Update the in-process snapshot for a specific set of paths whose
+// claude:summary attribute was written or changed during this session.
+// O(changed) — avoids a full filesystem walk. No-op on non-Haiku.
+void RefreshSummarySnapshot(const std::vector<std::string>& paths);
+
 } // namespace config
 
 #endif

@@ -18,15 +18,25 @@
 #include <curl/curl.h>
 
 #include "hooks.h"
+#include "repl.h"
 #include "stats.h"
 #include "tools.h"
 #include "tui.h"
 
 // Shared cancellation flag used across tools.cpp and api.cpp. Lives
 // at global scope so the SIGINT handler (C callback) can write it.
-volatile sig_atomic_t g_interrupted = 0;
+volatile sig_atomic_t g_interrupted  = 0;
+
+// Set when Ctrl+X (0x18) is detected during a streaming turn.
+// Signals "cancel and restore input" to InteractiveLoop.
+volatile sig_atomic_t g_cancel_retype = 0;
 
 namespace api {
+
+// Thread-local accumulator for WriteAttr calls that touch
+// claude:summary during a SendWithTools invocation. Drained by
+// DrainWrittenSummaryPaths() after each turn.
+static thread_local std::vector<std::string> tl_written_summary_paths;
 
 // Definitions for the globals declared in api.h.
 StreamProgress* g_stream_progress = nullptr;
@@ -70,15 +80,21 @@ int xfer_callback(void* /*clientp*/,
 class EscInterruptGuard {
 public:
 	EscInterruptGuard() {
-		if (!isatty(STDIN_FILENO)) return;
-		if (tcgetattr(STDIN_FILENO, &fSaved) != 0) return;
+		// Always operate on the real tty fd, not STDIN_FILENO, because
+		// BlockStdin() may redirect STDIN_FILENO to a blocking pipe while
+		// we are alive.  repl::RealTtyFd() returns the dup()'d tty fd
+		// created at Init() time, which is always the actual terminal.
+		const int tty = repl::RealTtyFd() >= 0 ? repl::RealTtyFd() : STDIN_FILENO;
+		if (!isatty(tty)) return;
+		fTtyFd = tty;
+		if (tcgetattr(fTtyFd, &fSaved) != 0) return;
 		fSavedValid = true;
 
 		termios raw = fSaved;
 		raw.c_lflag &= ~(ICANON | ECHO);
 		raw.c_cc[VMIN]  = 0;
 		raw.c_cc[VTIME] = 0;
-		if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+		if (tcsetattr(fTtyFd, TCSANOW, &raw) != 0) {
 			fSavedValid = false;
 			return;
 		}
@@ -96,7 +112,7 @@ public:
 				fPausedAck.store(false);
 
 				struct pollfd pfd {};
-				pfd.fd     = STDIN_FILENO;
+				pfd.fd     = fTtyFd;  // always poll the real tty
 				pfd.events = POLLIN;
 				const int r = ::poll(&pfd, 1, 100);
 				if (!fRunning.load() || fPaused.load()) continue;
@@ -104,7 +120,7 @@ public:
 				if (!(pfd.revents & POLLIN)) continue;
 
 				char buf[16];
-				const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+				const ssize_t n = ::read(fTtyFd, buf, sizeof(buf));
 				if (n <= 0) continue;
 
 				// A bare ESC keypress arrives as a single 0x1B byte.
@@ -116,6 +132,13 @@ public:
 					g_interrupted = 1;
 					return;
 				}
+				// Ctrl+X (0x18) — cancel and restore input to the
+				// edit buffer ("amend" rather than discard).
+				if (n == 1 && buf[0] == '\x18') {
+					g_cancel_retype = 1;
+					g_interrupted   = 1;
+					return;
+				}
 			}
 		});
 	}
@@ -124,7 +147,7 @@ public:
 		fRunning.store(false);
 		if (fThread.joinable()) fThread.join();
 		if (fSavedValid) {
-			tcsetattr(STDIN_FILENO, TCSANOW, &fSaved);
+			tcsetattr(fTtyFd, TCSANOW, &fSaved);
 		}
 	}
 
@@ -154,6 +177,7 @@ private:
 	std::thread       fThread;
 	termios           fSaved {};
 	bool              fSavedValid = false;
+	int               fTtyFd     = STDIN_FILENO; // real tty fd (never the block pipe)
 };
 
 // Pointer to the currently active EscInterruptGuard (if any). Set
@@ -428,6 +452,8 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		};
 		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
 		if (g_active_esc_guard) g_active_esc_guard->pause();
+		repl::BlockStdin();
+		tui::PauseFlushTimer();
 		const int race_pre_lines =
 			(extra.empty()
 				? 1
@@ -435,13 +461,25 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 			+ 1; // the "[also awaiting Telegram]" line
 		const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
 											 &tg_answered, race_pre_lines);
+		tui::ResumeFlushTimer();
+		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+		repl::UnblockStdin();
+		repl::RequestClearEditBuffer();
+		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
 		if (g_active_esc_guard) g_active_esc_guard->resume();
 		tui::PositionCursorForChat();
 
 		{
 			std::unique_lock<std::mutex> lk(race_mu);
 			if (!tg_answered.load()) {
-				if (picked == 1) {
+				if (picked == -2) {
+					// Tab/amend: cancel turn and restore input to edit buffer.
+					g_cancel_retype = 1;
+					g_interrupted   = 1;
+					if (denial_reason)
+						*denial_reason = "user chose to amend the prompt";
+					result = Permission::Deny;
+				} else if (picked == 1) {
 					AlwaysAllowed().insert(tool_name);
 					result = Permission::Allow;
 				} else if (picked == 0) {
@@ -538,12 +576,35 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		"No",
 	};
 	if (g_active_esc_guard) g_active_esc_guard->pause();
+	// Block the main readline loop from reading stdin before pausing
+	// the flush timer, so SelectOption() has exclusive tty input access
+	// regardless of whether the flush timer is still running.
+	repl::BlockStdin();
+	tui::PauseFlushTimer();
 	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
+	tui::ResumeFlushTimer();
+	// Flush stale input bytes, then unblock stdin and resume guard.
+	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
+	repl::UnblockStdin();
+	// Clear libedit's internal buffer: Haiku's libedit reads stdin
+	// directly, so the approval keystroke may be in its edit buffer.
+	repl::RequestClearEditBuffer();
+	// Second flush for any byte that arrived in the window between
+	// SelectOption's TCSAFLUSH and the tcflush above.
+	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
 	if (g_active_esc_guard) g_active_esc_guard->resume();
 	tui::PositionCursorForChat();
 
 	if (g_interrupted && picked >= static_cast<int>(choices.size()) - 1) {
 		if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
+		return Permission::Deny;
+	}
+	if (picked == -2) {
+		// Tab pressed — "amend": cancel the turn and restore the user's
+		// original input to the edit buffer so they can retype/edit it.
+		g_cancel_retype = 1;
+		g_interrupted   = 1;
+		if (denial_reason) *denial_reason = "user chose to amend the prompt";
 		return Permission::Deny;
 	}
 	if (picked == 1) {
@@ -1134,6 +1195,20 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 					tres.content);
 			}
 
+			// Track WriteAttr calls that touch claude:summary so the
+			// LocalWorker can refresh the in-process snapshot after
+			// the turn without a full filesystem walk.
+#ifdef __HAIKU__
+			if (tname == "WriteAttr" && !tres.is_error) {
+				const std::string attr_name = tinput.value("name", std::string{});
+				if (attr_name == "claude:summary") {
+					const std::string attr_path = tinput.value("path", std::string{});
+					if (!attr_path.empty())
+						tl_written_summary_paths.push_back(attr_path);
+				}
+			}
+#endif
+
 			// For BFS-native tools, measure actual bytes saved by
 			// stat-ing the target file(s) and subtracting the tool's
 			// own output size.
@@ -1179,6 +1254,12 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 		}
 		messages.push_back({{"role", "user"}, {"content", tool_results}});
 	}
+}
+
+std::vector<std::string> DrainWrittenSummaryPaths() {
+	std::vector<std::string> out;
+	out.swap(tl_written_summary_paths);
+	return out;
 }
 
 } // namespace api

@@ -1,13 +1,17 @@
 #include "repl.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <poll.h>
 #include <string>
 #include <sys/stat.h>
+#include <termios.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -40,11 +44,94 @@ namespace {
 std::string g_paste_buf;
 size_t      g_paste_pos = 0;
 
-// Read one raw byte from `f`, retrying on EINTR.
+// Self-pipe used to wake the blocking poll() in raw_getc_or_wake().
+// g_wake_pipe[0] = read end (polled alongside stdin).
+// g_wake_pipe[1] = write end (written by tui::WakeReadMessage()).
+// Both set to -1 until Init() creates them.
+int g_wake_pipe[2] = {-1, -1};
+
+// When true, stdin fd (0) is redirected to a blocking pipe so libedit's
+// internal read() calls block instead of consuming tty bytes while
+// SelectOption() is running.
+std::atomic<bool> g_stdin_blocked{false};
+
+// File descriptors used for stdin blocking.
+int g_real_tty_fd   = -1;           // dup() of the original stdin (the real tty)
+int g_block_pipe[2] = {-1, -1};     // pipe: [0]=read end (used as fd 0 when blocking),
+                                     //       [1]=write end (written to unblock libedit)
+
+// Original terminal settings saved at Init() time — before libedit or
+// EscInterruptGuard touch them.  Restored by Deinit() as a safety net
+// so the shell always inherits a sane (cooked+echo) tty.
+struct termios g_saved_termios {};
+bool           g_saved_termios_valid = false;
+
+// Read one raw byte from stdin, also watching g_wake_pipe[0].
+// When the wake pipe fires, flush pending output and check
+// g_turn_just_completed; if set and the edit buffer is empty,
+// return '\r' to simulate Enter and unblock ReadMessage().
+// Returns EOF on real EOF or unrecoverable error.
+static int raw_getc_or_wake(FILE* f) {
+    while (true) {
+        const int stdin_fd   = fileno(f);
+        const int wake_fd    = g_wake_pipe[0];
+
+        if (wake_fd < 0) {
+            // No wake pipe — fall back to plain fgetc.
+            int c;
+            do { c = fgetc(f); } while (c == EOF && errno == EINTR);
+            return c;
+        }
+
+        // When stdin is blocked for SelectOption(), only poll the wake
+        // pipe so we never race with SelectOption's read() on the same fd.
+        const bool blocked = g_stdin_blocked.load();
+        const int  nfds    = blocked ? 1 : 2;
+
+        struct pollfd pfds[2];
+        pfds[0].fd      = stdin_fd;
+        pfds[0].events  = blocked ? 0 : POLLIN;
+        pfds[0].revents = 0;
+        pfds[1].fd      = wake_fd;
+        pfds[1].events  = POLLIN;
+        pfds[1].revents = 0;
+
+        const int r = ::poll(pfds + (blocked ? 1 : 0), nfds, -1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return EOF;
+        }
+
+        // Wake pipe fired — drain it, flush output, maybe inject '\r'.
+        const struct pollfd& wake_pfd = pfds[1];
+        if (wake_pfd.revents & POLLIN) {
+            char discard[64];
+            ::read(wake_fd, discard, sizeof(discard));
+            tui::FlushTurnOutput();
+            if (tui::g_turn_just_completed.load() && rl_end == 0) {
+                tui::g_turn_just_completed.store(false);
+                return '\r';
+            }
+            tui::g_turn_just_completed.store(false);
+            // If stdin is also ready and not blocked, fall through to read it.
+            if (blocked || !(pfds[0].revents & POLLIN)) continue;
+        }
+
+        // Stdin ready — read only when not blocked for SelectOption().
+        if (!blocked && (pfds[0].revents & POLLIN)) {
+            unsigned char buf;
+            const ssize_t n = ::read(stdin_fd, &buf, 1);
+            if (n == 1) return static_cast<int>(buf);
+            if (n == 0) return EOF;
+            if (errno == EINTR || errno == EAGAIN) continue;
+            return EOF;
+        }
+    }
+}
+
+// Convenience wrapper keeping the old name for callers inside this file.
 static int raw_getc(FILE* f) {
-    int c;
-    do { c = fgetc(f); } while (c == EOF && errno == EINTR);
-    return c;
+    return raw_getc_or_wake(f);
 }
 
 // Consume characters from `f` until the CSI terminator sequence `seq`
@@ -100,6 +187,27 @@ extern "C" int bracketed_getc(FILE* f) {
     // If we have buffered paste characters, drain them first.
     if (g_paste_pos < g_paste_buf.size())
         return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
+
+    // Flush any pending worker output to the scroll region before
+    // blocking on read. This is the safe window: libedit has finished
+    // its previous redraw and will not touch the terminal until after
+    // this read returns. DECSC/DECRC in FlushTurnOutput() preserves
+    // libedit's cursor on the input row.
+    tui::FlushTurnOutput();
+
+    // If the flush timer detected the turn just completed, return a
+    // synthetic '\r' (Enter) so ReadMessage() returns an empty line
+    // and the main loop's drain_turn() fires — but only when the
+    // edit buffer is empty (rl_end == 0) so we don't submit partial input.
+    if (tui::g_turn_just_completed.load()) {
+        if (rl_end == 0) {
+            tui::g_turn_just_completed.store(false);
+            return '\r';
+        }
+        // Edit buffer non-empty — drain_turn() will fire when the
+        // user next presses Enter.
+        tui::g_turn_just_completed.store(false);
+    }
 
     const int c = raw_getc(f);
     if (c == EOF) return c;
@@ -187,8 +295,47 @@ extern "C" int bracketed_getc(FILE* f) {
         return 0;
     }
 
-    // Not a bracketed-paste sequence — stash ESC '[' + everything we
-    // accumulated into g_paste_buf so libedit sees the full sequence.
+    // Not a bracketed-paste sequence.  Before replaying to libedit,
+    // check whether the accumulated bytes look like a CPR (Cursor
+    // Position Report): \e[row;colR.  CPR responses are emitted by
+    // the terminal in reply to \x1b[6n (DSR) sent by SelectOption's
+    // pre_lines adjustment logic.  If they arrive here it means a
+    // previous SelectOption call didn't fully drain its CPR response
+    // from the input queue.  Returning \e to libedit would corrupt
+    // its key FSM (it would wait for a continuation byte and swallow
+    // the user's next real keystroke as an escape sequence, causing
+    // the prompt to vanish).  Discard silently and loop.
+    //
+    // A CPR ends with 'R' and contains only digits and ';' after '['.
+    // acc already holds everything after "ESC ["; check that it ends
+    // with 'R' and contains only digits/semicolons.
+    {
+        bool looks_like_cpr = !acc.empty() && acc.back() == 'R';
+        if (looks_like_cpr) {
+            for (size_t ci = 0; ci + 1 < acc.size(); ++ci) {
+                const char ch = acc[ci];
+                if (!std::isdigit(static_cast<unsigned char>(ch)) && ch != ';') {
+                    looks_like_cpr = false;
+                    break;
+                }
+            }
+        }
+        if (looks_like_cpr) {
+            // Silently discard the CPR and ask for the next real byte.
+            g_paste_buf.clear();
+            g_paste_pos = 0;
+            // Tail-call: re-enter bracketed_getc so the next byte is
+            // returned normally.  We can't just `continue` from here
+            // (we're not in a loop), so recurse once.  Stack depth is
+            // bounded because a second CPR in a row is astronomically
+            // unlikely and only real input follows.
+            return bracketed_getc(f);
+        }
+    }
+
+    // Not a bracketed-paste sequence and not a CPR — stash ESC '[' +
+    // everything we accumulated into g_paste_buf so libedit sees the
+    // full sequence.
     g_paste_buf.clear();
     g_paste_buf.push_back('[');
     g_paste_buf.append(acc);
@@ -375,6 +522,34 @@ void Init(const std::string& history_file) {
 		paths::EnsureParentDir(g_history_file);
 		read_history(g_history_file.c_str());
 	}
+
+	// Snapshot the tty settings right now, before libedit or
+	// EscInterruptGuard touch them.  Deinit() restores this as
+	// a safety net so the shell always inherits a sane tty.
+	if (isatty(fileno(stdin))) {
+		if (tcgetattr(fileno(stdin), &g_saved_termios) == 0)
+			g_saved_termios_valid = true;
+	}
+
+	// Create the self-pipe used by WakeReadMessage() to interrupt the
+	// blocking poll() in raw_getc_or_wake().
+	if (::pipe(g_wake_pipe) == 0) {
+		// Set non-blocking on the write end so the timer thread never stalls.
+		::fcntl(g_wake_pipe[1], F_SETFL,
+			::fcntl(g_wake_pipe[1], F_GETFL) | O_NONBLOCK);
+	}
+
+	// Save the real tty fd and create a blocking pipe so BlockStdin() can
+	// redirect fd 0 to g_block_pipe[0].  A pipe read() blocks when empty,
+	// so libedit's internal read(0,...) won't consume tty bytes.
+	if (isatty(fileno(stdin))) {
+		g_real_tty_fd = ::dup(fileno(stdin));
+		::pipe(g_block_pipe);
+		// Keep write end non-blocking so UnblockStdin() never stalls.
+		::fcntl(g_block_pipe[1], F_SETFL,
+			::fcntl(g_block_pipe[1], F_GETFL) | O_NONBLOCK);
+	}
+
 	rl_attempted_completion_function = slash_completion;
 
 	// Install our custom getc function.  The bracketed-paste enable
@@ -382,6 +557,20 @@ void Init(const std::string& history_file) {
 	// set up, via a single unbuffered ::write() call so there is no
 	// race between stdio-buffered and raw writes.
 	rl_getc_function = bracketed_getc;
+
+	// Install an event hook that fires while readline is waiting for
+	// input.  We use it to clear libedit's internal edit buffer when a
+	// tool permission menu has just dismissed — the approval keystroke
+	// may be in libedit's buffer even if rl_getc_function is not honoured.
+	rl_event_hook = []() -> int {
+		// Only clear when no menu is active (g_stdin_blocked=true means
+		// SelectOption is running and we must not touch libedit state).
+		if (!g_stdin_blocked.load() && ConsumeClearEditBufferRequest()) {
+			rl_replace_line("", 0);
+			rl_point = 0;
+		}
+		return 0;
+	};
 
 	// Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
 	// ReadMessage() re-prompts via backslash-continuation.
@@ -441,11 +630,43 @@ void Init(const std::string& history_file) {
 }
 
 void Deinit() {
+	// If BlockStdin() redirected fd 0 to the blocking pipe (e.g. the
+	// process is exiting while a tool permission menu was showing),
+	// restore the real tty as stdin so the shell inherits a sane fd 0.
+	if (g_real_tty_fd >= 0 && !isatty(STDIN_FILENO)) {
+		::dup2(g_real_tty_fd, STDIN_FILENO);
+		g_stdin_blocked.store(false);
+	}
+
 	// Disable bracketed paste mode so the terminal is left clean.
 	// Mirror the isatty() guard from init() — no-op on non-TTY.
 	if (isatty(fileno(stdin))) {
 		::write(fileno(stdout), "\x1b[?2004l", 8);
 	}
+
+	// Restore the original tty settings saved at Init() time.
+	// libedit and EscInterruptGuard both modify termios during normal
+	// operation; each is supposed to restore on its own clean exit,
+	// but as a belt-and-suspenders safety net we explicitly restore
+	// the pre-session state here so the shell always inherits a
+	// sane cooked/echo tty regardless of how we exited.
+	if (g_saved_termios_valid && isatty(fileno(stdin))) {
+		tcsetattr(fileno(stdin), TCSAFLUSH, &g_saved_termios);
+		g_saved_termios_valid = false;
+	}
+
+	// Drain any bytes the terminal queued in response to our escape
+	// sequences (scroll-region setup, bracketed-paste enable, etc.)
+	// so the shell doesn't see stale bytes after we exit.
+	DrainStaleInput();
+
+	// Close the internal pipe fds so they don't leak into child processes
+	// spawned by the shell after we exit.
+	if (g_wake_pipe[0] >= 0) { ::close(g_wake_pipe[0]); g_wake_pipe[0] = -1; }
+	if (g_wake_pipe[1] >= 0) { ::close(g_wake_pipe[1]); g_wake_pipe[1] = -1; }
+	if (g_block_pipe[0] >= 0) { ::close(g_block_pipe[0]); g_block_pipe[0] = -1; }
+	if (g_block_pipe[1] >= 0) { ::close(g_block_pipe[1]); g_block_pipe[1] = -1; }
+	if (g_real_tty_fd >= 0) { ::close(g_real_tty_fd); g_real_tty_fd = -1; }
 }
 
 void SetSlashCommands(const std::vector<std::string>& names) {
@@ -517,6 +738,66 @@ bool ReadMessage(const std::string& prompt,
 	return true;
 }
 
+void BlockStdin() {
+	g_stdin_blocked.store(true);
+	// Replace fd 0 with the read end of g_block_pipe so that libedit's
+	// internal read(0,...) blocks (empty pipe) instead of consuming bytes
+	// from the tty while SelectOption() runs.
+	if (g_block_pipe[0] >= 0)
+		::dup2(g_block_pipe[0], STDIN_FILENO);
+	// Wake any poll() in raw_getc_or_wake that's watching the old fd 0.
+	WakeReadMessage();
+}
+
+void UnblockStdin() {
+	// Restore the real tty as fd 0 before unblocking so libedit's next
+	// read comes from the terminal, not the pipe.
+	if (g_real_tty_fd >= 0)
+		::dup2(g_real_tty_fd, STDIN_FILENO);
+	// Flush any tty bytes that arrived while stdin was blocked (e.g. the
+	// approval keystroke that SelectOption read directly from g_real_tty_fd).
+	if (isatty(STDIN_FILENO))
+		tcflush(STDIN_FILENO, TCIFLUSH);
+	g_stdin_blocked.store(false);
+	// Ask the rl_event_hook to clear libedit's edit buffer on its next call.
+	RequestClearEditBuffer();
+	// Unblock any libedit read() currently blocking on the pipe by injecting
+	// a CR.  The rl_event_hook will clear the edit buffer before libedit
+	// processes the CR, so the submitted line will be empty.
+	if (g_block_pipe[1] >= 0) {
+		const char cr = '\r';
+		::write(g_block_pipe[1], &cr, 1);
+	}
+}
+
+int RealTtyFd() {
+	return g_real_tty_fd;
+}
+
+void ClearEditBuffer() {
+	// Haiku's libedit may not honour rl_getc_function, meaning it reads
+	// stdin directly and can capture keystrokes (e.g. the approval digit
+	// from a tool menu) into its internal edit buffer.  rl_replace_line("")
+	// clears that buffer so those stale bytes don't appear in the next prompt.
+	if (!isatty(fileno(stdin))) return;
+	rl_replace_line("", 0);
+	rl_point = 0;
+}
+
+namespace {
+std::atomic<bool> g_clear_edit_buffer_requested{false};
+} // anon namespace
+
+void RequestClearEditBuffer() {
+	g_clear_edit_buffer_requested.store(true);
+	// Wake the main readline loop so it processes the request promptly.
+	WakeReadMessage();
+}
+
+bool ConsumeClearEditBufferRequest() {
+	return g_clear_edit_buffer_requested.exchange(false);
+}
+
 void DrainStaleInput() {
 	if (!isatty(fileno(stdin))) return;
 
@@ -541,6 +822,42 @@ void Record(const std::string& line) {
 	add_history(line.c_str());
 	if (!g_history_file.empty()) {
 		write_history(g_history_file.c_str());
+	}
+}
+
+void RemoveLastRecord() {
+	if (!isatty(fileno(stdin))) return;
+	if (history_length <= 0) return;
+	// remove_history() takes a 0-based offset from history_base.
+	// The most recent entry is at index history_length - 1.
+	HIST_ENTRY* removed = remove_history(history_length - 1);
+	if (removed) {
+		free(const_cast<char*>(removed->line));
+		free(removed->data);
+		free(removed);
+	}
+	// Flush the trimmed history so the removed entry is not
+	// re-read on the next session start.
+	if (!g_history_file.empty()) {
+		write_history(g_history_file.c_str());
+	}
+}
+
+void RestoreInput(const std::string& text) {
+	if (text.empty() || !isatty(fileno(stdin))) return;
+	// rl_stuff_char() is LIFO — push bytes in reverse order so the
+	// queue drains left-to-right into libedit's edit buffer at the
+	// start of the next readline() call.
+	for (int i = static_cast<int>(text.size()) - 1; i >= 0; --i) {
+		rl_stuff_char(static_cast<unsigned char>(text[i]));
+	}
+}
+
+void WakeReadMessage() {
+	if (g_wake_pipe[1] >= 0) {
+		const char b = 1;
+		const ssize_t n = ::write(g_wake_pipe[1], &b, 1);
+		(void)n;
 	}
 }
 

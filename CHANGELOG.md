@@ -6,6 +6,119 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-04-27
+
+### Added
+- **True async REPL** — the `> ` prompt is live and accepts keystrokes
+  while Claude's response streams above it. A `LocalWorker` background
+  thread owns the API call; the main thread returns to `libedit`
+  immediately after dispatch. `TurnOutputBuf` (a custom `std::streambuf`)
+  intercepts all `std::cout` during a turn and a 16 ms flush-timer thread
+  drains it with `DECSC`/`DECRC` so the cursor on the input row is
+  preserved throughout.
+- **Cancel-and-retype (Ctrl+X)** — pressing Ctrl+X during a streaming
+  turn cancels the in-flight request and restores the submitted text into
+  the `libedit` edit buffer so the user can amend and resubmit. The
+  cancelled attempt is suppressed from `libedit` history (`RemoveLastRecord`).
+- **BFS summary snapshot background refresh** — after each successful turn
+  `config::RefreshSummarySnapshot(changed_paths)` updates only the
+  `claude:summary` entries touched by `WriteAttr` tool calls in that turn,
+  keeping the system-prompt snapshot current without a full filesystem
+  rescan. `/compact` triggers a full `config::ReloadBfsSummaries()`.
+  Snapshot updates are skipped when the file count exceeds 500 to stay
+  O(changed) on large projects.
+- **Self-pipe wake** — `repl::WakeReadMessage()` writes one byte to a
+  non-blocking pipe polled alongside stdin in `raw_getc_or_wake()`, so
+  `drain_turn()` fires as soon as the worker finishes without requiring a
+  real keypress.
+- **Exclusive terminal access for tool permission menus** — `BlockStdin`
+  redirects `STDIN_FILENO` to an empty pipe so `libedit`'s internal
+  `read(0,…)` blocks instead of consuming tty bytes; `SelectOption` reads
+  directly from `RealTtyFd()`. `PauseFlushTimer`/`ResumeFlushTimer` stop
+  the 16 ms flush thread for the duration of the menu so stdout is not
+  contested.
+- **CHANGELOG and README included in HPKG** — the `documentation`
+  directory of the Haiku package now ships both files.
+
+### Fixed
+- **No-echo shell after tool use** — `EscInterruptGuard` saved
+  `libedit`'s cbreak/noecho `termios` state and restored it on
+  destruction, leaving the tty without `ECHO` after every turn.
+  `repl::Init()` now snapshots the original `termios` before `libedit`
+  touches it; `Deinit()` restores it unconditionally via `TCSAFLUSH`.
+  `EscInterruptGuard` now operates on `repl::RealTtyFd()` (the `dup()`'d
+  tty fd) rather than `STDIN_FILENO` so `BlockStdin()`'s pipe redirect
+  can never confuse its save/restore.
+- **Corrupt terminal after `/quit`** — `repl::Deinit()` now restores
+  `STDIN_FILENO` to the real tty if `BlockStdin()` had redirected it,
+  drains stale terminal sequences with `DrainStaleInput()`, and closes
+  all pipe fds. `tui::TeardownStatusBar()` emits a trailing `\n` so the
+  shell prompt starts on a fresh line. `StatusFrameGuard` calls
+  `repl::Deinit()` before `tui::TeardownStatusBar()` to enforce the
+  correct teardown order.
+- **SIGINT leaves tty in raw mode outside the REPL** — the startup
+  `SIGINT` handler (installed before `InteractiveLoop`) now calls
+  `repl::Deinit()` and `tui::TeardownStatusBar()` before re-raising, so
+  Ctrl+C during login/logout or one-shot mode always restores the tty.
+  `api::InterruptGuard` continues to override `SIGINT` inside turns for
+  graceful abort, and restores the teardown handler (not `SIG_DFL`) on
+  destruction.
+- **Prompt disappears after tool permission prompts** — removed the
+  `DSR`/`CPR` round-trip (`ESC[6n`) from `SelectOption`; the cursor-row
+  cap is now derived deterministically from `TerminalRows() - kStatusBarRows
+  - menu_rows`. The `CPR` response had arrived in fragmented kernel batches,
+  leaking bytes such as `1R` or `;1R` into `libedit`'s edit buffer and
+  causing the input row to go blank or appear frozen.
+- **Slash commands invisible while a turn is active** — `BeginTurn()`
+  redirects `std::cout` through `TurnOutputBuf`; slash-command output and
+  `SelectOption` menus rendered during that window were silently swallowed.
+  Input received while `turn_active` now waits for `fDisplayCv` (the
+  worker completes first), then `drain_turn()` restores stdout before the
+  command is dispatched.
+- **Double echo of user input during concurrent turn** — the redundant
+  re-echo at line 719 of `session.cpp` (after `drain_turn()`) has been
+  removed; `EndTurn()` already flushes the `TurnOutputBuf` content
+  including the line-690 echo.
+- **Cursor misalignment after permission menu (`DECSC`/`DECRC`)** —
+  `ResumeFlushTimer()` now parks the physical cursor at the input row
+  (N-2) instead of `chat_bottom` (N-4), so the `FlushTurnOutput`
+  `DECSC` saves the correct row and `DECRC` restores `libedit`'s prompt
+  to the right position.
+- **`status bar` fixed-frame functions intercepted by `TurnOutputBuf`** —
+  `draw_fixed_frame()`, `PositionCursorForInput()`, `ClearInputRow()`,
+  `RepaintInputRow()`, `HideCursor()`, and `ShowCursor()` now write via
+  `DirectWrite()` (bypassing the interceptor) so status-bar redraws are
+  never captured into `g_turn_pending`.
+- **`cppcheck` passedByValue warning** — `dispatch_turn`'s `line`
+  parameter is now passed by `const std::string&`.
+
+## [1.6.3] - 2026-07-15
+
+### Fixed
+- **Telegram-origin turns now appear in local scroll history** —
+  `ProcessUpdate` had two gaps: (1) the assistant reply was never
+  appended to `fUserMessages[user_id]`, so per-user remote context
+  accumulated user messages only; (2) there was no write-back path
+  from `ProcessUpdate` into the local REPL `messages[]`, so completed
+  Telegram turns were invisible to scroll history and never saved to
+  `history.json`. Fixed by adding `SetSharedHistoryAppender()` /
+  `fSharedHistoryAppend` to `RemoteControl`; `ProcessUpdate` now
+  appends the assistant message to the per-user silo and calls the
+  appender to push both turns into the live local `messages[]`.
+  `session.cpp` wires up the appender alongside `SetSharedHistory`;
+  the lambda pushes both messages and calls `config::SaveHistory` so
+  `--resume` sees the Telegram turns. `tui::RepaintInputRow()` is used
+  by an RAII `CursorGuard` in `ProcessUpdate` to restore the `> `
+  prompt after each remote turn.
+- **Inline keyboard missing on `MirrorToPrimary` numbered responses** —
+  when a locally-initiated turn produced a numbered-choice response,
+  `MirrorToPrimary` sent the assistant text to Telegram as plain text
+  with no inline keyboard, so the option buttons never appeared and the
+  user could not tap to reply. Applied the same
+  `ExtractNumberedOptions` → keyboard-building logic that
+  `ProcessUpdate` already uses for Telegram-origin turns; the keyboard
+  is now passed to both `EditMessageText` and `SendMessage`.
+
 ## [1.6.2] - 2026-04-23
 
 ### Fixed
