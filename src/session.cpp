@@ -697,7 +697,8 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			tui::PositionCursorForChat();
 		}
 
-		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+		while (!line.empty() && (line.back() == '\r' || line.back() == '\n'
+								|| line.back() == ' ' || line.back() == '\t')) {
 			line.pop_back();
 		}
 		if (line.empty()) {
