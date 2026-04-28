@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Phantom `> ` echo after turn completion** — when a streaming
+  turn finished while the libedit edit buffer was empty, the flush
+  timer injected a synthetic `\r` via `bracketed_getc` to wake the
+  main loop.  The main loop echoed `UserPrompt() + "" + "\n"` into
+  `TurnOutputBuf` before checking for an empty line, producing a
+  bare `> ` line in the chat-history scroll region after every turn
+  that completed without the user typing.  Fixed by trimming and
+  checking for an empty line *before* the echo in the `ReadMessage`
+  path, so the echo is skipped and the early-`continue` fires
+  directly.
+
+- **Resize during active turn corrupts scroll-region output** — two
+  compounding bugs when the user resizes the terminal while a turn
+  is streaming:
+
+  1. `apply_scroll_region()` used `std::cout`, which is redirected
+     through `TurnOutputBuf` while a turn is active.  The DECSTBM
+     escape was buffered and delivered up to 16 ms later inside a
+     `FlushTurnOutput()` DECSC/CUP/…/DECRC wrapper.  During that
+     window the worker's output still targeted the old scroll region,
+     so it could land on status-bar rows or below the new scroll
+     bottom.  Fixed by switching `apply_scroll_region()` to
+     `DirectWrite` (same as `draw_fixed_frame`).
+
+  2. `RedrawStatusBar()` did not update `g_turn_row2` /
+     `g_turn_col` after a resize.  When a turn had already produced
+     output (`g_turn_started == true`) the tracker held the old
+     scroll-bottom row; subsequent `FlushTurnOutput()` calls CUP'd
+     to the stale row — potentially inside the status-bar frame on
+     the new (smaller) terminal.  Fixed by recalculating
+     `chat_bottom` from the refreshed `g_cached_term_rows` in
+     `RedrawStatusBar()` and writing it into `g_turn_row2`.
+
 - **tmux permission-menu hang** — asking Claude to run a destructive
   shell command (e.g. `git commit && git push`) caused the prompt to
   disappear and the process to hang forever when running inside tmux.
