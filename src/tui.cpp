@@ -434,12 +434,21 @@ void draw_fixed_frame(int rows, int cols, const std::string& status) {
 // Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows)
 // so the fixed rows stay outside the scroll area. Places the cursor
 // at the bottom of the scroll region ready for chat output.
+//
+// Uses DirectWrite (not std::cout) so the DECSTBM escape reaches the
+// terminal immediately — even when a turn is active and std::cout is
+// redirected through the TurnOutputBuf interceptor.  Buffering a
+// DECSTBM command would delay the scroll-region update by up to 16 ms
+// and cause FlushTurnOutput() to write inside the wrong region during
+// that window.
 void apply_scroll_region(int rows) {
 	if (rows < kStatusBarRows + 1) return;
 	const int top    = 1;
 	const int bottom = rows - kStatusBarRows;
-	std::cout << "\x1b[" << top << ";" << bottom << "r"
-			  << "\x1b[" << bottom << ";1H";
+	const std::string s =
+		"\x1b[" + std::to_string(top) + ";" + std::to_string(bottom) + "r"
+		+ "\x1b[" + std::to_string(bottom) + ";1H";
+	DirectWrite(s);
 }
 
 } // namespace
@@ -480,6 +489,20 @@ void RedrawStatusBar() {
 	refresh_dims();
 	apply_scroll_region(g_cached_term_rows);
 	draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
+
+	// After a resize the scroll-region bottom has moved.  Update the
+	// turn-output position tracker so the next FlushTurnOutput() CUPs
+	// to the new chat_bottom rather than a stale pre-resize row.
+	// Without this, worker output lands at the old row (which may now
+	// be inside the status bar) until the next turn starts fresh.
+	if (g_turn_started) {
+		const int chat_bottom =
+			g_cached_term_rows > kStatusBarRows
+			? g_cached_term_rows - kStatusBarRows
+			: 1;
+		g_turn_row2 = chat_bottom;
+		g_turn_col  = 1;
+	}
 }
 
 void TeardownStatusBar() {
