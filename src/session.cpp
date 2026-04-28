@@ -692,20 +692,30 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 				break;
 			}
 			tui::ClearInputRow();
+			// Trim trailing whitespace/control chars before the empty
+			// check so a synthetic '\r' from the flush-timer wake path
+			// (bracketed_getc returning '\r' when rl_end==0 and the
+			// turn just completed) doesn't produce a phantom "> \n"
+			// echo in the scroll region.
+			while (!line.empty() && (line.back() == '\r' || line.back() == '\n'
+									|| line.back() == ' ' || line.back() == '\t')) {
+				line.pop_back();
+			}
+			// Don't echo or dispatch an empty line — just loop back so
+			// the turn-completion check at the top can drain the result.
+			if (line.empty()) continue;
 			tui::PositionCursorForChat();
 			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
 			tui::PositionCursorForChat();
 		}
 
+		// Trim trailing whitespace from the pending path. The ReadMessage
+		// path trims inline above; this handles the !pending.empty() branch.
 		while (!line.empty() && (line.back() == '\r' || line.back() == '\n'
 								|| line.back() == ' ' || line.back() == '\t')) {
 			line.pop_back();
 		}
-		if (line.empty()) {
-			// If a turn just finished and produced an empty queued
-			// line, loop back to check turn completion again.
-			continue;
-		}
+		if (line.empty()) continue;
 
 		// ── If a turn is still active, wait for it to finish ────────
 		// We must drain before doing anything — slash commands need
