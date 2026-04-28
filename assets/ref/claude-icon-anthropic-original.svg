@@ -69,13 +69,11 @@
   </g>
 
   <!-- Glow halo -->
-  <circle cx="128" cy="128" r="78" fill="url(#glow)" opacity="0.95">
-  </circle>
+  <circle cx="128" cy="128" r="78" fill="url(#glow)" opacity="0.95"/>
 
   <!-- Cursor block (the eye) -->
   <g filter="url(#soft-glow)">
-    <rect x="116" y="100" width="24" height="56" rx="1.5" fill="url(#cursor)">
-    </rect>
+    <rect x="116" y="100" width="24" height="56" rx="1.5" fill="url(#cursor)"/>
   </g>
 
   <!-- Cursor inner highlight -->
