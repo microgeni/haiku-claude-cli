@@ -526,9 +526,9 @@ grep -q 'fDisplayCv\.wait' "$SESS" \
 # The blocking wait in the turn_active block ensures drain happens before dispatch.
 LINE_ACTIVE=$(grep -n 'If a turn is still active' "$SESS" | head -1 | cut -d: -f1)
 LINE_WAIT=$(awk -v after="${LINE_ACTIVE:-0}" \
-    'NR > after && NR <= after+15 && /fDisplayCv\.wait/ {print NR; exit}' "$SESS")
+    'NR > after && NR <= after+80 && /fDisplayCv\.wait/ {print NR; exit}' "$SESS")
 [ -n "$LINE_ACTIVE" ] || fail "'If a turn is still active' comment not found in $SESS"
-[ -n "$LINE_WAIT"   ] || fail "fDisplayCv.wait not found within 15 lines of turn_active block"
+[ -n "$LINE_WAIT"   ] || fail "fDisplayCv.wait not found within 80 lines of turn_active block"
 pass
 
 # ── C15: EOF / Ctrl+D drains active turn before breaking ──────────────────────

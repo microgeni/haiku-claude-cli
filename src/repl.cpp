@@ -104,7 +104,7 @@ static int raw_getc_or_wake(FILE* f) {
 
         // Wake pipe fired — drain it, flush output, maybe inject '\r'.
         const struct pollfd& wake_pfd = pfds[1];
-        if (wake_pfd.revents & POLLIN) {
+        if (wake_pfd.revents & (POLLIN | POLLHUP)) {
             char discard[64];
             ::read(wake_fd, discard, sizeof(discard));
             tui::FlushTurnOutput();
@@ -113,6 +113,13 @@ static int raw_getc_or_wake(FILE* f) {
                 return '\r';
             }
             tui::g_turn_just_completed.store(false);
+            // POLLHUP without POLLIN means the write-end was closed — this
+            // should never happen (parent always holds g_wake_pipe[1]) but
+            // if it does, sleep briefly to avoid a tight spin loop before
+            // Deinit() closes g_wake_pipe[0] and terminates readline().
+            if (!(wake_pfd.revents & POLLIN)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
             // If stdin is also ready and not blocked, fall through to read it.
             if (blocked || !(pfds[0].revents & POLLIN)) continue;
         }
@@ -537,6 +544,14 @@ void Init(const std::string& history_file) {
 		// Set non-blocking on the write end so the timer thread never stalls.
 		::fcntl(g_wake_pipe[1], F_SETFL,
 			::fcntl(g_wake_pipe[1], F_GETFL) | O_NONBLOCK);
+		// Close-on-exec: children (Bash, Grep, notify, popen, etc.) must
+		// not inherit these pipe ends.  If a grandchild exits while holding
+		// a copy of g_wake_pipe[0], poll() in raw_getc_or_wake() would see
+		// POLLHUP; if it holds g_wake_pipe[1] and we close ours, read()
+		// would return EOF — causing readline() to return nullptr and the
+		// REPL to exit unexpectedly.
+		::fcntl(g_wake_pipe[0], F_SETFD, FD_CLOEXEC);
+		::fcntl(g_wake_pipe[1], F_SETFD, FD_CLOEXEC);
 	}
 
 	// Save the real tty fd and create a blocking pipe so BlockStdin() can
@@ -544,13 +559,40 @@ void Init(const std::string& history_file) {
 	// so libedit's internal read(0,...) won't consume tty bytes.
 	if (isatty(fileno(stdin))) {
 		g_real_tty_fd = ::dup(fileno(stdin));
+		// Close-on-exec on the real tty dup so children don't open a second
+		// handle to the terminal and disrupt termios/signal state.
+		::fcntl(g_real_tty_fd, F_SETFD, FD_CLOEXEC);
 		::pipe(g_block_pipe);
 		// Keep write end non-blocking so UnblockStdin() never stalls.
 		::fcntl(g_block_pipe[1], F_SETFL,
 			::fcntl(g_block_pipe[1], F_GETFL) | O_NONBLOCK);
+		// Close-on-exec: same rationale as g_wake_pipe above.  Also
+		// prevents stale '\r' bytes (written by UnblockStdin) from being
+		// read by a child that inherits the read-end while it is fd 0.
+		::fcntl(g_block_pipe[0], F_SETFD, FD_CLOEXEC);
+		::fcntl(g_block_pipe[1], F_SETFD, FD_CLOEXEC);
 	}
 
 	rl_attempted_completion_function = slash_completion;
+
+	// Wrap libedit's completion-list display so the flush timer is
+	// paused while the match list is on screen.  Without this, the
+	// 16 ms flush-timer thread fires during a turn, writes Claude's
+	// streaming output via DECSC/CUP/DECRC, and either overwrites the
+	// completion list or corrupts the cursor position so the list
+	// appears at the wrong row.  PauseFlushTimer()/ResumeFlushTimer()
+	// are the same primitives used by SelectOption() — they drain any
+	// pending turn output first, then give libedit exclusive access to
+	// stdout for the duration of the completion display.
+	//
+	// rl_completion_display_matches_hook, when non-null, is called by
+	// libedit instead of its built-in rl_display_match_list(), so we
+	// call that function ourselves after pausing the timer.
+	rl_completion_display_matches_hook = [](char** matches, int num, int max) {
+		tui::PauseFlushTimer();
+		rl_display_match_list(matches, num, max);
+		tui::ResumeFlushTimer();
+	};
 
 	// Install our custom getc function.  The bracketed-paste enable
 	// sequence (\e[?2004h) is sent later, after all keybindings are
@@ -740,6 +782,14 @@ bool ReadMessage(const std::string& prompt,
 
 void BlockStdin() {
 	g_stdin_blocked.store(true);
+	// Drain any stale '\r' bytes written by previous UnblockStdin() calls
+	// so that libedit's internal read(0,...) can't consume them and return
+	// a spurious empty line (which in Haiku's libedit maps to a readline()
+	// null return, causing the REPL to exit as if Ctrl+D was pressed).
+	if (g_block_pipe[0] >= 0) {
+		char discard[64];
+		while (::read(g_block_pipe[0], discard, sizeof(discard)) > 0) {}
+	}
 	// Replace fd 0 with the read end of g_block_pipe so that libedit's
 	// internal read(0,...) blocks (empty pipe) instead of consuming bytes
 	// from the tty while SelectOption() runs.
