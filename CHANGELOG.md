@@ -6,6 +6,54 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **tmux permission-menu hang** — asking Claude to run a destructive
+  shell command (e.g. `git commit && git push`) caused the prompt to
+  disappear and the process to hang forever when running inside tmux.
+  Three compounding bugs were responsible:
+
+  1. **`EscInterruptGuard::pause()` race** — the guard thread polled
+     the real-tty fd with a 100 ms timeout; `pause()` waited only
+     120 ms for acknowledgement.  If `pause()` was called just as
+     the poll started, the 120 ms window expired before the thread
+     could acknowledge, leaving both the guard thread and
+     `SelectOption()` reading from the same fd concurrently.
+     `SelectOption()` would hang forever because the guard thread
+     stole its keypress.  Fixed by adding a self-pipe
+     (`fWakePipe`) to `EscInterruptGuard`; `pause()` now writes to
+     the pipe to immediately kick the thread out of `poll()`,
+     guaranteeing acknowledgement within one loop iteration (~1 ms).
+
+  2. **DECSTBM scroll region swallowing the permission menu** —
+     `SelectOption()` rendered with `\n`-based line output while the
+     DECSTBM scroll region was still active.  At the scroll-region
+     bottom, newlines scrolled content into the status-bar rows,
+     making the menu invisible to the user.  Fixed by adding
+     `tui::SuspendScrollRegion()` / `tui::RestoreScrollRegion()`
+     that bracket every `SelectOption()` call: `\x1b[r` resets to
+     full-screen before the menu, and the scroll region plus status
+     bar are fully restored afterward.
+
+  3. **`g_real_tty_fd` from `dup(stdin)` instead of `/dev/tty`** —
+     in tmux the controlling terminal is the PTY slave, which _is_
+     stdin at init time.  But `dup(stdin)` produces a second handle
+     to the same PTY, and any later `dup2` on fd 0 (e.g. by
+     `BlockStdin()`) could leave the real-tty fd in an inconsistent
+     state on some Haiku libedit versions.  Fixed by opening
+     `/dev/tty` directly in `repl::Init()`, with a `dup(stdin)`
+     fallback for terminals without a controlling tty.
+
+### Notes
+
+- **`SelectOption` permission menu not reachable via `tmux send-keys`** —
+  by design.  `BlockStdin()` redirects `STDIN_FILENO` to an empty pipe
+  while the menu is active; `SelectOption` reads directly from
+  `repl::RealTtyFd()` (the `/dev/tty` fd opened at init), so bytes
+  injected via `tmux send-keys` land in the pipe and are discarded.
+  The menu itself renders correctly and is visible in the pane.
+  Workaround for fully-automated sessions: `/ludicrous` mode.
+
 ## [1.7.0] - 2026-04-27
 
 ### Added

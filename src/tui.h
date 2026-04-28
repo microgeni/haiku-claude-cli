@@ -66,6 +66,18 @@ void FlushTurnOutput();
 void PauseFlushTimer();
 void ResumeFlushTimer();
 
+// Temporarily reset the DECSTBM scroll region to full-screen so
+// SelectOption() can render the permission menu across the entire
+// terminal without content being swallowed by the scroll region
+// bottom.  SuspendScrollRegion() emits \x1b[r (reset to full screen)
+// and RestoreScrollRegion() re-establishes the 1..chat_bottom region
+// and redraws the status bar.  Both are no-ops when no status bar is
+// installed (safe to call always).  Must be called AFTER
+// PauseFlushTimer() and BEFORE SelectOption(); RestoreScrollRegion()
+// must be called AFTER SelectOption() and BEFORE ResumeFlushTimer().
+void SuspendScrollRegion();
+void RestoreScrollRegion();
+
 // Set to true by FlushTurnOutput when the turn-done callback fires.
 // Read by bracketed_getc in repl.cpp to inject a synthetic Enter
 // (only when the edit buffer is empty) so the main loop drains the
@@ -291,6 +303,12 @@ public:
 	void Flush();
 private:
 	void Emit(const std::string& s);
+	// Emit the response prefix (e.g. "claude> ") and stop the spinner
+	// exactly once, regardless of whether any text ever arrived.
+	// Idempotent: no-op after the first call.  Called at the top of
+	// both Write() and Flush() so the label always appears even when
+	// the model's response contains no text (tool-only turns).
+	void FlushPrefix();
 	void RenderLine(const std::string& line);
 	void RenderInline(const std::string& text);
 	std::string RenderInlineToString(const std::string& text);

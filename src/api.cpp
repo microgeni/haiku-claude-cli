@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <poll.h>
@@ -82,7 +83,7 @@ public:
 	EscInterruptGuard() {
 		// Always operate on the real tty fd, not STDIN_FILENO, because
 		// BlockStdin() may redirect STDIN_FILENO to a blocking pipe while
-		// we are alive.  repl::RealTtyFd() returns the dup()'d tty fd
+		// we are alive.  repl::RealTtyFd() returns the /dev/tty fd
 		// created at Init() time, which is always the actual terminal.
 		const int tty = repl::RealTtyFd() >= 0 ? repl::RealTtyFd() : STDIN_FILENO;
 		if (!isatty(tty)) return;
@@ -99,6 +100,20 @@ public:
 			return;
 		}
 
+		// Self-pipe used by pause() to kick the background thread out of
+		// its poll() call immediately rather than waiting up to 100 ms
+		// for the poll timeout to expire.  Without this, pause() could
+		// time out before the thread acknowledged, leaving both the
+		// guard thread and SelectOption() reading from the same tty fd
+		// concurrently — causing SelectOption() to hang forever because
+		// the guard thread stole the keypress.
+		if (::pipe(fWakePipe) == 0) {
+			::fcntl(fWakePipe[0], F_SETFD, FD_CLOEXEC);
+			::fcntl(fWakePipe[1], F_SETFD, FD_CLOEXEC);
+			::fcntl(fWakePipe[1], F_SETFL,
+				::fcntl(fWakePipe[1], F_GETFL) | O_NONBLOCK);
+		}
+
 		fRunning.store(true);
 		fThread = std::thread([this]() {
 			while (fRunning.load()) {
@@ -111,13 +126,26 @@ public:
 				}
 				fPausedAck.store(false);
 
-				struct pollfd pfd {};
-				pfd.fd     = fTtyFd;  // always poll the real tty
-				pfd.events = POLLIN;
-				const int r = ::poll(&pfd, 1, 100);
-				if (!fRunning.load() || fPaused.load()) continue;
+				struct pollfd pfds[2] {};
+				pfds[0].fd     = fTtyFd;      // real tty — ESC/Ctrl+X detection
+				pfds[0].events = POLLIN;
+				pfds[1].fd     = fWakePipe[0]; // pause() wake-pipe
+				pfds[1].events = POLLIN;
+				const int nfds = (fWakePipe[0] >= 0) ? 2 : 1;
+				const int r    = ::poll(pfds, nfds, 100);
+				if (!fRunning.load()) break;
+
+				// Drain the wake pipe if it fired (pause() or destructor).
+				if (nfds == 2 && (pfds[1].revents & POLLIN)) {
+					char discard[16];
+					::read(fWakePipe[0], discard, sizeof(discard));
+				}
+
+				// Re-check pause after the wake — pause() may have fired.
+				if (fPaused.load()) continue;
+
 				if (r <= 0) continue;
-				if (!(pfd.revents & POLLIN)) continue;
+				if (!(pfds[0].revents & POLLIN)) continue;
 
 				char buf[16];
 				const ssize_t n = ::read(fTtyFd, buf, sizeof(buf));
@@ -145,21 +173,35 @@ public:
 
 	~EscInterruptGuard() {
 		fRunning.store(false);
+		// Wake the thread out of poll() so it exits promptly.
+		if (fWakePipe[1] >= 0) {
+			const char b = 1;
+			::write(fWakePipe[1], &b, 1);
+		}
 		if (fThread.joinable()) fThread.join();
+		if (fWakePipe[0] >= 0) { ::close(fWakePipe[0]); fWakePipe[0] = -1; }
+		if (fWakePipe[1] >= 0) { ::close(fWakePipe[1]); fWakePipe[1] = -1; }
 		if (fSavedValid) {
 			tcsetattr(fTtyFd, TCSANOW, &fSaved);
 		}
 	}
 
 	// Temporarily stop reading stdin so another component (e.g.
-	// tui::SelectOption) has exclusive access. Blocks until the
-	// background thread has acknowledged the pause — confirmed to
-	// be in its sleep loop and not mid-read.
+	// tui::SelectOption) has exclusive access. Writes to the wake-pipe
+	// to kick the background thread out of poll() immediately, then
+	// waits for the acknowledgement — guaranteed within one loop
+	// iteration (~10 ms) rather than the old ~110 ms worst case.
 	void pause() {
 		fPaused.store(true);
-		// Upper bound: the poll() timeout is 100 ms, so we wait at
-		// most ~110 ms in the worst case.
-		for (int i = 0; i < 120 && !fPausedAck.load(); ++i)
+		// Kick the thread out of its poll() so it checks fPaused ASAP.
+		if (fWakePipe[1] >= 0) {
+			const char b = 1;
+			::write(fWakePipe[1], &b, 1);
+		}
+		// Wait for the thread to acknowledge — it will do so within one
+		// 10 ms sleep cycle after exiting poll().  200 iterations = 2 s
+		// upper bound (should never be needed in practice).
+		for (int i = 0; i < 200 && !fPausedAck.load(); ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	void resume() {
@@ -177,7 +219,8 @@ private:
 	std::thread       fThread;
 	termios           fSaved {};
 	bool              fSavedValid = false;
-	int               fTtyFd     = STDIN_FILENO; // real tty fd (never the block pipe)
+	int               fTtyFd      = STDIN_FILENO; // real tty fd (never the block pipe)
+	int               fWakePipe[2] = {-1, -1};    // self-pipe: pause() → thread
 };
 
 // Pointer to the currently active EscInterruptGuard (if any). Set
@@ -454,6 +497,7 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 		if (g_active_esc_guard) g_active_esc_guard->pause();
 		repl::BlockStdin();
 		tui::PauseFlushTimer();
+		tui::SuspendScrollRegion();
 		const int race_pre_lines =
 			(extra.empty()
 				? 1
@@ -461,6 +505,7 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 			+ 1; // the "[also awaiting Telegram]" line
 		const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
 											 &tg_answered, race_pre_lines);
+		tui::RestoreScrollRegion();
 		tui::ResumeFlushTimer();
 		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
 		repl::UnblockStdin();
@@ -581,7 +626,9 @@ Permission PromptPermission(const std::string& tool_name, const json& input,
 	// regardless of whether the flush timer is still running.
 	repl::BlockStdin();
 	tui::PauseFlushTimer();
+	tui::SuspendScrollRegion();
 	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
+	tui::RestoreScrollRegion();
 	tui::ResumeFlushTimer();
 	// Flush stale input bytes, then unblock stdin and resume guard.
 	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
@@ -929,7 +976,13 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 			continue; // retry
 		}
 
-		// Non-retryable or retries exhausted — surface a clear message.
+		// Non-retryable or retries exhausted — flush any partial text
+		// that arrived before the error event, then surface the error.
+		// Without this, any text in fLineBuffer would be silently
+		// dropped and the "claude> " label would never appear on turns
+		// where some text arrived before the server sent an error event.
+		state.renderer.Flush();
+		if (!state.text.empty()) std::cout << "\n";
 		std::cerr << "\n" << tui::ErrorLabel() << " ";
 		if (state.stream_error_type == "overloaded_error") {
 			std::cerr << "Anthropic's servers are overloaded — please try again in a moment.";
@@ -956,12 +1009,15 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 		// max_tokens cap so tight that the first tool_use block
 		// never got a content_block_stop event.
 		if (state.stop_reason == "max_tokens") {
+			// Flush any text that arrived before the cap was hit.
+			state.renderer.Flush();
+			if (!state.text.empty()) std::cout << "\n";
 			return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
 					state.content_blocks, state.stop_reason,
 					state.cache_creation_input_tokens.load(),
 					state.cache_read_input_tokens.load()};
 		}
-		std::cerr << "error: no content received in stream\n";
+		std::cerr << "\nerror: no content received in stream\n";
 		std::cerr << "response body: " << state.raw_buffer << "\n";
 		return {1, {}, 0, 0, {}, {}};
 	}

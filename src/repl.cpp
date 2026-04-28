@@ -557,11 +557,20 @@ void Init(const std::string& history_file) {
 	// Save the real tty fd and create a blocking pipe so BlockStdin() can
 	// redirect fd 0 to g_block_pipe[0].  A pipe read() blocks when empty,
 	// so libedit's internal read(0,...) won't consume tty bytes.
+	//
+	// Prefer opening /dev/tty directly so we always hold a handle to the
+	// controlling terminal even if stdin (fd 0) is later replaced by
+	// BlockStdin()'s dup2().  This also works correctly when the process
+	// is run inside tmux where dup(stdin) would give the PTY slave fd
+	// and BlockStdin() would leave it dangling.  Fall back to dup(stdin)
+	// only when /dev/tty cannot be opened (e.g. no controlling terminal).
 	if (isatty(fileno(stdin))) {
-		g_real_tty_fd = ::dup(fileno(stdin));
-		// Close-on-exec on the real tty dup so children don't open a second
-		// handle to the terminal and disrupt termios/signal state.
-		::fcntl(g_real_tty_fd, F_SETFD, FD_CLOEXEC);
+		g_real_tty_fd = ::open("/dev/tty", O_RDWR | O_CLOEXEC);
+		if (g_real_tty_fd < 0)
+			g_real_tty_fd = ::dup(fileno(stdin));
+		if (g_real_tty_fd >= 0 && !(::fcntl(g_real_tty_fd, F_GETFD) & FD_CLOEXEC))
+			::fcntl(g_real_tty_fd, F_SETFD, FD_CLOEXEC);
+		// Legacy close-on-exec path kept for the dup() fallback case.
 		::pipe(g_block_pipe);
 		// Keep write end non-blocking so UnblockStdin() never stalls.
 		::fcntl(g_block_pipe[1], F_SETFL,
