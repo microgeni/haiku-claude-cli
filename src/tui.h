@@ -66,12 +66,13 @@ void FlushTurnOutput();
 void PauseFlushTimer();
 void ResumeFlushTimer();
 
-// Temporarily reset the DECSTBM scroll region to full-screen so
-// SelectOption() can render the permission menu across the entire
-// terminal without content being swallowed by the scroll region
-// bottom.  SuspendScrollRegion() emits \x1b[r (reset to full screen)
-// and RestoreScrollRegion() re-establishes the 1..chat_bottom region
-// and redraws the status bar.  Both are no-ops when no status bar is
+// Park the cursor at the scroll-region bottom (chat_bottom = N-4) so
+// SelectOption() can render the permission menu above the "> " input
+// line.  The restricted DECSTBM region (1..chat_bottom) is intentionally
+// kept active: with it, the \n emissions that reserve menu space scroll
+// within the chat area rather than overwriting the status-bar rows.
+// RestoreScrollRegion() re-establishes the 1..chat_bottom region and
+// redraws the status bar.  Both are no-ops when no status bar is
 // installed (safe to call always).  Must be called AFTER
 // PauseFlushTimer() and BEFORE SelectOption(); RestoreScrollRegion()
 // must be called AFTER SelectOption() and BEFORE ResumeFlushTimer().

@@ -655,23 +655,42 @@ void ResumeFlushTimer() {
 
 // SuspendScrollRegion / RestoreScrollRegion
 //
-// Reset the DECSTBM scroll region to full-screen before a permission
-// menu renders, and restore it afterward.  This prevents SelectOption()
-// from having its output swallowed inside the (smaller) scroll region
-// when running inside tmux or any terminal with an active DECSTBM
-// region.  Both functions are safe no-ops when no status bar is installed.
+// Park the cursor at the scroll-region bottom (chat_bottom = N-4) before
+// a permission menu renders, and redraw the fixed frame afterward.
+// SuspendScrollRegion() does NOT reset the scroll region to full-screen;
+// keeping the restricted region (1..chat_bottom) ensures SelectOption()'s
+// opening \n emissions scroll content within the chat area rather than
+// pushing into the status-bar rows (N-3..N) and overwriting the "> " prompt.
+//
+// Both functions are safe no-ops when no status bar is installed.
 //
 // Call order:
-//   PauseFlushTimer()        — stop concurrent output
-//   SuspendScrollRegion()    — \x1b[r (full screen)
+//   PauseFlushTimer()        — stop concurrent output (parks cursor at N-2)
+//   SuspendScrollRegion()    — CUP to chat_bottom (N-4)
 //   ... SelectOption() ...
-//   RestoreScrollRegion()    — \x1b[1;chat_bottom r + redraw status bar
+//   RestoreScrollRegion()    — re-establish \x1b[1;chat_bottom r + redraw status bar
 //   ResumeFlushTimer()       — re-enable turn output
 void SuspendScrollRegion() {
 	if (!g_status_bar_active) return;
-	// Use DirectWrite so the reset reaches the terminal even while the
+	if (g_term_dirty) refresh_dims();
+	const int rows        = g_cached_term_rows;
+	const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
+	// Park the cursor at chat_bottom (N-4, the bottom of the restricted
+	// scroll region) so SelectOption()'s opening \n emissions scroll
+	// content within the chat area and the menu renders entirely above
+	// the "> " input line.
+	//
+	// We deliberately do NOT reset to full-screen (\x1b[r) here: with
+	// the scroll region restricted to 1..chat_bottom, \n at chat_bottom
+	// scrolls correctly.  Resetting to full-screen would allow \n from
+	// chat_bottom to push into the status-bar rows and overwrite the
+	// "> " prompt.
+	//
+	// Use DirectWrite so the CUP reaches the terminal even while the
 	// turn-output interceptor may still be draining.
-	DirectWrite("\x1b[r");   // CSI r — reset to full screen
+	const std::string seq =
+		"\x1b[" + std::to_string(chat_bottom) + ";1H"; // CUP to scroll-region bottom
+	DirectWrite(seq);
 }
 
 void RestoreScrollRegion() {
@@ -689,8 +708,8 @@ void RestoreScrollRegion() {
 	restore += "\x1b[" + std::to_string(input_row) + ";1H";
 	DirectWrite(restore);
 
-	// Redraw the status bar rows (the full-screen reset may have left
-	// them blank or overwritten by SelectOption's menu teardown).
+	// Redraw the status bar rows (SelectOption's menu teardown erases
+	// rows top-to-bottom and may have overwritten the separator/status rows).
 	draw_fixed_frame(rows, g_cached_term_cols, g_status_bar_text);
 
 	// Update turn-output position tracker so the next FlushTurnOutput

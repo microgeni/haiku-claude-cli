@@ -796,8 +796,15 @@ void BlockStdin() {
 	// a spurious empty line (which in Haiku's libedit maps to a readline()
 	// null return, causing the REPL to exit as if Ctrl+D was pressed).
 	if (g_block_pipe[0] >= 0) {
+		// Temporarily set O_NONBLOCK on the read end so the drain loop
+		// returns immediately on an empty pipe instead of blocking forever.
+		// (Only the write end is permanently O_NONBLOCK; the read end is
+		// left blocking so raw_getc_or_wake can safely call poll() on it.)
+		const int flags = ::fcntl(g_block_pipe[0], F_GETFL);
+		::fcntl(g_block_pipe[0], F_SETFL, flags | O_NONBLOCK);
 		char discard[64];
 		while (::read(g_block_pipe[0], discard, sizeof(discard)) > 0) {}
+		::fcntl(g_block_pipe[0], F_SETFL, flags); // restore blocking mode
 	}
 	// Replace fd 0 with the read end of g_block_pipe so that libedit's
 	// internal read(0,...) blocks (empty pipe) instead of consuming bytes
