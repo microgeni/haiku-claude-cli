@@ -44,6 +44,11 @@ namespace {
 std::string g_paste_buf;
 size_t      g_paste_pos = 0;
 
+// Set to true by RequestClearEditBuffer(); consumed by raw_getc_or_wake()
+// when the wake pipe fires, replacing the old rl_event_hook mechanism
+// (which breaks rl_getc_function on Haiku libedit — see Init() comment).
+std::atomic<bool> g_clear_edit_buffer_requested{false};
+
 // Self-pipe used to wake the blocking poll() in raw_getc_or_wake().
 // g_wake_pipe[0] = read end (polled alongside stdin).
 // g_wake_pipe[1] = write end (written by tui::WakeReadMessage()).
@@ -113,6 +118,15 @@ static int raw_getc_or_wake(FILE* f) {
                 return '\r';
             }
             tui::g_turn_just_completed.store(false);
+            // If an edit-buffer clear was requested (e.g. after a tool
+            // permission menu dismissed), do it now while we hold the
+            // readline thread context.  rl_event_hook is NOT used
+            // (it breaks rl_getc_function on Haiku libedit — see comment
+            // in Init()), so this is the only safe place to clear.
+            if (!g_stdin_blocked.load() && g_clear_edit_buffer_requested.exchange(false)) {
+                rl_replace_line("", 0);
+                rl_point = 0;
+            }
             // POLLHUP without POLLIN means the write-end was closed — this
             // should never happen (parent always holds g_wake_pipe[1]) but
             // if it does, sleep briefly to avoid a tight spin loop before
@@ -277,6 +291,12 @@ extern "C" int bracketed_getc(FILE* f) {
         raw.reserve(256);
         consume_until(f, "\x1b[201~", raw);
 
+        // Strip a trailing \r or \n (tmux often appends a final \r
+        // before \e[201~, which would produce a spurious blank
+        // continuation line).
+        while (!raw.empty() && (raw.back() == '\r' || raw.back() == '\n'))
+            raw.pop_back();
+
         // Normalise \r\n → \n, then convert each \n to '\\''\n' so
         // soft_newline fires for every pasted newline.
         g_paste_buf.clear();
@@ -422,6 +442,26 @@ static int handle_bracketed_paste(int /*count*/, int /*key*/) {
 
 	if (paste.empty()) return 0;
 
+	// Normalise line endings: tmux sends \r (0x0d) for each newline
+	// inside the bracketed-paste block (PTY line discipline converts
+	// \n → \r before injecting into the inner pane).  Convert \r\n
+	// and bare \r to plain \n so the wire-format loop below works
+	// uniformly regardless of whether the outer terminal used LF,
+	// CR, or CRLF.
+	{
+		std::string norm;
+		norm.reserve(paste.size());
+		for (size_t i = 0; i < paste.size(); ++i) {
+			if (paste[i] == '\r') {
+				if (i + 1 < paste.size() && paste[i + 1] == '\n') ++i;
+				norm.push_back('\n');
+			} else {
+				norm.push_back(paste[i]);
+			}
+		}
+		paste = std::move(norm);
+	}
+
 	// Remove a trailing \n — a paste that ends with a newline would
 	// otherwise produce a spurious blank continuation line.
 	if (!paste.empty() && paste.back() == '\n') paste.pop_back();
@@ -525,6 +565,28 @@ extern "C" char** slash_completion(const char* text, int start, int /*end*/) {
 
 void Init(const std::string& history_file) {
 	g_history_file = history_file;
+
+	// ── CRITICAL: set rl_getc_function BEFORE read_history() ──────────
+	//
+	// On Haiku's libedit (20230828_3.1) read_history() triggers an
+	// internal rl_initialize() call.  rl_initialize() installs our
+	// custom getc function via el_set(EL_GETCFN, _getc_function) ONLY
+	// when rl_getc_function is already non-NULL at that point.  If
+	// read_history() is called first (when rl_getc_function is still
+	// NULL), rl_initialize() skips the EL_GETCFN install and all later
+	// assignments to rl_getc_function are silently ignored — the
+	// bracketed-paste \e[200~...\e[201~ markers leak as "0~" garbage.
+	//
+	// Setting rl_getc_function here (before read_history) ensures
+	// rl_initialize() picks it up.
+	//
+	// Also: do NOT set rl_event_hook anywhere in this function.
+	// Setting rl_event_hook causes libedit to replace EL_GETCFN with
+	// a direct ioctl+read path (_rl_event_read_char) that bypasses
+	// rl_getc_function entirely.  The edit-buffer clear that used to
+	// live in rl_event_hook is handled in raw_getc_or_wake() instead.
+	rl_getc_function = bracketed_getc;
+
 	if (!g_history_file.empty()) {
 		paths::EnsureParentDir(g_history_file);
 		read_history(g_history_file.c_str());
@@ -603,25 +665,9 @@ void Init(const std::string& history_file) {
 		tui::ResumeFlushTimer();
 	};
 
-	// Install our custom getc function.  The bracketed-paste enable
-	// sequence (\e[?2004h) is sent later, after all keybindings are
-	// set up, via a single unbuffered ::write() call so there is no
-	// race between stdio-buffered and raw writes.
-	rl_getc_function = bracketed_getc;
-
-	// Install an event hook that fires while readline is waiting for
-	// input.  We use it to clear libedit's internal edit buffer when a
-	// tool permission menu has just dismissed — the approval keystroke
-	// may be in libedit's buffer even if rl_getc_function is not honoured.
-	rl_event_hook = []() -> int {
-		// Only clear when no menu is active (g_stdin_blocked=true means
-		// SelectOption is running and we must not touch libedit state).
-		if (!g_stdin_blocked.load() && ConsumeClearEditBufferRequest()) {
-			rl_replace_line("", 0);
-			rl_point = 0;
-		}
-		return 0;
-	};
+	// Install our custom getc function — already set at the top of Init()
+	// before read_history() to ensure rl_initialize() picks it up.
+	// See the comment above read_history() for the full explanation.
 
 	// Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
 	// ReadMessage() re-prompts via backslash-continuation.
@@ -849,10 +895,6 @@ void ClearEditBuffer() {
 	rl_replace_line("", 0);
 	rl_point = 0;
 }
-
-namespace {
-std::atomic<bool> g_clear_edit_buffer_requested{false};
-} // anon namespace
 
 void RequestClearEditBuffer() {
 	g_clear_edit_buffer_requested.store(true);
