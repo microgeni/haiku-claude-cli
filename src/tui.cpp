@@ -253,14 +253,20 @@ void BeginTurn() {
 				continue;
 			}
 			g_flush_timer_paused_ack.store(false);
-			std::this_thread::sleep_for(std::chrono::milliseconds(16));
-			if (!g_flush_timer_running.load()) break;
-			if (g_flush_timer_paused.load())  continue; // re-check after sleep
+
+			// Flush first, then sleep.  The original order (sleep→flush)
+			// delayed every batch of output by one full 16 ms period
+			// because the buffer sat untouched for the entire sleep before
+			// the first write to the terminal.  Flushing first means each
+			// chunk is visible within microseconds of being written by the
+			// worker thread; the sleep is purely a rate-limiter that
+			// prevents busy-spinning between batches.
 			FlushTurnOutput();
-			// When the turn finishes, set g_turn_just_completed so
-			// bracketed_getc can return a synthetic '\r' on its next
-			// call, waking ReadMessage() with an empty line so the
-			// main loop's drain_turn() fires without a real keypress.
+
+			// Check turn completion immediately after flushing so the
+			// synthetic wake fires as soon as the worker is done, rather
+			// than being deferred by another full sleep period.  Any output
+			// that arrived during this cycle has already been flushed above.
 			if (g_turn_done_check && g_turn_done_check()) {
 				g_turn_just_completed.store(true);
 				// Wake the blocking poll() in raw_getc_or_wake() so
@@ -270,6 +276,11 @@ void BeginTurn() {
 				g_flush_timer_running.store(false);
 				break;
 			}
+
+			// Rate-limit: sleep between flush cycles so we don't busy-spin.
+			std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			if (!g_flush_timer_running.load()) break;
+			if (g_flush_timer_paused.load())   continue; // re-check after sleep
 		}
 	});
 }
@@ -423,12 +434,21 @@ void draw_fixed_frame(int rows, int cols, const std::string& status) {
 // Set DECSTBM scroll region to rows 1..(rows - kStatusBarRows)
 // so the fixed rows stay outside the scroll area. Places the cursor
 // at the bottom of the scroll region ready for chat output.
+//
+// Uses DirectWrite (not std::cout) so the DECSTBM escape reaches the
+// terminal immediately — even when a turn is active and std::cout is
+// redirected through the TurnOutputBuf interceptor.  Buffering a
+// DECSTBM command would delay the scroll-region update by up to 16 ms
+// and cause FlushTurnOutput() to write inside the wrong region during
+// that window.
 void apply_scroll_region(int rows) {
 	if (rows < kStatusBarRows + 1) return;
 	const int top    = 1;
 	const int bottom = rows - kStatusBarRows;
-	std::cout << "\x1b[" << top << ";" << bottom << "r"
-			  << "\x1b[" << bottom << ";1H";
+	const std::string s =
+		"\x1b[" + std::to_string(top) + ";" + std::to_string(bottom) + "r"
+		+ "\x1b[" + std::to_string(bottom) + ";1H";
+	DirectWrite(s);
 }
 
 } // namespace
@@ -469,6 +489,20 @@ void RedrawStatusBar() {
 	refresh_dims();
 	apply_scroll_region(g_cached_term_rows);
 	draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
+
+	// After a resize the scroll-region bottom has moved.  Update the
+	// turn-output position tracker so the next FlushTurnOutput() CUPs
+	// to the new chat_bottom rather than a stale pre-resize row.
+	// Without this, worker output lands at the old row (which may now
+	// be inside the status bar) until the next turn starts fresh.
+	if (g_turn_started) {
+		const int chat_bottom =
+			g_cached_term_rows > kStatusBarRows
+			? g_cached_term_rows - kStatusBarRows
+			: 1;
+		g_turn_row2 = chat_bottom;
+		g_turn_col  = 1;
+	}
 }
 
 void TeardownStatusBar() {
@@ -578,43 +612,26 @@ void PauseFlushTimer() {
 	// Flush any pending turn output so it appears above the menu.
 	// FlushTurnOutput wraps output in DECSC/CUP/DECRC; after it returns
 	// the physical cursor is back at the libedit input row (DECRC).
-	// We need the cursor at the *end of turn output* (g_turn_row2,
-	// g_turn_col) so SelectOption() draws its menu from there.
 	FlushTurnOutput();
 
-	// Move the physical cursor to where turn output ended, then bypass
-	// the interceptor so SelectOption()'s std::cout writes go directly
-	// to the terminal.  Use the tracked g_turn_row2/g_turn_col; if the
-	// turn hasn't started yet (no output flushed), land at the scroll-
-	// region bottom.
+	// Bypass the interceptor so SelectOption()'s std::cout writes go
+	// directly to the terminal.  SuspendScrollRegion() will reset the
+	// DECSTBM region and position the cursor correctly; here we only
+	// swap the streambuf.
 	if (g_cout_orig_buf) {
-		const int rows = TerminalRows();
-		const int scroll_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : rows;
-		const int row = g_turn_started ? g_turn_row2 : scroll_bottom;
-		const int col = g_turn_started ? g_turn_col  : 1;
-		std::string cup = "\x1b[" + std::to_string(row) + ";" +
-		                  std::to_string(col) + "H";
-		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
-		g_cout_orig_buf->pubsync();
-		// Now redirect std::cout directly to the terminal.
 		std::cout.rdbuf(g_cout_orig_buf);
 	}
 }
 
 void ResumeFlushTimer() {
-	// After SelectOption() the physical cursor is at the summary row inside
-	// the scroll region.  We need DECSC (inside FlushTurnOutput) to save
-	// libedit's input row (N-2) so that DECRC restores there correctly.
-	//
-	// Fix: park the physical cursor at the input row (N-2) via DirectWrite
-	// before re-enabling the flush timer.  FlushTurnOutput() will then
-	// DECSC(N-2), CUP to chat_bottom (via g_turn_row2), emit output, and
-	// DECRC back to N-2 — keeping libedit's cursor position intact.
+	// RestoreScrollRegion() has already re-established DECSTBM and
+	// redrawn the status bar.  Here we only need to reconnect the
+	// turn-output interceptor and resume the flush timer.
 	if (g_cout_orig_buf && g_status_bar_active) {
 		if (g_term_dirty) refresh_dims();
 		const int rows        = TerminalRows();
 		const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
-		const int input_row   = rows > 2 ? rows - 2 : rows; // N-2 (fixed input row)
+		const int input_row   = rows > 2 ? rows - 2 : rows;
 
 		// Update the output-position tracker to chat_bottom so the next
 		// FlushTurnOutput() CUPs there rather than a stale pre-menu position.
@@ -636,6 +653,101 @@ void ResumeFlushTimer() {
 	g_flush_timer_paused.store(false);
 }
 
+// SuspendScrollRegion / RestoreScrollRegion
+//
+// Park the cursor at the scroll-region bottom (chat_bottom = N-4) before
+// a permission menu renders, and redraw the fixed frame afterward.
+// SuspendScrollRegion() does NOT reset the scroll region to full-screen;
+// keeping the restricted region (1..chat_bottom) ensures SelectOption()'s
+// opening \n emissions scroll content within the chat area rather than
+// pushing into the status-bar rows (N-3..N) and overwriting the "> " prompt.
+//
+// Both functions are safe no-ops when no status bar is installed.
+//
+// Call order:
+//   PauseFlushTimer()        — stop concurrent output (parks cursor at N-2)
+//   SuspendScrollRegion()    — CUP to chat_bottom (N-4)
+//   ... SelectOption() ...
+//   RestoreScrollRegion()    — re-establish \x1b[1;chat_bottom r + redraw status bar
+//   ResumeFlushTimer()       — re-enable turn output
+void SuspendScrollRegion() {
+	if (!g_status_bar_active) return;
+	if (g_term_dirty) refresh_dims();
+	const int rows        = g_cached_term_rows;
+	const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
+	// Park the cursor at chat_bottom (N-4, the bottom of the restricted
+	// scroll region) so SelectOption()'s opening \n emissions scroll
+	// content within the chat area and the menu renders entirely above
+	// the "> " input line.
+	//
+	// We deliberately do NOT reset to full-screen (\x1b[r) here: with
+	// the scroll region restricted to 1..chat_bottom, \n at chat_bottom
+	// scrolls correctly.  Resetting to full-screen would allow \n from
+	// chat_bottom to push into the status-bar rows and overwrite the
+	// "> " prompt.
+	//
+	// Use DirectWrite so the CUP reaches the terminal even while the
+	// turn-output interceptor may still be draining.
+	const std::string seq =
+		"\x1b[" + std::to_string(chat_bottom) + ";1H"; // CUP to scroll-region bottom
+	DirectWrite(seq);
+}
+
+void RestoreScrollRegion() {
+	if (!g_status_bar_active) return;
+	if (g_term_dirty) refresh_dims();
+	const int rows        = g_cached_term_rows;
+	const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
+	const int input_row   = rows > 2 ? rows - 2 : rows;
+
+	// Re-establish the scroll region and park the cursor at the fixed
+	// input row so any subsequent DECSC (inside FlushTurnOutput or
+	// draw_fixed_frame) saves the correct row.
+	std::string restore;
+	restore += "\x1b[1;" + std::to_string(chat_bottom) + "r";
+	restore += "\x1b[" + std::to_string(input_row) + ";1H";
+	DirectWrite(restore);
+
+	// Redraw the status bar rows (SelectOption's menu teardown erases
+	// rows top-to-bottom and may have overwritten the separator/status rows).
+	draw_fixed_frame(rows, g_cached_term_cols, g_status_bar_text);
+
+	// Update turn-output position tracker so the next FlushTurnOutput
+	// CUPs to chat_bottom rather than a stale pre-menu row.
+	g_turn_row2    = chat_bottom;
+	g_turn_col     = 1;
+	g_turn_started = true;
+}
+
+// SelectOption — interactive single-keypress menu.
+//
+// SECURITY / AUTOMATION NOTE
+// --------------------------
+// The menu reads directly from the real tty fd returned by
+// repl::RealTtyFd() rather than from STDIN_FILENO.  This is intentional:
+//
+//   • BlockStdin() redirects STDIN_FILENO to an empty pipe while the
+//     menu is active so libedit cannot race with SelectOption() on the
+//     same fd.  Using the dup()'d tty fd bypasses that pipe and reaches
+//     the actual terminal device, giving the menu exclusive input access.
+//
+//   • As a consequence the menu is NOT reachable via tmux send-keys
+//     automation.  tmux send-keys injects bytes into the terminal
+//     emulator's input queue; by the time they arrive at the slave-pty
+//     read end, BlockStdin() has already redirected fd 0 and SelectOption
+//     is draining the real tty fd directly.  The timing window means the
+//     injected bytes land in the pipe (and are discarded) rather than in
+//     the SelectOption read().  The menu renders correctly and is visible
+//     in the pane, but the keystroke is not consumed by it.
+//
+//   • This behaviour is by design — a non-interactive automation path
+//     should never silently approve destructive tool calls on behalf of
+//     the user.  The sanctioned workaround for fully-automated sessions
+//     is `/ludicrous` mode, which bypasses permission prompts entirely
+//     at the user's explicit opt-in.
+//
+// TL;DR: menu works correctly for human users; tmux send-keys won't
+// reach it — use /ludicrous for scripted automation.
 int SelectOption(const std::vector<std::string>& options,
 				  const std::string& heading,
 				  std::atomic<bool>* cancel,
@@ -1422,21 +1534,26 @@ std::string pad_cell(const std::string& cell, int target_width,
 
 MarkdownRenderer::MarkdownRenderer() = default;
 
+void MarkdownRenderer::FlushPrefix() {
+	if (fFirstOutputDone) return;
+	fFirstOutputDone = true;
+	if (fSpinner) {
+		fSpinner->Stop();
+		fSpinner = nullptr;
+	}
+	// Print the response prefix (e.g. "claude> ") immediately after
+	// the spinner clears its line, so the label appears right before
+	// the first streamed character — or before an empty response ends
+	// — and is never overwritten by a spinner tick.
+	if (!fResponsePrefix.empty()) {
+		std::cout << fResponsePrefix << std::flush;
+		fResponsePrefix.clear();
+	}
+}
+
 void MarkdownRenderer::Emit(const std::string& s) {
 	if (!fFirstOutputDone) {
-		fFirstOutputDone = true;
-		if (fSpinner) {
-			fSpinner->Stop();
-			fSpinner = nullptr;
-		}
-		// Print the response prefix (e.g. "claude> ") immediately
-		// after the spinner clears its line, so the label appears
-		// right before the first streamed character and is never
-		// overwritten by a spinner tick.
-		if (!fResponsePrefix.empty()) {
-			std::cout << fResponsePrefix << std::flush;
-			fResponsePrefix.clear();
-		}
+		FlushPrefix();
 	}
 	std::cout << s << std::flush;
 }
@@ -1693,15 +1810,7 @@ void MarkdownRenderer::RenderLine(const std::string& line) {
 void MarkdownRenderer::Write(const std::string& chunk) {
 	if (!g_color_enabled) {
 		if (!fFirstOutputDone) {
-			fFirstOutputDone = true;
-			if (fSpinner) {
-				fSpinner->Stop();
-				fSpinner = nullptr;
-			}
-			if (!fResponsePrefix.empty()) {
-				std::cout << fResponsePrefix << std::flush;
-				fResponsePrefix.clear();
-			}
+			FlushPrefix();
 		}
 		std::cout << chunk << std::flush;
 		return;
@@ -1718,6 +1827,10 @@ void MarkdownRenderer::Write(const std::string& chunk) {
 }
 
 void MarkdownRenderer::Flush() {
+	// Emit the prefix (and stop the spinner) even if no text ever
+	// arrived — e.g. a tool-only turn where the model's follow-up
+	// response contains zero text_delta events.
+	FlushPrefix();
 	if (!fLineBuffer.empty()) {
 		RenderLine(fLineBuffer);
 		fLineBuffer.clear();

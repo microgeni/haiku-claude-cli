@@ -4,7 +4,88 @@ All notable changes to this project are recorded here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.1] - 2026-07-17
+
+### Fixed
+
+- **Phantom `> ` echo after turn completion** — when a streaming
+  turn finished while the libedit edit buffer was empty, the flush
+  timer injected a synthetic `\r` via `bracketed_getc` to wake the
+  main loop.  The main loop echoed `UserPrompt() + "" + "\n"` into
+  `TurnOutputBuf` before checking for an empty line, producing a
+  bare `> ` line in the chat-history scroll region after every turn
+  that completed without the user typing.  Fixed by trimming and
+  checking for an empty line *before* the echo in the `ReadMessage`
+  path, so the echo is skipped and the early-`continue` fires
+  directly.
+
+- **Resize during active turn corrupts scroll-region output** — two
+  compounding bugs when the user resizes the terminal while a turn
+  is streaming:
+
+  1. `apply_scroll_region()` used `std::cout`, which is redirected
+     through `TurnOutputBuf` while a turn is active.  The DECSTBM
+     escape was buffered and delivered up to 16 ms later inside a
+     `FlushTurnOutput()` DECSC/CUP/…/DECRC wrapper.  During that
+     window the worker's output still targeted the old scroll region,
+     so it could land on status-bar rows or below the new scroll
+     bottom.  Fixed by switching `apply_scroll_region()` to
+     `DirectWrite` (same as `draw_fixed_frame`).
+
+  2. `RedrawStatusBar()` did not update `g_turn_row2` /
+     `g_turn_col` after a resize.  When a turn had already produced
+     output (`g_turn_started == true`) the tracker held the old
+     scroll-bottom row; subsequent `FlushTurnOutput()` calls CUP'd
+     to the stale row — potentially inside the status-bar frame on
+     the new (smaller) terminal.  Fixed by recalculating
+     `chat_bottom` from the refreshed `g_cached_term_rows` in
+     `RedrawStatusBar()` and writing it into `g_turn_row2`.
+
+- **tmux permission-menu hang** — asking Claude to run a destructive
+  shell command (e.g. `git commit && git push`) caused the prompt to
+  disappear and the process to hang forever when running inside tmux.
+  Three compounding bugs were responsible:
+
+  1. **`EscInterruptGuard::pause()` race** — the guard thread polled
+     the real-tty fd with a 100 ms timeout; `pause()` waited only
+     120 ms for acknowledgement.  If `pause()` was called just as
+     the poll started, the 120 ms window expired before the thread
+     could acknowledge, leaving both the guard thread and
+     `SelectOption()` reading from the same fd concurrently.
+     `SelectOption()` would hang forever because the guard thread
+     stole its keypress.  Fixed by adding a self-pipe
+     (`fWakePipe`) to `EscInterruptGuard`; `pause()` now writes to
+     the pipe to immediately kick the thread out of `poll()`,
+     guaranteeing acknowledgement within one loop iteration (~1 ms).
+
+  2. **DECSTBM scroll region swallowing the permission menu** —
+     `SelectOption()` rendered with `\n`-based line output while the
+     DECSTBM scroll region was still active.  At the scroll-region
+     bottom, newlines scrolled content into the status-bar rows,
+     making the menu invisible to the user.  Fixed by adding
+     `tui::SuspendScrollRegion()` / `tui::RestoreScrollRegion()`
+     that bracket every `SelectOption()` call: `\x1b[r` resets to
+     full-screen before the menu, and the scroll region plus status
+     bar are fully restored afterward.
+
+  3. **`g_real_tty_fd` from `dup(stdin)` instead of `/dev/tty`** —
+     in tmux the controlling terminal is the PTY slave, which _is_
+     stdin at init time.  But `dup(stdin)` produces a second handle
+     to the same PTY, and any later `dup2` on fd 0 (e.g. by
+     `BlockStdin()`) could leave the real-tty fd in an inconsistent
+     state on some Haiku libedit versions.  Fixed by opening
+     `/dev/tty` directly in `repl::Init()`, with a `dup(stdin)`
+     fallback for terminals without a controlling tty.
+
+### Notes
+
+- **`SelectOption` permission menu not reachable via `tmux send-keys`** —
+  by design.  `BlockStdin()` redirects `STDIN_FILENO` to an empty pipe
+  while the menu is active; `SelectOption` reads directly from
+  `repl::RealTtyFd()` (the `/dev/tty` fd opened at init), so bytes
+  injected via `tmux send-keys` land in the pipe and are discarded.
+  The menu itself renders correctly and is visible in the pane.
+  Workaround for fully-automated sessions: `/ludicrous` mode.
 
 ## [1.7.0] - 2026-04-27
 

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <glob.h>
 #include <map>
@@ -611,6 +612,14 @@ ToolResult run_bash(const json& input) {
 		// Put the child in its own process group so we can kill the
 		// whole group (child + any grandchildren) cleanly on cancel.
 		setsid();
+		// Redirect stdin to /dev/null so the child cannot read from
+		// or corrupt the parent's terminal — which could cause the
+		// REPL to see a spurious EOF and exit after the turn.
+		const int devnull = ::open("/dev/null", O_RDONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			if (devnull > STDERR_FILENO) close(devnull);
+		}
 		close(pipefd[0]);
 		if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
 		if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
@@ -781,6 +790,13 @@ ToolResult run_grep(const json& input) {
 
 	if (pid == 0) {
 		setsid(); // own process group so kill(-pid, ...) reaches it
+		// Redirect stdin to /dev/null — grep reads stdin only when no
+		// files are given; this also prevents tty inheritance.
+		const int devnull = ::open("/dev/null", O_RDONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			if (devnull > STDERR_FILENO) close(devnull);
+		}
 		close(pipefd[0]);
 		if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
 		if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
@@ -1109,6 +1125,13 @@ ToolResult exec_capture(const char* const argv[]) {
 	}
 	if (pid == 0) {
 		setsid(); // own process group so we can kill descendants
+		// Redirect stdin to /dev/null — prevents child from inheriting
+		// the parent's terminal and potentially corrupting tty state.
+		const int devnull = ::open("/dev/null", O_RDONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			if (devnull > STDERR_FILENO) close(devnull);
+		}
 		close(pipefd[0]);
 		if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
 		if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);

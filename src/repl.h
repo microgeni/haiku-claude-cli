@@ -62,6 +62,11 @@ void UnblockStdin();
 // SelectOption() to read keypresses directly from the tty even when
 // STDIN_FILENO has been redirected to /dev/null by BlockStdin().
 // Returns -1 if not available (non-TTY or not yet initialised).
+//
+// NOTE: because SelectOption() reads from this fd (not from
+// STDIN_FILENO), the permission menu is NOT reachable via
+// `tmux send-keys` automation — injected bytes land in the
+// BlockStdin pipe, not here.  Use /ludicrous for scripted sessions.
 int RealTtyFd();
 
 // Clear libedit's internal edit buffer.  Called after a tool permission

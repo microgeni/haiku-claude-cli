@@ -17,7 +17,7 @@
 
 namespace config {
 
-const char* const kVersion      = "1.7.0";
+const char* const kVersion      = "1.7.1";
 const char* const kDefaultModel = "claude-sonnet-4-6";
 const char* const kApiVersion   = "2023-06-01";
 const char* const kOAuthBeta    = "oauth-2025-04-20";
@@ -74,6 +74,10 @@ void PreloadBfsSummaries() {
 	// Walk the project cwd, collect claude:summary values via catattr.
 	// `find | while read` is simple and handles non-ASCII paths
 	// adequately for this use. Excludes the usual noise directories.
+	// Redirect stdin from /dev/null so the sh child (and its subprocesses
+	// catattr, find) never inherit the REPL's tty as fd 0 — a child
+	// reading from the tty would consume keystrokes or trigger a spurious
+	// EOF that causes readline() to return nullptr and exit the REPL.
 	const char* cmd =
 		"find . -type f "
 		"  -not -path './.git/*' "
@@ -82,7 +86,7 @@ void PreloadBfsSummaries() {
 		"  -not -path '*/\\.*' 2>/dev/null | while read f; do "
 		"    s=$(catattr -d claude:summary \"$f\" 2>/dev/null) || continue; "
 		"    [ -n \"$s\" ] && printf '%s :: %s\\n' \"$f\" \"$s\"; "
-		"done";
+		"done < /dev/null";
 	FILE* p = popen(cmd, "r");  // flawfinder: ignore
 	if (!p) return;
 	char buf[4096];
@@ -213,7 +217,7 @@ std::string DeriveHeuristicSummary(const std::string& content) {
 
 bool HasClaudeSummary(const std::string& path) {
 	const std::string cmd =
-		"catattr -d claude:summary " + ShellSingleQuote(path) + " 2>/dev/null";
+		"catattr -d claude:summary " + ShellSingleQuote(path) + " 2>/dev/null < /dev/null";
 	FILE* p = popen(cmd.c_str(), "r");  // flawfinder: ignore
 	if (!p) return false;
 	char buf[256];
@@ -544,7 +548,7 @@ void RefreshSummarySnapshot(const std::vector<std::string>& paths) {
 		std::string value;
 		FILE* p = popen(  // flawfinder: ignore
 			("catattr -d claude:summary " + ShellSingleQuote(path)
-			 + " 2>/dev/null").c_str(), "r");
+			 + " 2>/dev/null < /dev/null").c_str(), "r");
 		if (p) {
 			char buf[1024];
 			while (std::fgets(buf, sizeof(buf), p)) {
