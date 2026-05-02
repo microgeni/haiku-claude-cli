@@ -6,6 +6,13 @@ on:
       - 'v*'
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: /bin/bash -euo pipefail {0}
+
+env:
+  PATH: /boot/home/config/non-packaged/bin:/boot/home/config/bin:/boot/system/non-packaged/bin:/bin:/boot/system/bin:/boot/system/apps
+
 jobs:
   release:
     name: Release
