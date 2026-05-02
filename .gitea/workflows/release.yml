@@ -9,7 +9,7 @@ on:
 jobs:
   release:
     name: Release
-    runs-on: haiku
+    runs-on: haiku-latest
 
     steps:
       - name: Checkout
