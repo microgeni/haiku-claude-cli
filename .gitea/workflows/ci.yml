@@ -10,10 +10,6 @@ on:
       - main
   workflow_dispatch:
 
-defaults:
-  run:
-    shell: /bin/bash -euo pipefail {0}
-
 env:
   PATH: /boot/home/config/non-packaged/bin:/boot/home/config/bin:/boot/system/non-packaged/bin:/bin:/boot/system/bin:/boot/system/apps
 
@@ -27,17 +23,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build
-        run: ./ci_scripts/build.sh
+        run: /bin/bash ./ci_scripts/build.sh
 
       - name: Check (lint + security)
-        run: ./ci_scripts/check.sh
+        run: /bin/bash ./ci_scripts/check.sh
 
       - name: Test
-        run: ./ci_scripts/test.sh
+        run: /bin/bash ./ci_scripts/test.sh
 
       - name: Summary
         if: always()
         run: |
-          echo "Status: ${{ job.status }}"
-          echo "Ref:    ${{ github.ref_name }}"
-          echo "Run:    ${{ github.run_number }}"
+          /bin/bash -c "echo 'Status: ${{ job.status }}'; echo 'Ref:    ${{ github.ref_name }}'; echo 'Run:    ${{ github.run_number }}'"
