@@ -20,7 +20,7 @@ env:
 jobs:
   build-and-test:
     name: Build & Test
-    runs-on: haiku-latest
+    runs-on: haiku
 
     steps:
       - name: Checkout
