@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Release
+    runs-on: haiku
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build HPKG
+        id: hpkg
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./ci_scripts/package_on_haiku.sh
+
+      - name: Upload release to Gitea
+        env:
+          VERSION: ${{ github.ref_name }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PKG_NAME: ${{ steps.hpkg.outputs.pkg_name }}
+        run: ./ci_scripts/upload_gitea_release.sh

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: haiku
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: ./ci_scripts/build.sh
+
+      - name: Check (lint + security)
+        run: ./ci_scripts/check.sh
+
+      - name: Test
+        run: ./ci_scripts/test.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Status: ${{ job.status }}"
+          echo "Ref:    ${{ github.ref_name }}"
+          echo "Run:    ${{ github.run_number }}"
