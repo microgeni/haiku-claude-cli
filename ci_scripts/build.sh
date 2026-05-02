@@ -16,7 +16,7 @@ echo "=== make clean ==="
 make clean || true
 
 echo "=== make ==="
-make
+make -j$(nproc)
 
 echo "=== artifact ==="
 ls -la build/claude
