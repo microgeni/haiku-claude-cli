@@ -19,7 +19,7 @@ set -euo pipefail
 : "${PKG_NAME:?PKG_NAME required}"
 
 API="${GITEA_API_URL:-https://gitea.microgeni.synology.me/api/v1}"
-REPO="${GITEA_REPO:-daniel/haiku-claude-cli}"
+REPO="${GITEA_REPO:-Microgeni/haiku-claude-cli}"
 TAG="$VERSION"
 version_num="${VERSION#v}"
 archive="haiku-claude-cli-${version_num}.tar.gz"
