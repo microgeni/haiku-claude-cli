@@ -12,7 +12,7 @@ env:
 jobs:
   release:
     name: Release
-    runs-on: haiku
+    runs-on: taurus
 
     steps:
       - name: Checkout
