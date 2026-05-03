@@ -32,8 +32,8 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no"
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
-          git push --force github HEAD:main
-          git push --force github ${{ github.ref_name }}
+          git push --force --no-thin github HEAD:main
+          git push --force --no-thin github ${{ github.ref_name }}
           rm -f ~/.ssh/gh_deploy
 
       - name: Build HPKG
