@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Upload the HPKG to a GitHub release for the current tag.
-# Creates (or replaces) the release and attaches the single package asset.
+# Upload a built HPKG, source tarball, and SHA256SUMS to a GitHub
+# release for the current tag. Creates (or replaces) the release and
+# attaches all three assets.
 #
 # Required environment:
 #   VERSION          — tag ref (e.g. "v1.7.2")
@@ -23,6 +24,7 @@ UPLOAD="${GH_UPLOAD_URL:-https://uploads.github.com}"
 REPO="${GH_REPO:-microgeni/haiku-claude-cli}"
 TAG="$VERSION"
 version_num="${VERSION#v}"
+archive="haiku-claude-cli-${version_num}.tar.gz"
 
 AUTH_HEADER="Authorization: Bearer $GH_RELEASE_TOKEN"
 ACCEPT_HEADER="Accept: application/vnd.github+json"
@@ -38,6 +40,14 @@ echo ""
 
 # Sanity-check: built HPKG must exist.
 [ -f "build/$PKG_NAME" ] || { echo "error: build/$PKG_NAME not found"; exit 1; }
+
+# Build source tarball from the current HEAD.
+echo "Creating source archive ${archive}..."
+git archive --format=tar.gz --prefix="haiku-claude-cli-${version_num}/" HEAD > "$archive"
+
+# Compute SHA-256 checksums.
+hpkg_sha=$(shasum -a 256 "build/$PKG_NAME" | awk '{print $1}')
+arch_sha=$(shasum -a 256 "$archive"         | awk '{print $1}')
 
 # Pull the relevant section from CHANGELOG.md (if present).
 changelog_section=""
@@ -57,9 +67,18 @@ fi
 body=$(cat <<EOF
 ${changelog_section}
 
+## Downloads
+- Haiku package: \`${PKG_NAME}\`
+- Source: \`${archive}\`
+
 ## Install (Haiku)
 
     pkgman install ./${PKG_NAME}
+
+## Checksums (SHA256)
+
+    ${hpkg_sha}  ${PKG_NAME}
+    ${arch_sha}  ${archive}
 EOF
 )
 
@@ -128,14 +147,34 @@ if [ -z "$rel_id" ]; then
 fi
 echo "Created release id=$rel_id"
 
-# ── Upload the HPKG ──
-echo "Uploading $PKG_NAME..."
+# ── Upload assets ──
+upload_asset() {
+    local filepath="$1"
+    local name
+    name=$(basename "$filepath")
+    echo "Uploading ${name}..."
+    curl -sS --fail-with-body -X POST \
+        -H "$AUTH_HEADER" \
+        -H "$ACCEPT_HEADER" \
+        -H "$API_VER_HEADER" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary @"$filepath" \
+        "${UPLOAD}/repos/$REPO/releases/$rel_id/assets?name=${name}" >/dev/null
+}
+
+upload_asset "build/$PKG_NAME"
+upload_asset "$archive"
+
+# ── Upload SHA256SUMS ──
+echo "Uploading SHA256SUMS..."
+echo "${hpkg_sha}  ${PKG_NAME}" >  SHA256SUMS
+echo "${arch_sha}  ${archive}"  >> SHA256SUMS
 curl -sS --fail-with-body -X POST \
     -H "$AUTH_HEADER" \
     -H "$ACCEPT_HEADER" \
     -H "$API_VER_HEADER" \
-    -H "Content-Type: application/octet-stream" \
-    --data-binary @"build/$PKG_NAME" \
-    "${UPLOAD}/repos/$REPO/releases/$rel_id/assets?name=${PKG_NAME}" >/dev/null
+    -H "Content-Type: text/plain" \
+    --data-binary @SHA256SUMS \
+    "${UPLOAD}/repos/$REPO/releases/$rel_id/assets?name=SHA256SUMS" >/dev/null
 
 echo "GitHub Release published: https://github.com/$REPO/releases/tag/$TAG"
