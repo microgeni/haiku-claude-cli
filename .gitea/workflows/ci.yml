@@ -50,6 +50,8 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s' "$GH_DEPLOY_KEY" | base64 -d > ~/.ssh/gh_deploy
           chmod 600 ~/.ssh/gh_deploy
+          echo "Key size: $(wc -c < ~/.ssh/gh_deploy) bytes"
+          ssh-keygen -l -f ~/.ssh/gh_deploy 2>&1 || echo "key fingerprint failed"
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no"
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
