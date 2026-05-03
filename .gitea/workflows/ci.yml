@@ -54,8 +54,7 @@ jobs:
           git gc --quiet
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
-          git push github --delete ${{ github.ref_name }} 2>/dev/null || true
-          git push --no-thin github HEAD:refs/heads/${{ github.ref_name }}
+          git push --force --no-thin github HEAD:refs/heads/${{ github.ref_name }}
           rm -f ~/.ssh/gh_deploy
 
       - name: Summary
