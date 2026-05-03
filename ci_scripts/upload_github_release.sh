@@ -31,6 +31,14 @@ AUTH_HEADER="Authorization: Bearer $GH_RELEASE_TOKEN"
 ACCEPT_HEADER="Accept: application/vnd.github+json"
 API_VER_HEADER="X-GitHub-Api-Version: 2022-11-28"
 
+# Sanity-check: verify we can reach the GitHub API at all.
+echo "Testing connectivity to $API..."
+curl -sS --fail-with-body -H "$ACCEPT_HEADER" "$API/zen" 2>&1 || {
+    echo "error: cannot reach $API — check network/TLS on this runner"
+    exit 1
+}
+echo ""
+
 # Sanity-check: built HPKG must exist.
 [ -f "build/$PKG_NAME" ] || { echo "error: build/$PKG_NAME not found"; exit 1; }
 
@@ -117,13 +125,13 @@ print(json.dumps({
     "generate_release_notes": False,
 }))')
 
-resp=$(curl -s -X POST \
+resp=$(curl -sS --fail-with-body -X POST \
     -H "$AUTH_HEADER" \
     -H "$ACCEPT_HEADER" \
     -H "$API_VER_HEADER" \
     -H "Content-Type: application/json" \
     -d "$payload" \
-    "$API/repos/$REPO/releases")
+    "$API/repos/$REPO/releases" 2>&1 || true)
 
 rel_id=$(python3 -c '
 import sys, json
