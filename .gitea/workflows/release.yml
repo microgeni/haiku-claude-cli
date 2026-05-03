@@ -24,19 +24,17 @@ jobs:
         env:
           GH_DEPLOY_KEY: ${{ secrets.GH_DEPLOY_KEY }}
         run: |
-          /bin/bash -c '
-            set -euo pipefail
-            mkdir -p ~/.ssh
-            echo "$GH_DEPLOY_KEY" > ~/.ssh/gh_deploy
-            chmod 600 ~/.ssh/gh_deploy
-            echo "StrictHostKeyChecking no" >> ~/.ssh/config
-            export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy"
-            git remote remove github 2>/dev/null || true
-            git remote add github git@github.com:microgeni/haiku-claude-cli.git
-            git push --force github HEAD:main
-            git push --force github ${{ github.ref_name }}
-            rm -f ~/.ssh/gh_deploy
-          '
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$GH_DEPLOY_KEY" > ~/.ssh/gh_deploy
+          chmod 600 ~/.ssh/gh_deploy
+          printf 'Host github.com\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/gh_deploy\n' >> ~/.ssh/config
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no"
+          git remote remove github 2>/dev/null || true
+          git remote add github git@github.com:microgeni/haiku-claude-cli.git
+          git push --force github HEAD:main
+          git push --force github ${{ github.ref_name }}
+          rm -f ~/.ssh/gh_deploy
 
       - name: Build HPKG
         id: hpkg
