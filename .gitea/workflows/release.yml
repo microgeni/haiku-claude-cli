@@ -33,3 +33,10 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PKG_NAME: ${{ steps.hpkg.outputs.pkg_name }}
         run: /bin/bash ./ci_scripts/upload_gitea_release.sh
+
+      - name: Upload release to GitHub
+        env:
+          VERSION: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          PKG_NAME: ${{ steps.hpkg.outputs.pkg_name }}
+        run: /bin/bash ./ci_scripts/upload_github_release.sh
