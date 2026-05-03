@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-07-18
+
+### Changed
+
+- **GitHub mirror releases** — every tagged release is now published
+  to both the Gitea instance and `github.com/microgeni/haiku-claude-cli`.
+  Assets (`.hpkg`, source tarball, `SHA256SUMS`) are identical on both
+  platforms.  Requires the `GH_RELEASE_TOKEN` secret in Gitea CI.
+- **CI improvements** — parallel `make -j$(nproc)` in the build step;
+  `SHA256SUMS` file attached to Gitea releases; workflow split into
+  `ci.yml` and `release.yml` for clearer separation of concerns.
+
 ## [1.7.1] - 2026-07-17
 
 ### Fixed
