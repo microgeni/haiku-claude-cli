@@ -120,4 +120,14 @@ for asset in "build/$PKG_NAME" "$archive"; do
         "$API/repos/$REPO/releases/$rel_id/assets?name=$name" >/dev/null
 done
 
+# Upload SHA256SUMS file
+echo "uploading SHA256SUMS..."
+echo "${hpkg_sha}  ${PKG_NAME}" >  SHA256SUMS
+echo "${arch_sha}  ${archive}"  >> SHA256SUMS
+curl -s -X POST \
+    -H "Authorization: token $RELEASE_TOKEN" \
+    -H "Content-Type: text/plain" \
+    --data-binary @SHA256SUMS \
+    "$API/repos/$REPO/releases/$rel_id/assets?name=SHA256SUMS" >/dev/null
+
 echo "Release published: https://gitea.microgeni.synology.me/$REPO/releases/tag/$TAG"

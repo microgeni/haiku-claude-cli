@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PATH: /boot/home/config/non-packaged/bin:/boot/home/config/bin:/boot/system/non-packaged/bin:/bin:/boot/system/bin:/boot/system/apps
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: haiku
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: /bin/bash ./ci_scripts/build.sh
+
+      - name: Check (lint + security)
+        run: /bin/bash ./ci_scripts/check.sh
+
+      - name: Test
+        run: /bin/bash ./ci_scripts/test.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          /bin/bash -c "echo 'Status: ${{ job.status }}'; echo 'Ref:    ${{ github.ref_name }}'; echo 'Run:    ${{ github.run_number }}'"
