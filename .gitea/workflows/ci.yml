@@ -51,7 +51,12 @@ jobs:
           printf '%s\n' "$GH_DEPLOY_KEY" > ~/.ssh/gh_deploy
           chmod 600 ~/.ssh/gh_deploy
           printf 'Host github.com\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/gh_deploy\n' >> ~/.ssh/config
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no"
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no -v"
+          echo "=== key fingerprint ==="
+          ssh-keygen -l -f ~/.ssh/gh_deploy
+          echo "=== test SSH auth to github.com ==="
+          ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no -T git@github.com 2>&1 || true
+          echo "=== push ==="
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
           git push --force github HEAD:${{ github.ref_name }}
