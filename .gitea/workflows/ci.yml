@@ -43,24 +43,12 @@ jobs:
 
       - name: Mirror to GitHub
         if: success()
-        env:
-          GH_DEPLOY_KEY: ${{ secrets.GH_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh
-          printf '%s\n' "$GH_DEPLOY_KEY" > ~/.ssh/gh_deploy
-          chmod 600 ~/.ssh/gh_deploy
-          printf 'Host github.com\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/gh_deploy\n' >> ~/.ssh/config
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no -v"
-          echo "=== key fingerprint ==="
-          ssh-keygen -l -f ~/.ssh/gh_deploy
-          echo "=== test SSH auth to github.com ==="
-          ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no -T git@github.com 2>&1 || true
-          echo "=== push ==="
+          export GIT_SSH_COMMAND="ssh -i /boot/home/.ssh/github_deploy_orig -o StrictHostKeyChecking=no"
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
           git push --force github HEAD:${{ github.ref_name }}
-          rm -f ~/.ssh/gh_deploy
 
       - name: Summary
         if: always()
