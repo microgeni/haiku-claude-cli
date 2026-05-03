@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Upload a built HPKG and a generated source tarball to a GitHub
-# release for the current tag. Creates (or replaces) the release,
-# attaches both assets plus SHA256SUMS, and prints the final URL.
+# Upload the HPKG to a GitHub release for the current tag.
+# Creates (or replaces) the release and attaches the single package asset.
 #
 # Required environment:
-#   VERSION          — tag ref (e.g. "v1.7.1")
-#   GITHUB_TOKEN     — GitHub personal-access-token (or Actions token)
-#                      with Contents: write scope on the target repo
+#   VERSION          — tag ref (e.g. "v1.7.2")
+#   GH_RELEASE_TOKEN — GitHub PAT with Contents: write scope
 #   PKG_NAME         — filename of the HPKG in ./build/
 #
 # Optional:
-#   GH_REPO         — defaults to microgeni/haiku-claude-cli
-#   GH_API_URL      — defaults to https://api.github.com
-#   GH_UPLOAD_URL   — defaults to https://uploads.github.com
+#   GH_REPO          — defaults to microgeni/haiku-claude-cli
+#   GH_API_URL       — defaults to https://api.github.com
+#   GH_UPLOAD_URL    — defaults to https://uploads.github.com
 
 set -euo pipefail
 
@@ -25,13 +23,12 @@ UPLOAD="${GH_UPLOAD_URL:-https://uploads.github.com}"
 REPO="${GH_REPO:-microgeni/haiku-claude-cli}"
 TAG="$VERSION"
 version_num="${VERSION#v}"
-archive="haiku-claude-cli-${version_num}.tar.gz"
 
 AUTH_HEADER="Authorization: Bearer $GH_RELEASE_TOKEN"
 ACCEPT_HEADER="Accept: application/vnd.github+json"
 API_VER_HEADER="X-GitHub-Api-Version: 2022-11-28"
 
-# Sanity-check: verify we can reach the GitHub API at all.
+# Sanity-check: verify we can reach the GitHub API.
 echo "Testing connectivity to $API..."
 curl -sS --fail-with-body -H "$ACCEPT_HEADER" "$API/zen" 2>&1 || {
     echo "error: cannot reach $API — check network/TLS on this runner"
@@ -41,14 +38,6 @@ echo ""
 
 # Sanity-check: built HPKG must exist.
 [ -f "build/$PKG_NAME" ] || { echo "error: build/$PKG_NAME not found"; exit 1; }
-
-# Build source tarball from the current HEAD.
-echo "Creating source archive ${archive}..."
-git archive --format=tar.gz --prefix="haiku-claude-cli-${version_num}/" HEAD > "$archive"
-
-# Compute SHA-256 checksums.
-hpkg_sha=$(shasum -a 256 "build/$PKG_NAME" | awk '{print $1}')
-arch_sha=$(shasum -a 256 "$archive"         | awk '{print $1}')
 
 # Pull the relevant section from CHANGELOG.md (if present).
 changelog_section=""
@@ -68,18 +57,9 @@ fi
 body=$(cat <<EOF
 ${changelog_section}
 
-## Downloads
-- Haiku package: \`${PKG_NAME}\`
-- Source: \`${archive}\`
-
 ## Install (Haiku)
 
     pkgman install ./${PKG_NAME}
-
-## Checksums (SHA256)
-
-    ${hpkg_sha}  ${PKG_NAME}
-    ${arch_sha}  ${archive}
 EOF
 )
 
@@ -148,35 +128,14 @@ if [ -z "$rel_id" ]; then
 fi
 echo "Created release id=$rel_id"
 
-# ── Upload assets via the upload endpoint ──
-upload_asset() {
-    local filepath="$1"
-    local name
-    name=$(basename "$filepath")
-    local mime="application/octet-stream"
-    echo "Uploading ${name}..."
-    curl -s -X POST \
-        -H "$AUTH_HEADER" \
-        -H "$ACCEPT_HEADER" \
-        -H "$API_VER_HEADER" \
-        -H "Content-Type: ${mime}" \
-        --data-binary @"$filepath" \
-        "${UPLOAD}/repos/$REPO/releases/$rel_id/assets?name=${name}" >/dev/null
-}
-
-upload_asset "build/$PKG_NAME"
-upload_asset "$archive"
-
-# ── Upload SHA256SUMS ──
-echo "Uploading SHA256SUMS..."
-echo "${hpkg_sha}  ${PKG_NAME}" >  SHA256SUMS
-echo "${arch_sha}  ${archive}"  >> SHA256SUMS
-curl -s -X POST \
+# ── Upload the HPKG ──
+echo "Uploading $PKG_NAME..."
+curl -sS --fail-with-body -X POST \
     -H "$AUTH_HEADER" \
     -H "$ACCEPT_HEADER" \
     -H "$API_VER_HEADER" \
-    -H "Content-Type: text/plain" \
-    --data-binary @SHA256SUMS \
-    "${UPLOAD}/repos/$REPO/releases/$rel_id/assets?name=SHA256SUMS" >/dev/null
+    -H "Content-Type: application/octet-stream" \
+    --data-binary @"build/$PKG_NAME" \
+    "${UPLOAD}/repos/$REPO/releases/$rel_id/assets?name=${PKG_NAME}" >/dev/null
 
 echo "GitHub Release published: https://github.com/$REPO/releases/tag/$TAG"
