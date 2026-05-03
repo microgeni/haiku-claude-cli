@@ -17,7 +17,7 @@
 set -euo pipefail
 
 : "${VERSION:?VERSION required}"
-: "${GITHUB_TOKEN:?GITHUB_TOKEN required}"
+: "${GH_RELEASE_TOKEN:?GH_RELEASE_TOKEN required}"
 : "${PKG_NAME:?PKG_NAME required}"
 
 API="${GITHUB_API_URL:-https://api.github.com}"
@@ -27,7 +27,7 @@ TAG="$VERSION"
 version_num="${VERSION#v}"
 archive="haiku-claude-cli-${version_num}.tar.gz"
 
-AUTH_HEADER="Authorization: Bearer $GITHUB_TOKEN"
+AUTH_HEADER="Authorization: Bearer $GH_RELEASE_TOKEN"
 ACCEPT_HEADER="Accept: application/vnd.github+json"
 API_VER_HEADER="X-GitHub-Api-Version: 2022-11-28"
 
