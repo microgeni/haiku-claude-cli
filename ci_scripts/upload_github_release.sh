@@ -10,9 +10,9 @@
 #   PKG_NAME         — filename of the HPKG in ./build/
 #
 # Optional:
-#   GITHUB_REPO      — defaults to microgeni/haiku-claude-cli
-#   GITHUB_API_URL   — defaults to https://api.github.com
-#   GITHUB_UPLOAD_URL — defaults to https://uploads.github.com
+#   GH_REPO         — defaults to microgeni/haiku-claude-cli
+#   GH_API_URL      — defaults to https://api.github.com
+#   GH_UPLOAD_URL   — defaults to https://uploads.github.com
 
 set -euo pipefail
 
@@ -20,9 +20,9 @@ set -euo pipefail
 : "${GH_RELEASE_TOKEN:?GH_RELEASE_TOKEN required}"
 : "${PKG_NAME:?PKG_NAME required}"
 
-API="${GITHUB_API_URL:-https://api.github.com}"
-UPLOAD="${GITHUB_UPLOAD_URL:-https://uploads.github.com}"
-REPO="${GITHUB_REPO:-microgeni/haiku-claude-cli}"
+API="${GH_API_URL:-https://api.github.com}"
+UPLOAD="${GH_UPLOAD_URL:-https://uploads.github.com}"
+REPO="${GH_REPO:-microgeni/haiku-claude-cli}"
 TAG="$VERSION"
 version_num="${VERSION#v}"
 archive="haiku-claude-cli-${version_num}.tar.gz"
