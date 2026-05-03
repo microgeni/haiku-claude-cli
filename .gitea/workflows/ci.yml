@@ -28,9 +28,8 @@ jobs:
         run: |
           echo "Commit: $(git rev-parse HEAD)"
           echo "Tests file: $(wc -l < ci_scripts/test.sh) lines, async_features: $(wc -l < tests/async_features_test.sh) lines"
-          # Hard-sync working tree to HEAD in case checkout was partial
+          # Hard-sync tracked files to HEAD in case checkout was partial
           git checkout -- .
-          git clean -ffdx -e build/
 
       - name: Build
         run: /bin/bash ./ci_scripts/build.sh
