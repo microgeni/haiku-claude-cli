@@ -32,6 +32,7 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no"
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
+          git fetch --tags
           git push --force --no-thin github HEAD:refs/heads/main
           git push --force --no-thin github refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}
           rm -f ~/.ssh/gh_deploy
