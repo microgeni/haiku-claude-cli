@@ -45,7 +45,7 @@ jobs:
             export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy"
             git remote remove github 2>/dev/null || true
             git remote add github git@github.com:microgeni/haiku-claude-cli.git
-            git push github HEAD:${{ github.ref_name }}
+            git push --force github HEAD:${{ github.ref_name }}
             rm -f ~/.ssh/gh_deploy
           '
 
