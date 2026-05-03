@@ -27,10 +27,10 @@ jobs:
       - name: Verify checkout
         run: |
           echo "Commit: $(git rev-parse HEAD)"
-          echo "Tests file: $(wc -l < ci_scripts/test.sh) lines, async_features: $(wc -l < tests/async_features_test.sh) lines"
-          echo "config.cpp: $(wc -l < src/config.cpp) lines"
-          # Force all tracked files to exactly match HEAD
+          echo "async_features_test.sh sha: $(sha256sum tests/async_features_test.sh)"
+          echo "config.cpp lines: $(wc -l < src/config.cpp)"
           git reset --hard HEAD
+          echo "After reset — async_features_test.sh sha: $(sha256sum tests/async_features_test.sh)"
 
       - name: Build
         run: /bin/bash ./ci_scripts/build.sh
