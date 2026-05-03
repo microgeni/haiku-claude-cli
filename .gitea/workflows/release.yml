@@ -22,13 +22,19 @@ jobs:
           fetch-depth: 0
 
       - name: Mirror to GitHub
+        env:
+          GH_DEPLOY_KEY: ${{ secrets.GH_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          export GIT_SSH_COMMAND="ssh -i /boot/home/.ssh/github_deploy_orig -o StrictHostKeyChecking=no"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$GH_DEPLOY_KEY" > ~/.ssh/gh_deploy
+          chmod 600 ~/.ssh/gh_deploy
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gh_deploy -o StrictHostKeyChecking=no"
           git remote remove github 2>/dev/null || true
           git remote add github git@github.com:microgeni/haiku-claude-cli.git
           git push --force github HEAD:main
           git push --force github ${{ github.ref_name }}
+          rm -f ~/.ssh/gh_deploy
 
       - name: Build HPKG
         id: hpkg
