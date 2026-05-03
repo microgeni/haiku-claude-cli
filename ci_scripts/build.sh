@@ -30,4 +30,4 @@ make -j$(nproc)
 
 echo "=== artifact ==="
 ls -la build/claude
-file build/claude
+file build/claude 2>/dev/null || true
