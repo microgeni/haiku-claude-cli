@@ -16,7 +16,7 @@ env:
 jobs:
   build-and-test:
     name: Build & Test
-    runs-on: taurus
+    runs-on: asus
 
     steps:
       - name: Checkout
