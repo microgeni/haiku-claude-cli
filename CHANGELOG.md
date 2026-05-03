@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-05-03
+
+### Fixed
+
+- **GitHub mirror CI** — force-push with full `refs/heads/` refspec and
+  `--no-thin` to avoid pack-transfer failures against a partially-synced
+  remote.  Both Taurus and Asus runners now mirror every `dev` push and
+  every release tag to `github.com/microgeni/haiku-claude-cli` reliably.
+- **Runner portability** — CI build script now auto-installs missing devel
+  packages (`curl_devel`, `nlohmann_json`, `openssl3_devel`, `libedit_devel`)
+  and makes the `file` command optional so the pipeline works on any Haiku
+  runner without manual setup.
+- **`GH_DEPLOY_KEY` secret** — key is now stored base64-encoded in Gitea
+  and decoded at runtime, preventing newline corruption on multi-line SSH
+  private keys.
+
+### Changed
+
+- **CI runners** — both workflows use `runs-on: haiku` so jobs are picked
+  up by whichever of Taurus or Asus is available.
+
 ## [1.7.2] - 2026-07-18
 
 ### Changed
