@@ -28,8 +28,9 @@ jobs:
         run: |
           echo "Commit: $(git rev-parse HEAD)"
           echo "Tests file: $(wc -l < ci_scripts/test.sh) lines, async_features: $(wc -l < tests/async_features_test.sh) lines"
-          # Hard-sync tracked files to HEAD in case checkout was partial
-          git checkout -- .
+          echo "config.cpp: $(wc -l < src/config.cpp) lines"
+          # Force all tracked files to exactly match HEAD
+          git reset --hard HEAD
 
       - name: Build
         run: /bin/bash ./ci_scripts/build.sh
