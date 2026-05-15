@@ -424,39 +424,44 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// ASCII art logo — a glowing amber orb with a vertical cursor inside,
 	// matching the application icon (dark glass dome + orange glow + cursor).
 	if (tui::ColorEnabled()) {
-		// Color codes:
-		//   DIM_GRAY   = bezel / outer ring
-		//   DARK_AMBER = deep dome background
-		//   MID_AMBER  = mid glow
-		//   BRIGHT_AMB = bright inner glow
-		//   CURSOR     = the white/cream vertical bar (the "eye")
-		//   RESET      = SGR reset
-		#define DIM_GRAY    "\x1b[38;2;90;90;98m"
-		#define DARK_AMBER  "\x1b[38;2;60;28;4m"
-		#define MID_AMBER   "\x1b[38;2;180;80;10m"
-		#define BRIGHT_AMB  "\x1b[38;2;255;140;26m"
-		#define HOT_AMB     "\x1b[38;2;255;200;80m"
-		#define CURSOR_COL  "\x1b[38;2;255;245;200m"
-		#define RESET       "\x1b[0m"
+		#define G  "\x1b[38;2;100;100;110m"   // gray bezel
+		#define D  "\x1b[38;2;50;22;2m"        // dark dome
+		#define M  "\x1b[38;2;175;78;8m"       // mid amber
+		#define B  "\x1b[38;2;255;138;24m"     // bright amber
+		#define H  "\x1b[38;2;255;200;75m"     // hot amber
+		#define C  "\x1b[38;2;255;248;210m"    // cursor/cream
+		#define R  "\x1b[0m"
+		//
+		// Circle outline (10 rows, 2:1 aspect — width ≈ 2× height):
+		//   row 0:  indent 10, width 20   ╭──────────────────╮
+		//   row 1:  indent  8, width 26   ╭─ <24 chars> ─╮
+		//   row 2:  indent  6, width 30   ╭─ <28 chars> ─╮
+		//   row 3:  indent  5, width 32   ╭  <30 chars>  ╮
+		//   row 4:  indent  4, width 34   ╭  <32 chars>  ╮  (cursor row 1)
+		//   row 5:  indent  4, width 34   │  <32 chars>  │  (cursor row 2)
+		//   row 6:  indent  4, width 34   ╰  <32 chars>  ╯
+		//   row 7:  indent  5, width 32   ╰  <30 chars>  ╯
+		//   row 8:  indent  6, width 30   ╰─ <28 chars> ─╯
+		//   row 9:  indent  8, width 26   ╰─────────────────────────╯
 		std::cout
-		<< DIM_GRAY  "          .  ──────────────  .        " RESET "\n"
-		<< DIM_GRAY  "       ╭──" DARK_AMBER "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" DIM_GRAY "──╮     " RESET "\n"
-		<< DIM_GRAY  "     ╭─" DARK_AMBER "▓▓▓" MID_AMBER "▒▒▒▒▒▒▒▒▒▒▒▒" DARK_AMBER "▓▓▓" DIM_GRAY "─╮   " RESET "\n"
-		<< DIM_GRAY  "    ─" DARK_AMBER "▓▓" MID_AMBER "▒▒▒" BRIGHT_AMB "░░░░░░░░░░" MID_AMBER "▒▒▒" DARK_AMBER "▓▓" DIM_GRAY "─   " RESET "\n"
-		<< DIM_GRAY  "   ╭" DARK_AMBER "▓▓" MID_AMBER "▒▒" BRIGHT_AMB "░░░" HOT_AMB "▒▒" CURSOR_COL "▐█▌" HOT_AMB "▒▒" BRIGHT_AMB "░░░" MID_AMBER "▒▒" DARK_AMBER "▓▓" DIM_GRAY "╮  " RESET "\n"
-		<< DIM_GRAY  "   │" DARK_AMBER "▓▓" MID_AMBER "▒▒" BRIGHT_AMB "░░░" HOT_AMB "▒▒" CURSOR_COL "▐█▌" HOT_AMB "▒▒" BRIGHT_AMB "░░░" MID_AMBER "▒▒" DARK_AMBER "▓▓" DIM_GRAY "│  " RESET "\n"
-		<< DIM_GRAY  "   ╰" DARK_AMBER "▓▓" MID_AMBER "▒▒" BRIGHT_AMB "░░░░░░░░░░░░░" MID_AMBER "▒▒" DARK_AMBER "▓▓" DIM_GRAY "╯  " RESET "\n"
-		<< DIM_GRAY  "    ─" DARK_AMBER "▓▓" MID_AMBER "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" DARK_AMBER "▓▓" DIM_GRAY "─   " RESET "\n"
-		<< DIM_GRAY  "     ╰─" DARK_AMBER "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" DIM_GRAY "─╯   " RESET "\n"
-		<< DIM_GRAY  "       ╰──" DIM_GRAY "─────────────────" DIM_GRAY "──╯     " RESET "\n"
+		<< "          " G "╭──────────────────╮"                                           R "\n"
+		<< "        " G "╭─" D "░░░░░░░░░░░░░░░░░░░░░░" G "─╮"                            R "\n"
+		<< "      " G "╭─" D "░░" M "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" D "░░" G "─╮"                  R "\n"
+		<< "     " G "╭" D "░░" M "▒▒▒" B "▓▓▓▓▓▓▓▓▓▓▓▓▓▓" M "▒▒▒" D "░░" G "╮"        R "\n"
+		<< "    " G "╭" D "░" M "▒▒" B "▓▓▓" H "████" C "▐█▌" H "████" B "▓▓▓" M "▒▒" D "░" G "╮" R "\n"
+		<< "    " G "│" D "░" M "▒▒" B "▓▓▓" H "████" C "▐█▌" H "████" B "▓▓▓" M "▒▒" D "░" G "│" R "\n"
+		<< "    " G "╰" D "░" M "▒▒" B "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" M "▒▒" D "░" G "╯"          R "\n"
+		<< "     " G "╰" D "░░" M "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" D "░░" G "╯"                   R "\n"
+		<< "      " G "╰─" D "░░░░░░░░░░░░░░░░░░░░░░" G "─╯"                             R "\n"
+		<< "        " G "╰─────────────────────────╯"                                      R "\n"
 		<< "\n";
-		#undef DIM_GRAY
-		#undef DARK_AMBER
-		#undef MID_AMBER
-		#undef BRIGHT_AMB
-		#undef HOT_AMB
-		#undef CURSOR_COL
-		#undef RESET
+		#undef G
+		#undef D
+		#undef M
+		#undef B
+		#undef H
+		#undef C
+		#undef R
 	}
 
 	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
