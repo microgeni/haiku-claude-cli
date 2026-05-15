@@ -421,46 +421,50 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
-	// ASCII art logo — a glowing amber orb with a vertical cursor inside,
-	// matching the application icon (dark glass dome + orange glow + cursor).
+	// ASCII art logo — matches the application icon: dark glass dome with
+	// metallic bezel, strong amber radial glow, and a tall bright cursor bar.
 	if (tui::ColorEnabled()) {
-		#define G  "\x1b[38;2;100;100;110m"   // gray bezel
-		#define D  "\x1b[38;2;50;22;2m"        // dark dome
-		#define M  "\x1b[38;2;175;78;8m"       // mid amber
-		#define B  "\x1b[38;2;255;138;24m"     // bright amber
-		#define H  "\x1b[38;2;255;200;75m"     // hot amber
-		#define C  "\x1b[38;2;255;248;210m"    // cursor/cream
+		// The icon has:
+		//   • Metallic gray outer ring (bezel)
+		//   • Very dark glass dome interior
+		//   • Strong warm amber/orange radial glow filling most of the dome
+		//   • A tall narrow bright cursor (rect 24×56px in a 256px circle —
+		//     roughly 1/5 wide, 2/5 tall of the circle diameter)
+		//   • Faint white reflection arc at top of dome
+		#define BZ "\x1b[38;2;110;110;118m"   // bezel (metallic gray)
+		#define DK "\x1b[38;2;18;14;10m"       // dark dome (near-black)
+		#define G1 "\x1b[38;2;90;38;4m"        // glow layer 1 (deep amber)
+		#define G2 "\x1b[38;2;185;80;8m"       // glow layer 2 (mid amber)
+		#define G3 "\x1b[38;2;248;138;22m"     // glow layer 3 (bright orange)
+		#define G4 "\x1b[38;2;255;195;65m"     // glow layer 4 (hot amber)
+		#define CU "\x1b[38;2;255;250;215m"    // cursor (warm white/cream)
+		#define RF "\x1b[38;2;160;155;170m"    // top reflection (pale gray)
 		#define R  "\x1b[0m"
-		//
-		// Circle outline (10 rows, 2:1 aspect — width ≈ 2× height):
-		//   row 0:  indent 10, width 20   ╭──────────────────╮
-		//   row 1:  indent  8, width 26   ╭─ <24 chars> ─╮
-		//   row 2:  indent  6, width 30   ╭─ <28 chars> ─╮
-		//   row 3:  indent  5, width 32   ╭  <30 chars>  ╮
-		//   row 4:  indent  4, width 34   ╭  <32 chars>  ╮  (cursor row 1)
-		//   row 5:  indent  4, width 34   │  <32 chars>  │  (cursor row 2)
-		//   row 6:  indent  4, width 34   ╰  <32 chars>  ╯
-		//   row 7:  indent  5, width 32   ╰  <30 chars>  ╯
-		//   row 8:  indent  6, width 30   ╰─ <28 chars> ─╯
-		//   row 9:  indent  8, width 26   ╰─────────────────────────╯
+		// Each line: bezel chars frame the circle, interior fills with
+		// radial glow layers. Cursor bar spans 2 rows at the centre.
+		// Circle is ~11 rows × 32 cols (2:1 aspect for terminal fonts).
 		std::cout
-		<< "          " G "╭──────────────────╮"                                           R "\n"
-		<< "        " G "╭─" D "░░░░░░░░░░░░░░░░░░░░░░" G "─╮"                            R "\n"
-		<< "      " G "╭─" D "░░" M "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" D "░░" G "─╮"                  R "\n"
-		<< "     " G "╭" D "░░" M "▒▒▒" B "▓▓▓▓▓▓▓▓▓▓▓▓▓▓" M "▒▒▒" D "░░" G "╮"        R "\n"
-		<< "    " G "╭" D "░" M "▒▒" B "▓▓▓" H "████" C "▐█▌" H "████" B "▓▓▓" M "▒▒" D "░" G "╮" R "\n"
-		<< "    " G "│" D "░" M "▒▒" B "▓▓▓" H "████" C "▐█▌" H "████" B "▓▓▓" M "▒▒" D "░" G "│" R "\n"
-		<< "    " G "╰" D "░" M "▒▒" B "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" M "▒▒" D "░" G "╯"          R "\n"
-		<< "     " G "╰" D "░░" M "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" D "░░" G "╯"                   R "\n"
-		<< "      " G "╰─" D "░░░░░░░░░░░░░░░░░░░░░░" G "─╯"                             R "\n"
-		<< "        " G "╰─────────────────────────╯"                                      R "\n"
+		<< "           " BZ  "╭────────────────────╮"                                                    R "\n"
+		<< "        " BZ "╭──" DK "▄" RF "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀" DK "▄" BZ "──╮"                         R "\n"
+		<< "      " BZ "╭─" DK "█" G1 "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" DK "█" BZ "─╮"                         R "\n"
+		<< "     " BZ "╭" DK "█" G1 "▓▓" G2 "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" G1 "▓▓" DK "█" BZ "╮"               R "\n"
+		<< "    " BZ "╭" DK "█" G1 "▓" G2 "▒▒" G3 "░░░░░░░░░░░░░░" G2 "▒▒" G1 "▓" DK "█" BZ "╮"    R "\n"
+		<< "   " BZ "╭" DK "█" G1 "▓" G2 "▒" G3 "░░" G4 "▄▄" CU "▐████▌" G4 "▄▄" G3 "░░" G2 "▒" G1 "▓" DK "█" BZ "╮" R "\n"
+		<< "   " BZ "│" DK "█" G1 "▓" G2 "▒" G3 "░░" G4 "██" CU "▐████▌" G4 "██" G3 "░░" G2 "▒" G1 "▓" DK "█" BZ "│" R "\n"
+		<< "   " BZ "╰" DK "█" G1 "▓" G2 "▒" G3 "░░" G4 "▀▀" CU "▐████▌" G4 "▀▀" G3 "░░" G2 "▒" G1 "▓" DK "█" BZ "╯" R "\n"
+		<< "    " BZ "╰" DK "█" G1 "▓" G2 "▒▒" G3 "░░░░░░░░░░░░░░" G2 "▒▒" G1 "▓" DK "█" BZ "╯"    R "\n"
+		<< "     " BZ "╰" DK "█" G1 "▓▓" G2 "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" G1 "▓▓" DK "█" BZ "╯"               R "\n"
+		<< "      " BZ "╰─" DK "█" G1 "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" DK "█" BZ "─╯"                         R "\n"
+		<< "        " BZ "╰──────────────────────────╯"                                                  R "\n"
 		<< "\n";
-		#undef G
-		#undef D
-		#undef M
-		#undef B
-		#undef H
-		#undef C
+		#undef BZ
+		#undef DK
+		#undef G1
+		#undef G2
+		#undef G3
+		#undef G4
+		#undef CU
+		#undef RF
 		#undef R
 	}
 
