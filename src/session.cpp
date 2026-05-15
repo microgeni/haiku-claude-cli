@@ -421,60 +421,26 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
-	// ASCII art logo — matches the application icon: dark glass dome with
-	// metallic bezel, strong amber radial glow, and a tall bright cursor bar.
+	// ASCII art logo — Braille-dot art of the Claude icon.
 	if (tui::ColorEnabled()) {
-		#define BZ "\x1b[38;2;112;112;122m"   // bezel (metallic gray)
-		#define BS "\x1b[38;2;55;55;62m"       // bezel shadow (darker)
-		#define DK "\x1b[38;2;16;12;8m"        // dark dome (near-black)
-		#define G1 "\x1b[38;2;80;32;3m"        // glow layer 1 (deep amber)
-		#define G2 "\x1b[38;2;175;72;6m"       // glow layer 2 (mid amber)
-		#define G3 "\x1b[38;2;248;132;18m"     // glow layer 3 (bright orange)
-		#define G4 "\x1b[38;2;255;192;58m"     // glow layer 4 (hot amber)
-		#define CU "\x1b[38;2;255;250;210m"    // cursor (warm cream/white)
-		#define RF "\x1b[38;2;148;144;162m"    // top reflection (pale)
-		#define R  "\x1b[0m"
-		// Geometry (11 rows, 2:1 aspect correction):
-		// row  0: indent=11, content=10  (top cap)
-		// row  1: indent= 8, content=16
-		// row  2: indent= 7, content=18
-		// row  3: indent= 6, content=20
-		// rows 4-6: indent=5, content=22 (equator — cursor here)
-		// row  7: indent= 6, content=20
-		// row  8: indent= 7, content=18
-		// row  9: indent= 8, content=16
-		// row 10: indent=11, content=10  (bottom cap)
+		#define O "\x1b[38;2;255;138;24m"   // orange/amber
+		#define R "\x1b[0m"
 		std::cout
-		//          bezel  |<--- content=10 --->|  bezel
-		<< "           " BZ "╭" BS "────────" BZ "╮"                                                                                R "\n"
-		//       bezel  |<-------- content=16 -------->|  bezel
-		<< "        " BZ "╭─" DK "▄" RF "▀▀▀▀▀▀▀▀▀▀▀▀" DK "▄" BZ "─╮"                                                             R "\n"
-		//     bezel  |<---------- content=18 ---------->|  bezel
-		<< "      " BZ "╭─" DK "█" G1 "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" DK "█" BZ "─╮"                                                           R "\n"
-		//    bezel  |<------------ content=20 ------------>|  bezel
-		<< "     " BZ "╭" DK "█" G1 "▓▓" G2 "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" G1 "▓▓" DK "█" BZ "╮"                                             R "\n"
-		//   bezel  |<-------------- content=22 -------------->|  bezel
-		<< "    " BZ "╭" DK "█" G1 "▓" G2 "▒▒" G3 "░░" G4 "▄▄" CU "▐████▌" G4 "▄▄" G3 "░░" G2 "▒▒" G1 "▓" DK "█" BZ "╮"        R "\n"
-		<< "    " BZ "│" DK "█" G1 "▓" G2 "▒▒" G3 "░░" G4 "██" CU "▐████▌" G4 "██" G3 "░░" G2 "▒▒" G1 "▓" DK "█" BZ "│"         R "\n"
-		<< "    " BZ "╰" DK "█" G1 "▓" G2 "▒▒" G3 "░░" G4 "▀▀" CU "▐████▌" G4 "▀▀" G3 "░░" G2 "▒▒" G1 "▓" DK "█" BZ "╯"        R "\n"
-		//     bezel  |<------------ content=20 ------------>|  bezel
-		<< "     " BZ "╰" DK "█" G1 "▓▓" G2 "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒" G1 "▓▓" DK "█" BZ "╯"                                             R "\n"
-		//      bezel  |<---------- content=18 ---------->|  bezel
-		<< "      " BZ "╰─" DK "█" G1 "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓" DK "█" BZ "─╯"                                                           R "\n"
-		//         bezel  |<-------- content=16 -------->|  bezel
-		<< "        " BZ "╰─" DK "▀" DK "▄▄▄▄▄▄▄▄▄▄▄▄" DK "▀" BZ "─╯"                                                             R "\n"
-		//           bezel  |<--- content=10 --->|  bezel
-		<< "           " BZ "╰" BS "────────" BZ "╯"                                                                                R "\n"
+		<< O "⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣶⣶⣶⣶⣤⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀" R "\n"
+		<< O "⠀⠀⠀⠀⢀⣤⣾⣿⣿⣿⣿⡿⠿⠿⢿⣿⣿⣿⣿⣷⣤⡀⠀⠀⠀⠀" R "\n"
+		<< O "⠀⠀⠀⣴⣿⣿⣿⠟⠋⣻⣤⣤⣤⣤⣤⣄⣉⠙⠻⣿⣿⣿⣦⠀⠀⠀" R "\n"
+		<< O "⠀⢀⣾⣿⣿⣿⣇⣤⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⣶⣿⣿⣿⣿⣷⡀⠀" R "\n"
+		<< O "⠀⣾⣿⣿⣿⣿⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣷⠀" R "\n"
+		<< O "⢠⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⢀⣤⣤⡀⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⡄" R "\n"
+		<< O "⢸⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⣿⣿⣿⣿⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⡇" R "\n"
+		<< O "⠘⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠈⠛⠛⠁⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⠃" R "\n"
+		<< O "⠀⢿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⣿⣿⣿⣿⣿⡿⠀" R "\n"
+		<< O "⠀⠈⢿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿⡿⠁⠀" R "\n"
+		<< O "⠀⠀⠀⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⠀⠀⠀" R "\n"
+		<< O "⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀" R "\n"
+		<< O "⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠛⠿⠿⠿⠿⠛⠛⠋⠁⠀⠀⠀⠀⠀⠀⠀" R "\n"
 		<< "\n";
-		#undef BZ
-		#undef BS
-		#undef DK
-		#undef G1
-		#undef G2
-		#undef G3
-		#undef G4
-		#undef CU
-		#undef RF
+		#undef O
 		#undef R
 	}
 
