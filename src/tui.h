@@ -79,7 +79,10 @@ void ResumeFlushTimer();
 void SuspendScrollRegion();
 void RestoreScrollRegion();
 
-// Set to true by FlushTurnOutput when the turn-done callback fires.
+// Signal whether libedit is currently blocked in poll() (idle).
+// The flush timer only writes to the terminal when this is true,
+// preventing races with libedit's own terminal output.
+extern std::atomic<bool> g_libedit_polling;
 // Read by bracketed_getc in repl.cpp to inject a synthetic Enter
 // (only when the edit buffer is empty) so the main loop drains the
 // result without waiting for a real keypress. Cleared by the main

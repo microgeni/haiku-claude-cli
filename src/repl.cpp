@@ -96,20 +96,16 @@ bool           g_saved_termios_valid = false;
 // Returns EOF on real EOF or unrecoverable error.
 static int raw_getc_or_wake(FILE* f) {
     while (true) {
-        const int stdin_fd   = fileno(f);
-        const int wake_fd    = g_wake_pipe[0];
+        const int stdin_fd = fileno(f);
+        const int wake_fd  = g_wake_pipe[0];
 
         if (wake_fd < 0) {
-            // No wake pipe — fall back to plain fgetc.
             int c;
             do { c = fgetc(f); } while (c == EOF && errno == EINTR);
             return c;
         }
 
-        // When stdin is blocked for SelectOption(), only poll the wake
-        // pipe so we never race with SelectOption's read() on the same fd.
         const bool blocked = g_stdin_blocked.load();
-        const int  nfds    = blocked ? 1 : 2;
 
         struct pollfd pfds[2];
         pfds[0].fd      = stdin_fd;
@@ -118,14 +114,36 @@ static int raw_getc_or_wake(FILE* f) {
         pfds[1].fd      = wake_fd;
         pfds[1].events  = POLLIN;
         pfds[1].revents = 0;
+        const int nfds = blocked ? 1 : 2;
 
-        const int r = ::poll(pfds + (blocked ? 1 : 0), nfds, -1);
+        // Use a 16ms timeout so the main thread can flush streaming
+        // output periodically without needing the timer thread to write
+        // to the terminal concurrently with libedit. A real keystroke
+        // wakes poll() immediately — zero added latency.
+        const int r = ::poll(pfds + (blocked ? 1 : 0), nfds, 16);
         if (r < 0) {
             if (errno == EINTR) continue;
             return EOF;
         }
 
-        // Wake pipe fired — drain it, flush output, maybe inject '\r'.
+        // Timeout — flush pending output (safe: libedit is idle) and loop.
+        if (r == 0) {
+            tui::FlushTurnOutput();
+            if (tui::g_turn_just_completed.load() && rl_end == 0) {
+                tui::g_turn_just_completed.store(false);
+                return '\r';
+            }
+            tui::g_turn_just_completed.store(false);
+            continue;
+        }
+
+        // One or both fds are ready. Flush output first if wake pipe fired
+        // OR if there is pending output (timer may have written since last
+        // flush). Then read a keystroke if stdin is ready.
+        // Flushing before reading ensures libedit's echo starts from the
+        // correct cursor position restored by DECRC.
+        bool stdin_ready = !blocked && (pfds[0].revents & POLLIN);
+
         const struct pollfd& wake_pfd = pfds[1];
         if (wake_pfd.revents & (POLLIN | POLLHUP)) {
             char discard[64];
@@ -136,28 +154,21 @@ static int raw_getc_or_wake(FILE* f) {
                 return '\r';
             }
             tui::g_turn_just_completed.store(false);
-            // If an edit-buffer clear was requested (e.g. after a tool
-            // permission menu dismissed), do it now while we hold the
-            // readline thread context.  rl_event_hook is NOT used
-            // (it breaks rl_getc_function on Haiku libedit — see comment
-            // in Init()), so this is the only safe place to clear.
             if (!g_stdin_blocked.load() && g_clear_edit_buffer_requested.exchange(false)) {
                 rl_replace_line("", 0);
                 rl_point = 0;
             }
-            // POLLHUP without POLLIN means the write-end was closed — this
-            // should never happen (parent always holds g_wake_pipe[1]) but
-            // if it does, sleep briefly to avoid a tight spin loop before
-            // Deinit() closes g_wake_pipe[0] and terminates readline().
             if (!(wake_pfd.revents & POLLIN)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            // If stdin is also ready and not blocked, fall through to read it.
-            if (blocked || !(pfds[0].revents & POLLIN)) continue;
+        } else {
+            // No wake, but flush any output that accumulated since last cycle
+            // so the cursor is correct before libedit echoes the keystroke.
+            tui::FlushTurnOutput();
         }
 
-        // Stdin ready — read only when not blocked for SelectOption().
-        if (!blocked && (pfds[0].revents & POLLIN)) {
+        // Stdin ready — return the keystroke immediately after flushing.
+        if (stdin_ready) {
             unsigned char buf;
             const ssize_t n = ::read(stdin_fd, &buf, 1);
             if (n == 1) return static_cast<int>(buf);
@@ -165,6 +176,7 @@ static int raw_getc_or_wake(FILE* f) {
             if (errno == EINTR || errno == EAGAIN) continue;
             return EOF;
         }
+        continue;
     }
 }
 
@@ -222,23 +234,8 @@ static bool consume_until(FILE* f, const char* seq, std::string& buf) {
 //
 // This ensures every byte of any CSI sequence that isn't \e[200~ is
 // faithfully preserved in g_paste_buf and replayed to libedit.
-extern "C" int bracketed_getc(FILE* f) {
-    // If we have buffered paste characters, drain them first.
-    if (g_paste_pos < g_paste_buf.size())
-        return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
-
-    // Ensure CR and LF are not translated by the kernel so Enter (0x0D)
-    // and Ctrl+J (0x0A) are distinguishable. Libedit sets ICRNL/INLCR
-    // in its termios; we clear them here on the first real read, after
-    // libedit has finished its own termios setup.
+static int bracketed_getc_impl(FILE* f) {
     fix_cr_lf_translation();
-
-    // Flush any pending worker output to the scroll region before
-    // blocking on read. This is the safe window: libedit has finished
-    // its previous redraw and will not touch the terminal until after
-    // this read returns. DECSC/DECRC in FlushTurnOutput() preserves
-    // libedit's cursor on the input row.
-    tui::FlushTurnOutput();
 
     // If the flush timer detected the turn just completed, return a
     // synthetic '\r' (Enter) so ReadMessage() returns an empty line
@@ -413,7 +410,7 @@ extern "C" int bracketed_getc(FILE* f) {
             // (we're not in a loop), so recurse once.  Stack depth is
             // bounded because a second CPR in a row is astronomically
             // unlikely and only real input follows.
-            return bracketed_getc(f);
+            return bracketed_getc_impl(f);
         }
     }
 
@@ -425,6 +422,10 @@ extern "C" int bracketed_getc(FILE* f) {
     g_paste_buf.append(acc);
     g_paste_pos = 0;
     return '\x1b';
+}
+
+extern "C" int bracketed_getc(FILE* f) {
+    return bracketed_getc_impl(f);
 }
 
 } // anon namespace
@@ -643,6 +644,7 @@ void Init(const std::string& history_file) {
 	// rl_getc_function entirely.  The edit-buffer clear that used to
 	// live in rl_event_hook is handled in raw_getc_or_wake() instead.
 	rl_getc_function = bracketed_getc;
+
 
 	if (!g_history_file.empty()) {
 		paths::EnsureParentDir(g_history_file);
