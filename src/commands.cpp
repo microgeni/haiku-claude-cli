@@ -116,9 +116,9 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 	if (cmd == "/help" || cmd == "/?") {
 		std::cout << tui::Meta(
 			"multi-line input:\n"
-			"  \\ + Enter          new line (works everywhere, including SSH)\n"
-			"  Ctrl+J             new line (local terminal)\n"
-			"  Alt+Enter          new line (local terminal)\n"
+			"  \\ + Enter          new line (works everywhere)\n"
+			"  Ctrl+J             new line\n"
+			"  Shift+Enter        new line (kitty / WezTerm / foot / Ghostty)\n"
 			"\n"
 			"slash commands:\n"
 			"  /help              this list\n"

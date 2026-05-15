@@ -20,6 +20,7 @@
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
+#include <vector>
 
 #include <editline/readline.h>
 
@@ -128,6 +129,17 @@ int  g_turn_col     = 1;
 // ReadMessage(). Cleared by EndTurn().
 std::function<bool()> g_turn_done_check;
 
+// Extra rows currently allocated to the expanding multi-line input area.
+// Declared here (before FlushTurnOutput) so the scroll_bottom
+// calculation in FlushTurnOutput can account for the expanded geometry.
+// Managed by ExpandInputArea() and CollapseInputArea().
+int g_extra_input_rows = 0;
+
+// Completed continuation lines accumulated during multi-line input.
+// ExpandInputArea() appends each line here so the block can be
+// repainted correctly on every expansion (oldest line at index 0).
+std::vector<std::string> g_completed_lines;
+
 } // namespace
 
 // Exposed so session.cpp can clear it at the top of the main loop.
@@ -174,7 +186,11 @@ void FlushTurnOutput() {
 
 	// Simulate cursor movement through chunk to update g_turn_col/row.
 	const int rows = TerminalRows();
-	const int scroll_bottom = rows > 4 ? rows - 4 : rows - 1;
+	// scroll_bottom shrinks when the input area is expanded for multi-line
+	// input (g_extra_input_rows > 0).
+	const int scroll_bottom = rows > (4 + g_extra_input_rows)
+		? rows - 4 - g_extra_input_rows
+		: rows - 1;
 
 	// On the very first flush, start at scroll-region bottom col 1.
 	if (!g_turn_started) {
@@ -487,6 +503,12 @@ void SetStatusBar(const std::string& status) {
 void RedrawStatusBar() {
 	if (!g_status_bar_active) return;
 	refresh_dims();
+
+	// On resize the expanded input area is lost (terminal reflow).
+	// Reset so geometry is consistent with a fresh single-row input.
+	g_extra_input_rows = 0;
+	g_completed_lines.clear();
+
 	apply_scroll_region(g_cached_term_rows);
 	draw_fixed_frame(g_cached_term_rows, g_cached_term_cols, g_status_bar_text);
 
@@ -549,22 +571,23 @@ void EmitChatRule() {
 
 void PositionCursorForInput() {
 	// Move cursor to the fixed input row (N-2) so libedit can draw
-	// the "> " prompt there. This row is outside the scroll region.
+	// the prompt there. This row never moves regardless of how many
+	// continuation lines are in the expanded area above it.
 	// Uses DirectWrite so it works even during an active turn.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int input_row = g_cached_term_rows - 2; // N-2 (fixed)
+	const int input_row = g_cached_term_rows - 2; // N-2, always fixed
 	DirectWrite("\x1b[" + std::to_string(input_row) + ";1H\x1b[2K");
 }
 
 void ClearInputRow() {
-	// Erase the fixed input row (N-2) ready for libedit to redraw.
+	// Erase the fixed input row (N-2).
 	// Uses DirectWrite so it works even during an active turn.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int input_row = g_cached_term_rows - 2; // N-2
+	const int input_row = g_cached_term_rows - 2; // N-2, always fixed
 	DirectWrite("\x1b[" + std::to_string(input_row) + ";1H\x1b[2K");
 }
 
@@ -574,18 +597,148 @@ void RepaintInputRow(const std::string& prompt) {
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int input_row = g_cached_term_rows - 2; // N-2
+	const int input_row = g_cached_term_rows - 2; // N-2, always fixed
 	DirectWrite("\x1b[" + std::to_string(input_row) + ";1H\x1b[2K" + prompt);
 }
 
 void PositionCursorForChat() {
-	// Move cursor to the scroll-region bottom (N-4) so spinner and
-	// response output scrolls into chat history above the fixed frame.
+	// Move cursor to the scroll-region bottom so spinner and response
+	// output scrolls into chat history above the fixed frame.
+	// The scroll-region bottom shrinks when the input area is expanded
+	// (g_extra_input_rows > 0), so we compute it dynamically.
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();
 	if (g_cached_term_rows < kStatusBarRows + 1) return;
-	const int chat_bottom = g_cached_term_rows - kStatusBarRows; // N-4
+	const int chat_bottom = g_cached_term_rows - kStatusBarRows - g_extra_input_rows;
 	std::cout << "\x1b[" << chat_bottom << ";1H" << std::flush;
+}
+
+// Expand the input area upward by one row for a new continuation line.
+// Called by repl::ReadMessage() after each soft-newline.
+//
+// The input row (N-2) stays FIXED — libedit always draws there.
+// Each expansion shifts the top separator one row higher and inserts
+// the just-completed line in the slot immediately above the input row.
+//
+// Layout with `extra` completed lines:
+//   rows 1..(N-4-extra)       : scroll region  (shrinks upward)
+//   row  (N-3-extra)          : top separator ───
+//   rows (N-2-extra)..(N-3)   : completed lines (oldest→newest, top→bottom)
+//   row  (N-2)                : active input row  ← libedit, never moves
+//   row  (N-1)                : bottom separator
+//   row  (N)                  : status bar
+void ExpandInputArea(const std::string& completedLine) {
+	if (!g_status_bar_active) return;
+	if (!g_color_enabled) return;
+	if (g_term_dirty) refresh_dims();
+	const int rows = g_cached_term_rows;
+	const int cols = g_cached_term_cols;
+	if (rows < kStatusBarRows + 2) return; // too small to expand
+
+	// Check there is room for one more row before committing.
+	const int new_extra         = g_extra_input_rows + 1;
+	const int new_chat_bottom   = rows - kStatusBarRows - new_extra;
+	const int new_separator_row = new_chat_bottom + 1;
+
+	if (new_chat_bottom < 1 || new_separator_row < 1) return; // no room
+
+	// Store the completed line and commit the counter.
+	g_completed_lines.push_back(completedLine);
+	g_extra_input_rows = new_extra;
+
+	const int input_row = rows - 2; // N-2, fixed
+
+	// Build the horizontal rule.
+	std::string rule;
+	rule.reserve(cols * 3);
+	for (int i = 0; i < cols; ++i) rule += "\xE2\x94\x80"; // ─
+
+	std::string out;
+	out.reserve(512 + cols * 6);
+	out += "\x1b""7"; // DECSC
+
+	// Repaint the entire completed-lines block from scratch.
+	// First blank every row between the new separator and the input row,
+	// then write the completed lines.  This handles the case where
+	// a previous expansion left stale content in rows that are now
+	// above the lines block.
+	for (int r = new_separator_row + 1; r < input_row; ++r) {
+		out += "\x1b[" + std::to_string(r) + ";1H\x1b[2K";
+	}
+	// Line i goes on row (new_separator_row + 1 + i).
+	for (int i = 0; i < (int)g_completed_lines.size(); ++i) {
+		const int r = new_separator_row + 1 + i;
+		out += "\x1b[" + std::to_string(r) + ";1H\x1b[2K";
+		out += "\x1b[2m\xC2\xB7 ";  // dim "· "
+		out += g_completed_lines[i];
+		out += "\x1b[0m";
+	}
+
+	// Draw the top separator at its new (higher) position.
+	out += "\x1b[" + std::to_string(new_separator_row) + ";1H\x1b[2K";
+	out += Muted(rule);
+
+	// Clear the input row so libedit starts with a blank line.
+	out += "\x1b[" + std::to_string(input_row) + ";1H\x1b[2K";
+
+	// Shrink the scroll region.
+	out += "\x1b[1;" + std::to_string(new_chat_bottom) + "r";
+
+	out += "\x1b""8"; // DECRC
+	DirectWrite(out);
+
+	if (g_turn_started && g_turn_row2 > new_chat_bottom)
+		g_turn_row2 = new_chat_bottom;
+}
+
+// Collapse the expanded input area back to the single default input row.
+// Called by repl::ReadMessage() after the user sends (Enter) or cancels.
+// Clears every expanded row, redraws the top separator at its canonical
+// position (N-3), and restores the full DECSTBM scroll region.
+void CollapseInputArea() {
+	if (!g_status_bar_active) return;
+	if (g_extra_input_rows == 0) return;
+	if (g_term_dirty) refresh_dims();
+	const int rows = g_cached_term_rows;
+	const int cols = g_cached_term_cols;
+	if (rows < kStatusBarRows + 1) {
+		g_extra_input_rows = 0;
+		return;
+	}
+
+	const int prev_extra              = g_extra_input_rows;
+	g_extra_input_rows                = 0;
+	g_completed_lines.clear();
+
+	const int canonical_chat_bottom   = rows - kStatusBarRows;   // N-4
+	const int canonical_separator_row = rows - 3;
+	const int canonical_input_row     = rows - 2;
+
+	std::string rule;
+	rule.reserve(cols * 3);
+	for (int i = 0; i < cols; ++i) rule += "\xE2\x94\x80"; // ─
+
+	std::string out;
+	out.reserve(256 + cols * 6);
+
+	out += "\x1b""7"; // DECSC
+
+	// Wipe every row in the expanded input area.
+	for (int r = canonical_separator_row - prev_extra; r <= canonical_input_row; ++r) {
+		out += "\x1b[" + std::to_string(r) + ";1H\x1b[2K";
+	}
+
+	// Redraw the canonical top separator and blank the input row.
+	out += "\x1b[" + std::to_string(canonical_separator_row) + ";1H\x1b[2K";
+	out += Muted(rule);
+	out += "\x1b[" + std::to_string(canonical_input_row) + ";1H\x1b[2K";
+
+	// Restore the full scroll region.
+	out += "\x1b[1;" + std::to_string(canonical_chat_bottom) + "r";
+
+	out += "\x1b""8"; // DECRC
+
+	DirectWrite(out);
 }
 
 void HideCursor() {

@@ -44,6 +44,24 @@ namespace {
 std::string g_paste_buf;
 size_t      g_paste_pos = 0;
 
+// Set once after libedit initialises its termios so that Enter (CR)
+// and Ctrl+J (LF) are distinguishable in bracketed_getc.
+// With ICRNL set, CR→LF so Enter and Ctrl+J both arrive as 0x0A.
+// With INLCR set, LF→CR so Ctrl+J arrives as 0x0D (same as Enter).
+// Clearing both flags keeps CR=0x0D (Enter) and LF=0x0A (Ctrl+J).
+bool g_cr_lf_fixed = false;
+
+void fix_cr_lf_translation() {
+    if (g_cr_lf_fixed) return;
+    if (!isatty(fileno(stdin))) return;
+    struct termios t;
+    if (tcgetattr(fileno(stdin), &t) == 0) {
+        t.c_iflag &= ~(ICRNL | INLCR);
+        tcsetattr(fileno(stdin), TCSANOW, &t);
+    }
+    g_cr_lf_fixed = true;
+}
+
 // Set to true by RequestClearEditBuffer(); consumed by raw_getc_or_wake()
 // when the wake pipe fires, replacing the old rl_event_hook mechanism
 // (which breaks rl_getc_function on Haiku libedit — see Init() comment).
@@ -209,6 +227,12 @@ extern "C" int bracketed_getc(FILE* f) {
     if (g_paste_pos < g_paste_buf.size())
         return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
 
+    // Ensure CR and LF are not translated by the kernel so Enter (0x0D)
+    // and Ctrl+J (0x0A) are distinguishable. Libedit sets ICRNL/INLCR
+    // in its termios; we clear them here on the first real read, after
+    // libedit has finished its own termios setup.
+    fix_cr_lf_translation();
+
     // Flush any pending worker output to the scroll region before
     // blocking on read. This is the safe window: libedit has finished
     // its previous redraw and will not touch the terminal until after
@@ -233,6 +257,17 @@ extern "C" int bracketed_getc(FILE* f) {
     const int c = raw_getc(f);
     if (c == EOF) return c;
 
+    // Ctrl+J (0x0A) — soft newline.
+    // After fix_cr_lf_translation() clears ICRNL/INLCR, Enter sends
+    // 0x0D and Ctrl+J sends 0x0A — they are now distinguishable.
+    if (c == '\x0a') {
+        g_paste_buf.clear();
+        g_paste_buf.push_back('\\');
+        g_paste_buf.push_back('\n');
+        g_paste_pos = 0;
+        return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
+    }
+
     // Fast path: not the start of an escape sequence.
     if (c != '\x1b') return c;
 
@@ -241,7 +276,29 @@ extern "C" int bracketed_getc(FILE* f) {
     if (c2 == EOF) return '\x1b';  // lone ESC
 
     if (c2 != '[') {
-        // Not a CSI sequence — return ESC now, stash c2 for next call.
+        // ESC followed by a non-CSI byte.
+        //
+        // Alt+Enter (the primary soft-newline key on Haiku Terminal)
+        // sends ESC \r (0x1B 0x0D).  We handle it here directly rather
+        // than relying on libedit's meta-keymap dispatch, because
+        // Haiku's libedit does not reliably route ESC-prefixed bytes
+        // through rl_bind_key_in_map(emacs_meta_keymap) when a custom
+        // rl_getc_function is installed.
+        //
+        // Inject the backslash-continuation wire format ("\\\n") into
+        // g_paste_buf so the next two bracketed_getc calls return '\'
+        // then '\n', which libedit sees as: insert '\', then accept
+        // line — exactly what soft_newline() does.
+        if (c2 == '\r' || c2 == '\n') {
+            g_paste_buf.clear();
+            g_paste_buf.push_back('\\');
+            g_paste_buf.push_back('\n');
+            g_paste_pos = 0;
+            return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
+        }
+
+        // Any other ESC+X sequence: return ESC now, stash c2 for the
+        // next call so libedit sees the full two-byte sequence.
         g_paste_buf.clear();
         g_paste_buf.push_back(static_cast<char>(c2));
         g_paste_pos = 0;
@@ -669,19 +726,33 @@ void Init(const std::string& history_file) {
 	// before read_history() to ensure rl_initialize() picks it up.
 	// See the comment above read_history() for the full explanation.
 
-	// Ctrl+J (0x0A) → soft newline: accept line with trailing '\' so
-	// ReadMessage() re-prompts via backslash-continuation.
-	//
-	// rl_bind_key('\n', ...) is unreliable in libedit's readline compat
-	// layer because 0x0A is hardwired as "accept-line" in libedit's
-	// internal keymap before the compat shim can intercept it.
-	// rl_set_key() with the explicit byte string is the correct API.
+	// Ctrl+J (0x0A) is handled directly in bracketed_getc() by injecting
+	// '\' + '\n' — so \n just needs to be plain accept-line here.
+	// Do NOT bind \x0a to soft_newline: bracketed_getc already prepends
+	// the '\', and soft_newline would add a second one (double backslash).
 	rl_add_defun("soft-newline", soft_newline, -1);
-	rl_set_key("\x0a", soft_newline, rl_get_keymap());  // Ctrl+J
 
-	// Alt+Enter (ESC \r in most terminals) → same action.
-	// emacs_meta_keymap lives at index 0x0D ('\r').
-	rl_bind_key_in_map('\r', soft_newline, emacs_meta_keymap);
+	// Alt+Enter sends plain 0x0D in Haiku Terminal — identical to Enter,
+	// so it cannot be distinguished and is not bound.
+	// Ctrl+J (0x0A) is handled directly in bracketed_getc() instead of
+	// via rl_set_key, because Haiku's libedit ignores rl_set_key bindings
+	// when a custom rl_getc_function is installed.
+
+	// Shift+Enter — two escape sequences depending on the terminal:
+	//
+	//   \x1b[13;2u   Kitty keyboard protocol (kitty, WezTerm, foot, Ghostty …)
+	//   \x1b[27;2;13~ modifyOtherKeys level 2 (xterm with CSI > 4 ; 2 m)
+	//
+	// Both are registered unconditionally; they only fire when the
+	// terminal actually sends them, so there is no conflict on
+	// terminals that don't support either protocol.
+	//
+	// NOTE: Haiku Terminal does not implement either protocol — it
+	// sends plain \r for Shift+Enter, identical to regular Enter,
+	// so there is no way to distinguish the two there. Use
+	// Ctrl+J or Alt+Enter on Haiku Terminal instead.
+	rl_set_key("\x1b[13;2u",    soft_newline, rl_get_keymap()); // Kitty
+	rl_set_key("\x1b[27;2;13~", soft_newline, rl_get_keymap()); // modifyOtherKeys
 
 	// Override libedit's word-break character set so only
 	// whitespace breaks words. libedit's default set includes
@@ -772,6 +843,10 @@ void SetSlashCommands(const std::vector<std::string>& names) {
 }
 
 bool ReadLine(const std::string& prompt, std::string& out) {
+	// Allow fix_cr_lf_translation() to re-apply on the first
+	// bracketed_getc call of each readline() invocation, since libedit
+	// resets termios at the start of every readline() call.
+	g_cr_lf_fixed = false;
 	const std::string wrapped = wrap_for_readline(prompt);
 	char* line = readline(wrapped.c_str());
 	if (!line) return false;
@@ -788,14 +863,17 @@ bool ReadMessage(const std::string& prompt,
 	std::string first;
 	if (!ReadLine(prompt, first)) return false;
 
-	// Fenced block: bare `"""` or `'''` on its own.
+	// Fenced block: bare `"""` or `'''` on its own line.
+	// The fenced-block mode does not expand the input area — each line
+	// is sent as-is inside the fence and the block can be arbitrarily
+	// long.  Expanding row-by-row for fenced input would scroll the
+	// scroll region off-screen, so we leave the frame unchanged.
 	if (first == "\"\"\"" || first == "'''") {
 		const std::string fence = first;
 		while (true) {
 			std::string next;
-			// Park the cursor back in the fixed input row (N-2) so
-			// libedit draws the continuation prompt there, not in the
-			// scroll region above it.
+			// Park the cursor back in the fixed input row so libedit
+			// draws the continuation prompt there, not in the scroll region.
 			tui::PositionCursorForInput();
 			if (!ReadLine(ContinuationPrompt, next)) {
 				return !out.empty();
@@ -806,27 +884,34 @@ bool ReadMessage(const std::string& prompt,
 		}
 	}
 
-	// Backslash continuation.
+	// Backslash continuation — each completed line expands the input
+	// area upward by one row so the user can see the full prompt.
 	if (!first.empty() && first.back() == '\\') {
 		first.pop_back();
 		out.append(first);
 		out.push_back('\n');
+		// Expand: show the completed first line above the new input row.
+		tui::ExpandInputArea(first);
 		while (true) {
 			std::string next;
-			// Park the cursor back in the fixed input row (N-2) so
-			// libedit draws the continuation prompt there, not in the
-			// scroll region above it.
+			// Position libedit at the (possibly raised) input row.
 			tui::PositionCursorForInput();
 			if (!ReadLine(ContinuationPrompt, next)) {
+				// EOF during continuation — collapse and return what we have.
+				tui::CollapseInputArea();
 				return true;
 			}
 			if (!next.empty() && next.back() == '\\') {
 				next.pop_back();
 				out.append(next);
 				out.push_back('\n');
+				// Expand again for the next continuation line.
+				tui::ExpandInputArea(next);
 				continue;
 			}
+			// Final line — collapse the expanded area and return.
 			out.append(next);
+			tui::CollapseInputArea();
 			return true;
 		}
 	}
