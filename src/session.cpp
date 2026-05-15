@@ -422,23 +422,30 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	}
 
 	// ASCII art logo — Braille-dot art of the Claude icon.
+	// Each Braille char renders as 2 columns in Haiku Terminal,
+	// so the art is 26×2 = 52 columns wide. Only show if it fits,
+	// and centre it in the terminal.
 	if (tui::ColorEnabled()) {
+		const int term_cols = tui::TerminalWidth();
+		const int art_cols  = 52; // 26 braille chars × 2 cols each
+		const int pad       = term_cols > art_cols ? (term_cols - art_cols) / 2 : 0;
+		const std::string indent(pad, ' ');
 		#define O "\x1b[38;2;255;138;24m"   // orange/amber
 		#define R "\x1b[0m"
 		std::cout
-		<< O "⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣶⣶⣶⣶⣤⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀" R "\n"
-		<< O "⠀⠀⠀⠀⢀⣤⣾⣿⣿⣿⣿⡿⠿⠿⢿⣿⣿⣿⣿⣷⣤⡀⠀⠀⠀⠀" R "\n"
-		<< O "⠀⠀⠀⣴⣿⣿⣿⠟⠋⣻⣤⣤⣤⣤⣤⣤⣟⠙⠻⣿⣿⣿⣦⠀⠀⠀" R "\n"
-		<< O "⠀⢀⣾⣿⣿⣿⣇⣤⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⣤⣸⣿⣿⣿⣷⡀⠀" R "\n"
-		<< O "⠀⣾⣿⣿⣿⣿⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣷⠀" R "\n"
-		<< O "⢠⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⡄" R "\n"
-		<< O "⢸⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⡇" R "\n"
-		<< O "⠘⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠘⠛⠛⠃⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⠃" R "\n"
-		<< O "⠀⢿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⣿⣿⣿⣿⣿⡿⠀" R "\n"
-		<< O "⠀⠈⢿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿⡿⠁⠀" R "\n"
-		<< O "⠀⠀⠀⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⠀⠀⠀" R "\n"
-		<< O "⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀" R "\n"
-		<< O "⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠛⠿⠿⠿⠿⠛⠛⠋⠁⠀⠀⠀⠀⠀⠀⠀" R "\n"
+		<< indent << O "⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣶⣶⣶⣶⣤⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀" R "\n"
+		<< indent << O "⠀⠀⠀⠀⢀⣤⣾⣿⣿⣿⣿⡿⠿⠿⢿⣿⣿⣿⣿⣷⣤⡀⠀⠀⠀⠀" R "\n"
+		<< indent << O "⠀⠀⠀⣴⣿⣿⣿⠟⠋⣻⣤⣤⣤⣤⣤⣤⣟⠙⠻⣿⣿⣿⣦⠀⠀⠀" R "\n"
+		<< indent << O "⠀⢀⣾⣿⣿⣿⣇⣤⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⣤⣸⣿⣿⣿⣷⡀⠀" R "\n"
+		<< indent << O "⠀⣾⣿⣿⣿⣿⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣷⠀" R "\n"
+		<< indent << O "⢠⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⡄" R "\n"
+		<< indent << O "⢸⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⡇" R "\n"
+		<< indent << O "⠘⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠘⠛⠛⠃⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⠃" R "\n"
+		<< indent << O "⠀⢿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⣿⣿⣿⣿⣿⡿⠀" R "\n"
+		<< indent << O "⠀⠈⢿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿⡿⠁⠀" R "\n"
+		<< indent << O "⠀⠀⠀⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⠀⠀⠀" R "\n"
+		<< indent << O "⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀" R "\n"
+		<< indent << O "⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠛⠿⠿⠿⠿⠛⠛⠋⠁⠀⠀⠀⠀⠀⠀⠀" R "\n"
 		<< "\n";
 		#undef O
 		#undef R
