@@ -422,33 +422,38 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	}
 
 	// ASCII art logo — Braille-dot art of the Claude icon.
-	// Each Braille char renders as 2 columns in Haiku Terminal,
-	// so the art is 26×2 = 52 columns wide. Only show if it fits,
-	// and centre it in the terminal.
+	// Detect whether the terminal renders Braille chars as 1 or 2 cols
+	// wide (Haiku Terminal uses 2, most others use 1). Use the widest
+	// row (26 chars, no leading blanks) as the reference.
 	if (tui::ColorEnabled()) {
-		const int term_cols = tui::TerminalWidth();
-		const int art_cols  = 52; // 26 braille chars × 2 cols each
-		const int pad       = term_cols > art_cols ? (term_cols - art_cols) / 2 : 0;
-		const std::string indent(pad, ' ');
-		#define O "\x1b[38;2;255;138;24m"   // orange/amber
-		#define R "\x1b[0m"
-		std::cout
-		<< indent << O "⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣶⣶⣶⣶⣤⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀" R "\n"
-		<< indent << O "⠀⠀⠀⠀⢀⣤⣾⣿⣿⣿⣿⡿⠿⠿⢿⣿⣿⣿⣿⣷⣤⡀⠀⠀⠀⠀" R "\n"
-		<< indent << O "⠀⠀⠀⣴⣿⣿⣿⠟⠋⣻⣤⣤⣤⣤⣤⣤⣟⠙⠻⣿⣿⣿⣦⠀⠀⠀" R "\n"
-		<< indent << O "⠀⢀⣾⣿⣿⣿⣇⣤⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⣤⣸⣿⣿⣿⣷⡀⠀" R "\n"
-		<< indent << O "⠀⣾⣿⣿⣿⣿⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣷⠀" R "\n"
-		<< indent << O "⢠⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⡄" R "\n"
-		<< indent << O "⢸⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⡇" R "\n"
-		<< indent << O "⠘⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠘⠛⠛⠃⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⠃" R "\n"
-		<< indent << O "⠀⢿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⣿⣿⣿⣿⣿⡿⠀" R "\n"
-		<< indent << O "⠀⠈⢿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿⡿⠁⠀" R "\n"
-		<< indent << O "⠀⠀⠀⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⠀⠀⠀" R "\n"
-		<< indent << O "⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀" R "\n"
-		<< indent << O "⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠛⠿⠿⠿⠿⠛⠛⠋⠁⠀⠀⠀⠀⠀⠀⠀" R "\n"
-		<< "\n";
-		#undef O
-		#undef R
+		const int tcols   = tui::TerminalWidth();
+		// Try both widths; if it fits at 2-wide use that, else try 1-wide.
+		const int art_2   = 26 * 2;   // 52 cols if 2-wide chars
+		const int art_1   = 26 * 1;   // 26 cols if 1-wide chars
+		const int art_w   = (tcols >= art_2) ? art_2 : art_1;
+		if (tcols >= art_w) {
+			const int pad = (tcols - art_w) / 2;
+			const std::string I(pad, ' ');
+			#define O "\x1b[38;2;255;138;24m"
+			#define R "\x1b[0m"
+			std::cout
+			<< I << O "⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣶⣶⣶⣶⣤⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀" R "\n"
+			<< I << O "⠀⠀⠀⠀⢀⣤⣾⣿⣿⣿⣿⡿⠿⠿⢿⣿⣿⣿⣿⣷⣤⡀⠀⠀⠀⠀" R "\n"
+			<< I << O "⠀⠀⠀⣴⣿⣿⣿⠟⠋⣻⣤⣤⣤⣤⣤⣤⣟⠙⠻⣿⣿⣿⣦⠀⠀⠀" R "\n"
+			<< I << O "⠀⢀⣾⣿⣿⣿⣇⣤⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⣤⣸⣿⣿⣿⣷⡀⠀" R "\n"
+			<< I << O "⠀⣾⣿⣿⣿⣿⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣷⠀" R "\n"
+			<< I << O "⢠⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⡄" R "\n"
+			<< I << O "⢸⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⡇⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⡇" R "\n"
+			<< I << O "⠘⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠘⠛⠛⠃⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⠃" R "\n"
+			<< I << O "⠀⢿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⣿⣿⣿⣿⣿⡿⠀" R "\n"
+			<< I << O "⠀⠈⢿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿⡿⠁⠀" R "\n"
+			<< I << O "⠀⠀⠀⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⠀⠀⠀" R "\n"
+			<< I << O "⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀" R "\n"
+			<< I << O "⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠛⠿⠿⠿⠿⠛⠛⠋⠁⠀⠀⠀⠀⠀⠀⠀" R "\n"
+			<< "\n";
+			#undef O
+			#undef R
+		}
 	}
 
 	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
