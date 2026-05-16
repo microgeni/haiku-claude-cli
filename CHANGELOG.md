@@ -6,6 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-22
+
+### Added
+
+- **Startup logo** — a block-letter ASCII art logo is displayed at launch,
+  replacing the plain version string banner.  The final design uses the
+  letter `C` in a clean, two-column-aware layout that looks correct in
+  both standard and wide-character-aware terminals.
+- **Expanding multi-line input area** — the compose box now grows
+  vertically as you type; `Ctrl+J` inserts a soft newline without
+  submitting the turn.
+
+### Fixed
+
+- **Responsive input during streaming** — terminal writes are now
+  main-thread-only, eliminating the race condition that caused garbled
+  output when the worker and the input loop wrote concurrently.
+- **Logo rendering on Haiku Terminal** — resolved multiple rendering
+  issues: Braille character width detection (1 vs 2 display columns),
+  auto-wrap interference, correct column alignment, and consistent row
+  widths.  The logo is now written directly via `write(2)` to bypass
+  stream buffering, and uses `\x1b[39m` (foreground-reset only) instead
+  of `\x1b[0m` to avoid clobbering background colour.
+
 ## [1.7.3] - 2026-05-03
 
 ### Fixed
