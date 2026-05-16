@@ -422,21 +422,20 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	}
 
 	// ASCII art logo — Braille-dot art of the Claude icon.
+	// Written via write() directly to fd 1 to bypass any stream
+	// buffering or interference.
 	if (tui::ColorEnabled()) {
-		#define O "\x1b[38;2;255;138;24m"   // orange foreground
-		#define R "\x1b[39m"                 // reset foreground only (not background)
-		std::cout
-		<< O
-		<< "⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀" "\n"
-		<< "⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀" "\n"
-		<< "⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻" "\n"
-		<< "⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸" "\n"
-		<< "⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼" "\n"
-		<< "⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀" "\n"
-		<< "⠀⣿⣶⣤⣀⣀⣀⣀⣀⣤⣶⣿⠀⠀" "\n"
-		<< R "\n";
-		#undef O
-		#undef R
+		const char* art =
+			"\x1b[38;2;255;138;24m"
+			"⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀\n"
+			"⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀\n"
+			"⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻\n"
+			"⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸\n"
+			"⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼\n"
+			"⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀\n"
+			"⠀⣿⣶⣤⣀⣀⣀⣀⣀⣤⣶⣿⠀⠀\n"
+			"\x1b[39m\n";
+		::write(fileno(stdout), art, strlen(art));
 	}
 
 	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
