@@ -421,20 +421,23 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
-	// ASCII art logo — compact version designed for Haiku Terminal which
-	// renders Braille chars as 2 columns wide (10 chars × 2 = 20 display cols).
+	// ASCII art logo using plain characters (guaranteed 1-col wide).
 	if (tui::ColorEnabled()) {
-		const char* art =
-			"\x1b[?7l"
-			"\x1b[38;2;255;138;24m"
-			"⠀⣾⠿⠛⠉⠉⠛⠿⣷⠀\n\x1b[1G"
-			"⡟⠁⠀⠀⠀⠀⠀⠀⠈⢻\n\x1b[1G"
-			"⡟⠀⠀⢸⣿⣿⡇⠀⠀⢻\n\x1b[1G"
-			"⡇⠀⠀⠘⠛⠛⠃⠀⠀⢸\n\x1b[1G"
-			"⣧⡀⠀⠀⠀⠀⠀⠀⢀⣼\n\x1b[1G"
-			"⠀⣿⣶⣤⣀⣀⣤⣶⣿⠀\n"
-			"\x1b[39m\x1b[?7h\n";
-		::write(fileno(stdout), art, strlen(art));
+		#define O "\x1b[38;2;255;138;24m"
+		#define D "\x1b[38;2;180;80;10m"
+		#define R "\x1b[0m"
+		std::cout
+		<< "        " O "╭──────────────╮" R "\n"
+		<< "      " O "╭─" D "░░░░░░░░░░░░░░" O "─╮" R "\n"
+		<< "     " O "╭" D "░░░" O "╔══╗" D "░░░" O "╔══╗" D "░░░" O "╮" R "\n"
+		<< "     " O "│" D "░░░" O "║" D "░░" O "║" D "░░░" O "║" D "░░" O "║" D "░░░" O "│" R "\n"
+		<< "     " O "╰" D "░░░" O "╚══╝" D "░░░" O "╚══╝" D "░░░" O "╯" R "\n"
+		<< "      " O "╰─" D "░░░░░░░░░░░░░░" O "─╯" R "\n"
+		<< "        " O "╰──────────────╯" R "\n"
+		<< "\n";
+		#undef O
+		#undef D
+		#undef R
 	}
 
 	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
