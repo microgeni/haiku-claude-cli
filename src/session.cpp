@@ -423,17 +423,18 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 	// ASCII art logo — Braille-dot art of the Claude icon.
 	if (tui::ColorEnabled()) {
-		#define O "\x1b[38;2;255;138;24m"
-		#define R "\x1b[0m"
+		#define O "\x1b[38;2;255;138;24m"   // orange foreground
+		#define R "\x1b[39m"                 // reset foreground only (not background)
 		std::cout
-		<< O "⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀" R "\n"
-		<< O "⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀" R "\n"
-		<< O "⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻" R "\n"
-		<< O "⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸" R "\n"
-		<< O "⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼" R "\n"
-		<< O "⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀" R "\n"
-		<< O "⠀⣿⣶⣤⣀⣀⣀⣀⣀⣤⣶⣿⠀⠀" R "\n"
-		<< "\n";
+		<< O
+		<< "⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀" "\n"
+		<< "⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀" "\n"
+		<< "⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻" "\n"
+		<< "⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸" "\n"
+		<< "⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼" "\n"
+		<< "⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀" "\n"
+		<< "⠀⣿⣶⣤⣀⣀⣀⣀⣀⣤⣶⣿⠀⠀" "\n"
+		<< R "\n";
 		#undef O
 		#undef R
 	}
