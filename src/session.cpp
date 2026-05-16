@@ -421,20 +421,22 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
-	// ASCII art logo — Braille-dot art of the Claude icon.
-	// Written via write() directly to fd 1 to bypass any stream
-	// buffering or interference.
+	// ASCII art logo — written to fd 1 directly.
 	if (tui::ColorEnabled()) {
 		const char* art =
+			"\x1b[?7l"                      // disable auto-wrap
+			"\x1b[1G"                       // ensure column 1
 			"\x1b[38;2;255;138;24m"
-			"⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀\n"
-			"⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀\n"
-			"⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻\n"
-			"⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸\n"
-			"⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼\n"
-			"⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀\n"
+			"⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀\n\x1b[1G"
+			"⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀\n\x1b[1G"
+			"⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻\n\x1b[1G"
+			"⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸\n\x1b[1G"
+			"⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼\n\x1b[1G"
+			"⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀\n\x1b[1G"
 			"⠀⣿⣶⣤⣀⣀⣀⣀⣀⣤⣶⣿⠀⠀\n"
-			"\x1b[39m\n";
+			"\x1b[39m"
+			"\x1b[?7h"                      // re-enable auto-wrap
+			"\n";
 		::write(fileno(stdout), art, strlen(art));
 	}
 
