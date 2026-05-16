@@ -79,7 +79,10 @@ void ResumeFlushTimer();
 void SuspendScrollRegion();
 void RestoreScrollRegion();
 
-// Set to true by FlushTurnOutput when the turn-done callback fires.
+// Signal whether libedit is currently blocked in poll() (idle).
+// The flush timer only writes to the terminal when this is true,
+// preventing races with libedit's own terminal output.
+extern std::atomic<bool> g_libedit_polling;
 // Read by bracketed_getc in repl.cpp to inject a synthetic Enter
 // (only when the edit buffer is empty) so the main loop drains the
 // result without waiting for a real keypress. Cleared by the main
@@ -176,6 +179,28 @@ void PositionCursorForChat();
 // prompt. No-op on non-TTY / non-color.
 void HideCursor();
 void ShowCursor();
+
+// Expand the fixed input area upward by one row to keep a completed
+// continuation line visible.  Called by repl::ReadMessage() each time
+// the user presses Ctrl+J / Alt+Enter (soft-newline).
+//
+// `completedLine` is the text the user just finished (the raw string
+// from ReadLine(), without any trailing backslash).  It is reprinted
+// with a dim "· " prefix so it looks like frozen history rather than
+// the active prompt.
+//
+// Each call shrinks the DECSTBM scroll region by one row, moves the
+// top separator one row up, and positions libedit at the new input
+// row.  No-op when the terminal is too short for further expansion or
+// when the status frame is not active.
+void ExpandInputArea(const std::string& completedLine);
+
+// Collapse the expanded input area back to the single default input row.
+// Called by repl::ReadMessage() after the message is sent or cancelled.
+// Wipes every expanded row, redraws the canonical top separator (N-3),
+// and restores the full DECSTBM scroll region.  No-op when no expansion
+// is in effect.
+void CollapseInputArea();
 
 // Interactive vertical menu. Renders `options` as a numbered list:
 //

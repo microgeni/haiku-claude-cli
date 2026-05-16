@@ -421,11 +421,24 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
+	// ASCII art logo — "Claude" lettering in block chars.
+	if (tui::ColorEnabled()) {
+		#define O "\x1b[38;2;255;138;24m"
+		#define R "\x1b[0m"
+		std::cout
+		<< O "  ▄▄▄▄ ▄▄                              " R "\n"
+		<< O "██      ██                ██        "  R "\n"
+		<< O "██      ██ ▄▀▀█▄ ██ ██ ▄████ ▄█▀█▄  "  R "\n"
+		<< O "██      ██ ▄█▀██ ██ ██ ██ ██ ██▄█▀   "  R "\n"
+		<< O "▀█████ ▄██▄▀█▄██▄▀██▀█▄█▀███▄▀█▄▄▄   "  R "\n"
+		<< "\n";
+		#undef O
+		#undef R
+	}
+
 	std::cout << tui::Bold("Claude CLI interactive mode") << tui::Dim(" (model: " + model + ")") << ".\n"
 			  << tui::Dim("Type /help for commands, /exit or Ctrl+D to leave.") << "\n"
-			  << tui::Dim(IsSshSession()
-				  ? "Multi-line input: \\ + Enter  [Ctrl+J/Alt+Enter may not work over SSH]."
-				  : "Multi-line input: Ctrl+J or Alt+Enter (or \\ + Enter).") << "\n\n";
+			  << tui::Dim("Multi-line input: Ctrl+J or \\ + Enter.") << "\n\n";
 
 	// Drain any bytes the terminal sent in response to our init
 	// sequences (bracketed-paste enable, DECSTBM scroll-region setup,
@@ -488,7 +501,11 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// Helper: drain the worker result and run all post-turn bookkeeping.
 	// Called from the main loop when fWorkerOwnsDisplay has gone false.
 	// Returns false if the session should exit.
-	auto drain_turn = [&]() -> bool {
+	// allowNotify should be true only when the turn finished while the
+	// user was idle (top-of-loop poll). Pass false when the user has
+	// already typed new input or is exiting — they are clearly aware
+	// the turn is done, so a desktop notification would be spurious.
+	auto drain_turn = [&](bool allowNotify = true) -> bool {
 		// Restore stdout to direct mode; flush any buffered output
 		// the worker left in the pending buffer.
 		tui::EndTurn();
@@ -528,7 +545,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		if (!result.writtenSummaryPaths.empty())
 			config::RefreshSummarySnapshot(result.writtenSummaryPaths);
 
-		if (notify_enabled && result.elapsed >= notify_min_duration) {
+		if (allowNotify && notify_enabled && result.elapsed >= notify_min_duration) {
 			notify::Send(
 				notify::PickPlayfulTitle(result.elapsed),
 				notify::FirstSentence(result.assistantText, 120));
@@ -687,7 +704,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 						return !worker.fWorkerOwnsDisplay;
 					});
 					dlk.unlock();
-					drain_turn();
+					drain_turn(/*allowNotify=*/false); // user is exiting
 				}
 				break;
 			}
@@ -729,7 +746,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 				});
 			}
 			turn_active = false;
-			if (!drain_turn()) break;
+			// User actively typed new input, so no notification — they
+			// are clearly already watching the terminal.
+			if (!drain_turn(/*allowNotify=*/false)) break;
 			// The user's input was already echoed into the TurnOutputBuf
 			// above (line 690); EndTurn() flushed it in drain_turn().
 			// No second echo needed.
