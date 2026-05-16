@@ -421,22 +421,19 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
-	// ASCII art logo — written to fd 1 directly.
+	// ASCII art logo — compact version designed for Haiku Terminal which
+	// renders Braille chars as 2 columns wide (10 chars × 2 = 20 display cols).
 	if (tui::ColorEnabled()) {
 		const char* art =
-			"\x1b[?7l"                      // disable auto-wrap
-			"\x1b[1G"                       // ensure column 1
+			"\x1b[?7l"
 			"\x1b[38;2;255;138;24m"
-			"⠀⠀⣾⠿⠛⠉⠉⠉⠉⠛⠿⣷⠀⠀\n\x1b[1G"
-			"⠀⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⠀\n\x1b[1G"
-			"⡟⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢻\n\x1b[1G"
-			"⡇⠀⠀⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⢸\n\x1b[1G"
-			"⣧⠀⠀⠀⠀⠘⠛⠛⠛⠀⠀⠀⠀⣼\n\x1b[1G"
-			"⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠀\n\x1b[1G"
-			"⠀⣿⣶⣤⣀⣀⣀⣀⣀⣤⣶⣿⠀⠀\n"
-			"\x1b[39m"
-			"\x1b[?7h"                      // re-enable auto-wrap
-			"\n";
+			"⠀⣾⠿⠛⠉⠉⠛⠿⣷⠀\n\x1b[1G"
+			"⡟⠁⠀⠀⠀⠀⠀⠀⠈⢻\n\x1b[1G"
+			"⡟⠀⠀⢸⣿⣿⡇⠀⠀⢻\n\x1b[1G"
+			"⡇⠀⠀⠘⠛⠛⠃⠀⠀⢸\n\x1b[1G"
+			"⣧⡀⠀⠀⠀⠀⠀⠀⢀⣼\n\x1b[1G"
+			"⠀⣿⣶⣤⣀⣀⣤⣶⣿⠀\n"
+			"\x1b[39m\x1b[?7h\n";
 		::write(fileno(stdout), art, strlen(art));
 	}
 
