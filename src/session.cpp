@@ -421,22 +421,18 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 	}
 
-	// ASCII art logo using plain characters (guaranteed 1-col wide).
+	// ASCII art logo — "Claude" lettering in block chars.
 	if (tui::ColorEnabled()) {
 		#define O "\x1b[38;2;255;138;24m"
-		#define D "\x1b[38;2;180;80;10m"
 		#define R "\x1b[0m"
 		std::cout
-		<< "        " O "╭──────────────╮" R "\n"
-		<< "      " O "╭─" D "░░░░░░░░░░░░░░" O "─╮" R "\n"
-		<< "     " O "╭" D "░░░" O "╔══╗" D "░░░" O "╔══╗" D "░░░" O "╮" R "\n"
-		<< "     " O "│" D "░░░" O "║" D "░░" O "║" D "░░░" O "║" D "░░" O "║" D "░░░" O "│" R "\n"
-		<< "     " O "╰" D "░░░" O "╚══╝" D "░░░" O "╚══╝" D "░░░" O "╯" R "\n"
-		<< "      " O "╰─" D "░░░░░░░░░░░░░░" O "─╯" R "\n"
-		<< "        " O "╰──────────────╯" R "\n"
+		<< O "     ▄▄▄▄ ▄▄                              " R "\n"
+		<< O "   ██      ██                ██        "    R "\n"
+		<< O "   ██      ██ ▄▀▀█▄ ██ ██ ▄████ ▄█▀█▄  "   R "\n"
+		<< O "   ██      ██ ▄█▀██ ██ ██ ██ ██ ██▄█▀   "   R "\n"
+		<< O "   ▀█████ ▄██▄▀█▄██▄▀██▀█▄█▀███▄▀█▄▄▄   "   R "\n"
 		<< "\n";
 		#undef O
-		#undef D
 		#undef R
 	}
 
