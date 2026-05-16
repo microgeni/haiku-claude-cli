@@ -426,7 +426,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		#define O "\x1b[38;2;255;138;24m"
 		#define R "\x1b[0m"
 		std::cout
-		<< O "▄▄▄▄ ▄▄                              " R "\n"
+		<< O "  ▄▄▄▄ ▄▄                              " R "\n"
 		<< O "██      ██                ██        "  R "\n"
 		<< O "██      ██ ▄▀▀█▄ ██ ██ ▄████ ▄█▀█▄  "  R "\n"
 		<< O "██      ██ ▄█▀██ ██ ██ ██ ██ ██▄█▀   "  R "\n"
