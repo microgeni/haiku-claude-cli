@@ -149,7 +149,16 @@ static int raw_getc_or_wake(FILE* f) {
             char discard[64];
             ::read(wake_fd, discard, sizeof(discard));
             tui::FlushTurnOutput();
-            if (tui::g_turn_just_completed.load() && rl_end == 0) {
+            // Only inject a synthetic Enter when the edit buffer is empty
+            // AND stdin has no real keystroke pending.  If both the wake
+            // pipe and stdin fired simultaneously (user pressed Enter at
+            // the exact moment the turn completed), skip the synthetic '\r'
+            // and fall through to return the real character below.
+            // Without this guard the synthetic '\r' consumes one readline
+            // call as an empty line; the real '\r' then becomes a second
+            // empty readline call, so the user effectively has to press
+            // Enter twice to send their next message.
+            if (tui::g_turn_just_completed.load() && rl_end == 0 && !stdin_ready) {
                 tui::g_turn_just_completed.store(false);
                 return '\r';
             }
