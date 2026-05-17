@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-07-23
+
+### Fixed
+
+- **Arrow key navigation restored** — pressing ←/→/↑/↓ in the prompt
+  no longer drops keystrokes.  `bracketed_getc_impl` stashed non-paste
+  CSI sequences (e.g. `\e[A`) into `g_paste_buf` and returned `\x1b`,
+  but the next call jumped straight to `raw_getc()` without draining
+  the buffer first, so the `[` and final byte were silently discarded
+  and libedit never received a complete sequence.  Fixed by adding a
+  buffer-drain check at the top of `bracketed_getc_impl`.
+
 ## [1.8.0] - 2026-07-22
 
 ### Added
