@@ -237,6 +237,16 @@ static bool consume_until(FILE* f, const char* seq, std::string& buf) {
 static int bracketed_getc_impl(FILE* f) {
     fix_cr_lf_translation();
 
+    // Drain any bytes that were stashed into g_paste_buf by a previous
+    // call (e.g. when a non-paste CSI sequence like an arrow key arrived
+    // as \e[A: we returned '\x1b' and stored "[A" in g_paste_buf).
+    // Without this, the buffered bytes are silently lost because every
+    // call starts by reading a fresh byte from the terminal.
+    if (g_paste_pos < g_paste_buf.size())
+        return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
+    g_paste_buf.clear();
+    g_paste_pos = 0;
+
     // If the flush timer detected the turn just completed, return a
     // synthetic '\r' (Enter) so ReadMessage() returns an empty line
     // and the main loop's drain_turn() fires — but only when the
