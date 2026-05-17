@@ -17,7 +17,7 @@
 
 namespace config {
 
-const char* const kVersion      = "1.8.0";
+const char* const kVersion      = "1.8.1";
 const char* const kDefaultModel = "claude-sonnet-4-6";
 const char* const kApiVersion   = "2023-06-01";
 const char* const kOAuthBeta    = "oauth-2025-04-20";
