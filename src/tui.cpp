@@ -1180,7 +1180,11 @@ std::string Gray(const std::string& s)    { return wrap("\x1b[90m", s); }
 std::string Muted(const std::string& s)   { return wrap("\x1b[38;5;244m", s); }
 
 std::string UserPrompt() {
-	return wrap("\x1b[1;36m", "> ");
+	// Bold-cyan "> " label.  The trailing \x1b[1;36m is intentionally
+	// not reset so libedit leaves the terminal in bold-cyan when the
+	// user starts typing — matching the prompt colour on all lines.
+	if (!g_color_enabled) return "> ";
+	return "\x1b[1;36m> ";
 }
 
 std::string ClaudePrompt() {
@@ -1195,7 +1199,12 @@ std::string ClaudePrompt() {
 }
 
 std::string ContinuationPrompt() {
-	return wrap("\x1b[2m", "... ");
+	// Dim "... " label, then switch to bold-cyan so any text the user
+	// types on the continuation line matches the colour of the first
+	// input line.  libedit leaves the terminal in whatever SGR state
+	// the prompt ends with, so without this the typed text goes plain.
+	if (!g_color_enabled) return "... ";
+	return "\x1b[2m... \x1b[0m\x1b[1;36m";
 }
 
 std::string Meta(const std::string& s) {
