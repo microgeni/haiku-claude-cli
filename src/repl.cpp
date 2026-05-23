@@ -149,6 +149,25 @@ static int raw_getc_or_wake(FILE* f) {
             char discard[64];
             ::read(wake_fd, discard, sizeof(discard));
             tui::FlushTurnOutput();
+            // If we just transitioned from blocked→unblocked (UnblockStdin()
+            // ran while we were polling), flush the kernel tty input buffer
+            // now — before re-reading stdin_ready.  This closes the window
+            // between UnblockStdin()'s own tcflush() and the moment our
+            // poll() re-arms stdin (pfds[0].events = POLLIN), during which a
+            // user keystroke (e.g. an impatient Enter) can slip into the tty
+            // buffer and show up as a spurious readline() return on the next
+            // call, causing the "double-Enter" symptom.
+            if (blocked && !g_stdin_blocked.load()) {
+                // We were blocked; now we're not.  Flush stale tty input.
+                if (isatty(stdin_fd))
+                    ::tcflush(stdin_fd, TCIFLUSH);
+                // Re-evaluate stdin_ready: the flush may have cleared bytes
+                // that had already raised POLLIN on pfds[0] before the poll
+                // call (when blocked, pfds[0].events was 0 so pfds[0].revents
+                // is 0 — stdin_ready is already false here; the tcflush is
+                // purely a safety net for the next poll iteration).
+                stdin_ready = false;
+            }
             // Only inject a synthetic Enter when the edit buffer is empty
             // AND stdin has no real keystroke pending.  If both the wake
             // pipe and stdin fired simultaneously (user pressed Enter at
@@ -1015,10 +1034,20 @@ bool ConsumeClearEditBufferRequest() {
 void DrainStaleInput() {
 	if (!isatty(fileno(stdin))) return;
 
-	// Switch stdin to non-blocking so we can drain whatever bytes the
-	// terminal sent in response to our init sequences (bracketed-paste
-	// enable, DECSTBM, cursor-position requests) without hanging.
-	const int fd    = fileno(stdin);
+	const int fd = fileno(stdin);
+
+	// Flush the kernel tty line-discipline buffer first.  This discards
+	// any keystrokes (e.g. an impatient Enter pressed while a tool turn
+	// was running) that arrived after UnblockStdin()'s tcflush() but
+	// before raw_getc_or_wake() re-armed stdin in poll().  Without this
+	// flush those bytes survive into the next readline() call and cause
+	// a spurious empty line return — the "double-Enter" symptom.
+	::tcflush(fd, TCIFLUSH);
+
+	// Also drain bytes already in the userspace/kernel read buffer (e.g.
+	// terminal responses to our init sequences: bracketed-paste enable,
+	// DECSTBM, cursor-position reports).  Use non-blocking reads so the
+	// drain loop returns immediately once the buffer is empty.
 	const int flags = fcntl(fd, F_GETFL, 0);
 	if (flags == -1) return;
 	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return;
