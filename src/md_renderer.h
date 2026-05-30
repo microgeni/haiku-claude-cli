@@ -54,7 +54,7 @@ public:
 	// Renders complete lines immediately; buffers the last partial line.
 	void Write(const std::string& chunk);
 
-	// Flush any buffered partial line (call at end of turn).
+	// Flush any buffered partial line and any pending table (call at end of turn).
 	void Flush();
 
 	// URLs harvested from [text](url) markdown links.
@@ -76,12 +76,38 @@ private:
 	// Append a simple horizontal rule.
 	void AppendHRule();
 
+	// ── Table support ───────────────────────────────────────────────────────
+	// Tables are buffered line-by-line until a non-table line arrives,
+	// then flushed as a single box-drawing block so column widths can be
+	// computed from the full table before any output is emitted.
+
+	// Returns true if `line` looks like a markdown table row (contains '|').
+	static bool IsTableRow(const std::string& line);
+
+	// Returns true if `line` is a table separator row (|---|---|).
+	static bool IsSeparatorRow(const std::string& line);
+
+	// Split a pipe-delimited table row into trimmed cell strings.
+	static std::vector<std::string> SplitCells(const std::string& line);
+
+	// Emit the buffered table to the BTextView using box-drawing characters.
+	void FlushTable();
+
 	BTextView*           fView;
 	std::string          fLineBuf;   // partial line accumulator
 	std::vector<std::string> fUrls;
 
 	// Track blank-line state for paragraph spacing.
 	bool fLastWasBlank = false;
+
+	// Table accumulator state.
+	bool fInTable = false;
+	// Parsed rows (each is a vector of trimmed cell strings).
+	// Separator rows are recorded as position markers, not stored as cells.
+	std::vector<std::vector<std::string>> fTableRows;
+	// Index into fTableRows where the header/body split falls.
+	// -1 = no separator seen yet (row 0 is treated as header).
+	int fSeparatorRow = -1;
 };
 
 // Strip HTML tags and decode common entities from a string.

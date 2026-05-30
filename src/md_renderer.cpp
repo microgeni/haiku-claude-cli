@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <sstream>
 #include <string>
 
 namespace md {
@@ -21,6 +23,12 @@ const rgb_color kColorH3         = { 200, 255, 200, 255 }; // soft green
 const rgb_color kColorBlockquote = { 150, 150, 150, 255 };
 const rgb_color kColorLink       = {  86, 180, 233, 255 }; // same as user label
 const rgb_color kColorHRule      = { 100, 100, 100, 255 };
+
+// Table colours.
+const rgb_color kColorTableBorder  = {  80, 130, 130, 255 }; // muted teal
+const rgb_color kColorTableHeader  = { 255, 255, 255, 255 }; // white bold
+const rgb_color kColorTableCell    = { 215, 215, 220, 255 }; // near-white
+const rgb_color kColorTableAlt     = { 175, 175, 185, 255 }; // slightly dimmer
 
 } // namespace
 
@@ -52,10 +60,202 @@ void MdRenderer::Write(const std::string& chunk)
 
 void MdRenderer::Flush()
 {
+	// Flush any pending table before the partial line.
+	if (fInTable)
+		FlushTable();
+
 	if (!fLineBuf.empty()) {
 		RenderLine(fLineBuf);
 		fLineBuf.clear();
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Table helpers
+// ---------------------------------------------------------------------------
+
+// A line is a table row if it contains at least one '|' and, when trimmed,
+// starts with '|' or has ' | ' inside it.
+bool MdRenderer::IsTableRow(const std::string& line)
+{
+	if (line.find('|') == std::string::npos) return false;
+	// Trim leading whitespace.
+	size_t start = 0;
+	while (start < line.size() && (line[start] == ' ' || line[start] == '\t'))
+		++start;
+	if (start < line.size() && line[start] == '|') return true;
+	// Has an embedded " | ".
+	return line.find(" | ") != std::string::npos;
+}
+
+// A separator row contains only '|', '-', ':', and whitespace, with at
+// least one '-'.
+bool MdRenderer::IsSeparatorRow(const std::string& line)
+{
+	bool hasDash = false;
+	for (char c : line) {
+		if (c == '-') { hasDash = true; continue; }
+		if (c == '|' || c == ':' || c == ' ' || c == '\t') continue;
+		return false;
+	}
+	return hasDash;
+}
+
+// Split a pipe-delimited row into trimmed cell strings, stripping leading
+// and trailing '|' characters first.
+std::vector<std::string> MdRenderer::SplitCells(const std::string& line)
+{
+	// Trim leading/trailing whitespace then strip outer '|' chars.
+	size_t a = 0;
+	while (a < line.size() && (line[a] == ' ' || line[a] == '\t')) ++a;
+	size_t b = line.size();
+	while (b > a && (line[b-1] == ' ' || line[b-1] == '\t')) --b;
+	std::string t = line.substr(a, b - a);
+	if (!t.empty() && t.front() == '|') t = t.substr(1);
+	if (!t.empty() && t.back()  == '|') t.pop_back();
+
+	std::vector<std::string> cells;
+	std::istringstream ss(t);
+	std::string cell;
+	while (std::getline(ss, cell, '|')) {
+		// Trim each cell.
+		size_t ca = cell.find_first_not_of(" \t");
+		size_t cb = cell.find_last_not_of(" \t");
+		cells.push_back((ca == std::string::npos) ? "" : cell.substr(ca, cb - ca + 1));
+	}
+	return cells;
+}
+
+// Flush the accumulated table rows as a box-drawing table into the BTextView.
+void MdRenderer::FlushTable()
+{
+	if (fTableRows.empty()) {
+		fInTable = false;
+		fSeparatorRow = -1;
+		return;
+	}
+
+	// ── 1. Normalise column count ─────────────────────────────────────────
+	size_t nCols = 0;
+	for (const auto& row : fTableRows)
+		nCols = std::max(nCols, row.size());
+	if (nCols == 0) {
+		fInTable = false;
+		fSeparatorRow = -1;
+		fTableRows.clear();
+		return;
+	}
+	for (auto& row : fTableRows)
+		while (row.size() < nCols) row.push_back("");
+
+	// ── 2. Compute column widths (bytes; works for ASCII content) ─────────
+	std::vector<size_t> colW(nCols, 1);
+	for (const auto& row : fTableRows)
+		for (size_t c = 0; c < nCols; ++c)
+			colW[c] = std::max(colW[c], row[c].size());
+
+	// ── 3. Box-drawing helpers ────────────────────────────────────────────
+	// Build a horizontal border line.
+	// left/mid/right are UTF-8 encoded single box-drawing characters.
+	// fill is the horizontal bar character (─ or ═).
+	auto makeBorder = [&](const char* left, const char* mid,
+	                      const char* right, const char* fill) -> std::string {
+		std::string s = left;
+		for (size_t c = 0; c < nCols; ++c) {
+			for (size_t k = 0; k < colW[c] + 2; ++k) s += fill;
+			s += (c + 1 < nCols) ? mid : right;
+		}
+		return s + "\n";
+	};
+
+	// Pad/truncate a cell to exactly `w` visible characters.
+	auto padCell = [](const std::string& s, size_t w) -> std::string {
+		if (s.size() >= w) return s.substr(0, w);
+		return s + std::string(w - s.size(), ' ');
+	};
+
+	// ── 4. Determine header boundary ─────────────────────────────────────
+	// Rows before fSeparatorRow are header rows; if no separator was seen
+	// treat the first row as the header.
+	size_t headerEnd = (fSeparatorRow > 0)
+	    ? static_cast<size_t>(fSeparatorRow)
+	    : 1;
+
+	// ── 5. Emit fonts ─────────────────────────────────────────────────────
+	// Use monospace for the whole table so columns align.
+	BFont monoPlain(be_fixed_font);
+	monoPlain.SetSize(be_fixed_font->Size());
+
+	BFont monoBold(be_fixed_font);
+	monoBold.SetSize(be_fixed_font->Size());
+	monoBold.SetFace(B_BOLD_FACE);
+
+	// Helper: append a string with the given font and colour.
+	auto emit = [&](const std::string& text, const BFont& font, rgb_color color) {
+		if (text.empty()) return;
+		text_run_array* tra = static_cast<text_run_array*>(
+			malloc(sizeof(text_run_array) + sizeof(text_run)));
+		if (!tra) {
+			fView->Insert(text.c_str(), static_cast<int32>(text.size()));
+			return;
+		}
+		tra->count          = 1;
+		tra->runs[0].offset = 0;
+		tra->runs[0].font   = font;
+		tra->runs[0].color  = color;
+		const int32 pos = fView->TextLength();
+		fView->Insert(pos, text.c_str(), static_cast<int32>(text.size()), tra);
+		free(tra);
+	};
+
+	// ── 6. Draw the table ─────────────────────────────────────────────────
+	// Opening newline for separation from previous content.
+	emit("\n", monoPlain, kColorTableCell);
+
+	// Top border:  ┌───────┬───────┐
+	//              U+250C  U+252C  U+2510  U+2500
+	emit(makeBorder("┌", "┬", "┐", "─"), monoPlain, kColorTableBorder);
+
+	for (size_t r = 0; r < fTableRows.size(); ++r) {
+		const auto& row    = fTableRows[r];
+		const bool  isHdr  = (r < headerEnd);
+
+		// Row cells:  │ cell  │ cell  │
+		// Emit '│' in border colour, cell text in cell colour.
+		for (size_t c = 0; c < nCols; ++c) {
+			emit("│ ", monoPlain, kColorTableBorder);
+			const std::string cellText = padCell(row[c], colW[c]);
+			if (isHdr)
+				emit(cellText, monoBold, kColorTableHeader);
+			else
+				emit(cellText, monoPlain,
+				     (r % 2 == 0) ? kColorTableCell : kColorTableAlt);
+			emit(" ", monoPlain, kColorTableBorder);
+		}
+		emit("│\n", monoPlain, kColorTableBorder);
+
+		// After the last header row: double horizontal separator  ╞═══╪═══╡
+		//                                               U+255E  U+256A  U+2561  U+2550
+		if (isHdr && r + 1 == headerEnd)
+			emit(makeBorder("╞", "╪", "╡", "═"), monoPlain, kColorTableBorder);
+		// Between body rows: light separator  ├───┼───┤
+		//                             U+251C  U+253C  U+2524
+		else if (!isHdr && r + 1 < fTableRows.size())
+			emit(makeBorder("├", "┼", "┤", "─"), monoPlain, kColorTableBorder);
+	}
+
+	// Bottom border:  └───────┴───────┘
+	//                 U+2514  U+2534  U+2518
+	emit(makeBorder("└", "┴", "┘", "─"), monoPlain, kColorTableBorder);
+	emit("\n", monoPlain, kColorTableCell);
+
+	// Scroll so the bottom of the table is visible.
+	fView->ScrollToOffset(fView->TextLength());
+
+	// ── 7. Reset state ────────────────────────────────────────────────────
+	fInTable = false;
+	fSeparatorRow = -1;
+	fTableRows.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +443,26 @@ void MdRenderer::RenderLine(const std::string& rawLine)
 	std::string line = rawLine;
 	if (!line.empty() && line.back() == '\r') line.pop_back();
 
+	// ── Table accumulation ─────────────────────────────────────────────────
+	// Buffer table rows until a non-table line arrives, then flush the
+	// complete table so column widths can be computed before any output.
+	if (IsTableRow(line)) {
+		fInTable = true;
+		fLastWasBlank = false;
+		if (IsSeparatorRow(line)) {
+			// Record where the header/body split is, but don't store cells.
+			if (fSeparatorRow < 0)
+				fSeparatorRow = static_cast<int>(fTableRows.size());
+		} else {
+			fTableRows.push_back(SplitCells(line));
+		}
+		return; // accumulate; don't render yet
+	}
+
+	// Non-table line: flush any accumulated table first.
+	if (fInTable)
+		FlushTable();
+
 	// ── Blank line: paragraph break ────────────────────────────────────────
 	if (line.empty()) {
 		if (!fLastWasBlank) {
@@ -264,7 +484,7 @@ void MdRenderer::RenderLine(const std::string& rawLine)
 		return;
 	}
 
-	// ── Headings: # / ## / ### ─────────────────────────────────────────────
+	// ── Headings: ### before ## before # to avoid prefix ambiguity ────────
 	if (!line.empty() && line[0] == '#') {
 		size_t level = 0;
 		while (level < line.size() && line[level] == '#') ++level;
@@ -290,12 +510,13 @@ void MdRenderer::RenderLine(const std::string& rawLine)
 					base.color     = kColorH3;
 					break;
 			}
-			// Emit a leading newline for visual separation.
+			// Leading newline for visual separation.
 			{
 				Run nl;
 				nl.text = "\n";
 				AppendRun(nl);
 			}
+			// Pass through RenderInline so **bold** inside headings works.
 			RenderInline(content, base);
 			{
 				Run nl;
@@ -346,6 +567,30 @@ void MdRenderer::RenderLine(const std::string& rawLine)
 		Run nl; nl.text = "\n"; AppendRun(nl);
 		ScrollToEnd();
 		return;
+	}
+
+	// ── Indented unordered list (2–4 spaces then - / * / +) ───────────────
+	{
+		size_t indent = 0;
+		while (indent < line.size() && line[indent] == ' ') ++indent;
+		if (indent >= 2 && indent + 1 < line.size() &&
+		    (line[indent] == '-' || line[indent] == '*' || line[indent] == '+') &&
+		    line[indent + 1] == ' ') {
+			const std::string content = line.substr(indent + 2);
+			{
+				Run r;
+				// Extra indent for nested bullets.
+				r.text     = std::string(indent + 2, ' ') + "\xE2\x80\xA2 ";
+				r.hasColor = true;
+				r.color    = kColorDim;
+				AppendRun(r);
+			}
+			Run base;
+			RenderInline(content, base);
+			Run nl; nl.text = "\n"; AppendRun(nl);
+			ScrollToEnd();
+			return;
+		}
 	}
 
 	// ── Ordered list: 1. / 2. / ... ───────────────────────────────────────
