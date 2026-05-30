@@ -1921,14 +1921,11 @@ void MarkdownRenderer::RenderLine(const std::string& line) {
 }
 
 void MarkdownRenderer::Write(const std::string& chunk) {
-	if (!g_color_enabled) {
-		if (!fFirstOutputDone) {
-			FlushPrefix();
-		}
-		std::cout << chunk << std::flush;
-		return;
-	}
-
+	// Always buffer and render line-by-line so markdown structure
+	// (tables, headings, bullets) is preserved even when color is
+	// disabled. The individual render helpers already guard every
+	// ANSI escape behind g_color_enabled, so plain-text mode gets
+	// clean output with box-drawing table borders but no color codes.
 	for (char c : chunk) {
 		if (c == '\n') {
 			RenderLine(fLineBuffer);

@@ -37,7 +37,8 @@ LIBEDIT_CFLAGS := $(shell $(PKG_CONFIG) --cflags libedit     2>/dev/null)
 LIBEDIT_LIBS   := $(shell $(PKG_CONFIG) --libs   libedit     2>/dev/null || echo -ledit)
 
 CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) $(LIBEDIT_CFLAGS) -pthread -D_DEFAULT_SOURCE
-LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread
+HAIKU_LIBS := $(shell uname -s 2>/dev/null | grep -q Haiku && echo "-lbe" || echo "")
+LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread $(HAIKU_LIBS)
 
 SRCDIR   := src
 BIN      := $(BUILDDIR)/claude
