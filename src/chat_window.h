@@ -45,6 +45,7 @@ constexpr uint32_t MSG_POPUP_NEXT   = 'PNXT'; // InputView → ChatWindow: next 
 constexpr uint32_t MSG_POPUP_PREV   = 'PPRV'; // InputView → ChatWindow: prev item
 constexpr uint32_t MSG_POPUP_CONF   = 'PCNF'; // InputView → ChatWindow: confirm
 constexpr uint32_t MSG_POPUP_HIDE   = 'PDIS'; // InputView → ChatWindow: hide
+constexpr uint32_t MSG_MODELS_READY = 'MDLS'; // background model fetch complete
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -48,6 +48,7 @@
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
+#include "models.h"
 #include "scintilla_view.h"
 #include "session_store.h"
 
@@ -799,21 +800,24 @@ void ChatWindow::_BuildLayout()
 
 void ChatWindow::_PopulateModelMenu()
 {
-	// Add known models.
-	for (int i = 0; kKnownModels[i] != nullptr; ++i) {
+	// Populate immediately with the hard-coded fallback so the menu is
+	// usable right away, then kick off a background fetch to replace it.
+	auto addItem = [&](const std::string& id, const std::string& label, bool mark) {
 		BMessage* msg = new BMessage(gui::MSG_MODEL_PICK);
-		msg->AddString("model", kKnownModels[i]);
-		BMenuItem* item = new BMenuItem(kKnownModels[i], msg);
-		// Check the current model.
-		if (fModel == kKnownModels[i])
-			item->SetMarked(true);
+		msg->AddString("model", id.c_str());
+		BMenuItem* item = new BMenuItem(label.c_str(), msg);
+		if (mark) item->SetMarked(true);
 		fModelMenu->AddItem(item);
-	}
-	// If the current model is not in the list, add it at the top.
+	};
+
 	bool found = false;
-	for (int i = 0; kKnownModels[i] != nullptr; ++i)
-		if (fModel == kKnownModels[i]) { found = true; break; }
+	for (int i = 0; kKnownModels[i] != nullptr; ++i) {
+		bool mark = (fModel == kKnownModels[i]);
+		if (mark) found = true;
+		addItem(kKnownModels[i], kKnownModels[i], mark);
+	}
 	if (!found) {
+		// Current model not in fallback list — add it at top, marked.
 		BMessage* msg = new BMessage(gui::MSG_MODEL_PICK);
 		msg->AddString("model", fModel.c_str());
 		BMenuItem* item = new BMenuItem(fModel.c_str(), msg);
@@ -821,6 +825,21 @@ void ChatWindow::_PopulateModelMenu()
 		fModelMenu->AddItem(item, 0);
 	}
 	fModelMenu->SetRadioMode(true);
+
+	// Background fetch — replace menu items when results arrive.
+	const config::Auth auth = fAuth;
+	std::thread([auth, this]() {
+		std::vector<models::ModelEntry> fetched = models::FetchModels(auth);
+		if (fetched.empty()) return;
+		// Pack ids into a BMessage and post to ourselves.
+		BMessage* ready = new BMessage(gui::MSG_MODELS_READY);
+		for (const auto& e : fetched) {
+			ready->AddString("id",   e.id.c_str());
+			ready->AddString("name", e.display_name.c_str());
+		}
+		BMessenger(this).SendMessage(ready);
+		delete ready;
+	}).detach();
 }
 
 void ChatWindow::_RepositionOverlays()
@@ -936,6 +955,39 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case B_REFS_RECEIVED:
 		_RefsReceived(msg);
 		break;
+
+	case gui::MSG_MODELS_READY: {
+		// Background fetch returned — rebuild the model menu with live data.
+		if (!fModelMenu) break;
+		fModelMenu->RemoveItems(0, fModelMenu->CountItems(), true);
+		bool found = false;
+		const char* id   = nullptr;
+		const char* name = nullptr;
+		for (int32 i = 0;
+		     msg->FindString("id",   i, &id)   == B_OK &&
+		     msg->FindString("name", i, &name) == B_OK; ++i) {
+			const std::string sid(id);
+			const std::string sname(name ? name : id);
+			const std::string label = (sname.empty() || sname == sid)
+			    ? sid : sname + "  (" + sid + ")";
+			BMessage* m = new BMessage(gui::MSG_MODEL_PICK);
+			m->AddString("model", sid.c_str());
+			BMenuItem* item = new BMenuItem(label.c_str(), m);
+			if (sid == fModel) { item->SetMarked(true); found = true; }
+			fModelMenu->AddItem(item);
+		}
+		if (!found) {
+			BMessage* m = new BMessage(gui::MSG_MODEL_PICK);
+			m->AddString("model", fModel.c_str());
+			BMenuItem* item = new BMenuItem(fModel.c_str(), m);
+			item->SetMarked(true);
+			fModelMenu->AddItem(item, 0);
+		}
+		fModelMenu->SetRadioMode(true);
+		// Update the field label to reflect the live list.
+		if (fModelField) fModelField->MenuItem()->SetLabel(fModel.c_str());
+		break;
+	}
 
 	case gui::MSG_MODEL_PICK: {
 		const char* model = nullptr;
