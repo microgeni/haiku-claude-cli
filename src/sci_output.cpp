@@ -97,7 +97,23 @@ void SciOutput::Configure()
 
 void SciOutput::_ConfigureBaseStyles()
 {
-	// View behaviour — these are all integer params, no string pointers.
+	// IMPORTANT: SCI_STYLESETFONT on STYLE_DEFAULT must be the very first
+	// style call. Scintilla's ViewStyle stores font names in a UniqueStringSet
+	// that starts uninitialized (ptr=1). Any SCI_STYLESET* call before the
+	// font is initialized crashes in strlen(). Setting the font first
+	// initializes the string table and makes all subsequent style calls safe.
+	//
+	// We pass the font name via a local std::string to ensure the pointer
+	// is valid for the duration of the call.
+	{
+		std::string font = "Noto Mono";
+		// SCI_STYLESETFONT = 2057, wParam = style index, lParam = char*
+		SendMessage(static_cast<unsigned int>(2057),
+		            static_cast<unsigned long>(32),
+		            reinterpret_cast<long>(font.data()));
+	}
+
+	// View behaviour (integer params only, safe at any time).
 	_Sci(kSetReadOnly, 1);
 	_Sci(kSetMarginWidthN, 0, 0);
 	_Sci(kSetMarginWidthN, 1, 0);
@@ -108,9 +124,7 @@ void SciOutput::_ConfigureBaseStyles()
 	_Sci(kSetCaretFore, rgb(0xFF, 0xFF, 0xFF));
 	_Sci(kSetSelBack, 1, rgb(0x44, 0x44, 0x66));
 
-	// Background and foreground for all styles 0-40.
-	// Set individually — avoids SCI_STYLECLEARALL which triggers
-	// internal font propagation and crashes on this Scintilla build.
+	// Now safe to set colours — font table is initialized.
 	const long bg = rgb(0x1C, 0x1C, 0x1E);
 	const long fg = rgb(0xDC, 0xDC, 0xDC);
 	for (int s = 0; s <= 40; ++s) {
@@ -118,7 +132,7 @@ void SciOutput::_ConfigureBaseStyles()
 		_Sci(kStyleSetFore, static_cast<unsigned long>(s), fg);
 	}
 
-	// Named prose styles — fore colour only (back inherited above).
+	// Named prose styles.
 	_Sci(kStyleSetFore, kStyleUserLabel,    rgb(0x56, 0xB4, 0xE9));
 	_Sci(kStyleSetBold, kStyleUserLabel,    1);
 	_Sci(kStyleSetFore, kStyleModelLabel,   rgb(0xCC, 0x79, 0x5A));
