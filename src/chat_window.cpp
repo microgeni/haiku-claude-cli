@@ -11,34 +11,35 @@
 #include <TextView.h>
 
 #include "api.h"
+#include "code_styler.h"
 #include "config.h"
 #include "gui_sink.h"
+#include "scintilla_view.h"
 
-// Thin wrapper around tui-free plain-text rendering colours.
-// We use rgb_color directly rather than pulling in tui.h (which
-// would drag in ANSI/libedit headers the GUI doesn't need).
+// ---------------------------------------------------------------------------
+// Internal colour helpers (no tui:: dependency)
+// ---------------------------------------------------------------------------
 namespace {
 
-const rgb_color kColorBackground  = { 30,  30,  30, 255 };
+const rgb_color kColorBackground  = {  30,  30,  30, 255 };
 const rgb_color kColorText        = { 220, 220, 220, 255 };
-const rgb_color kColorUserLabel   = {  86, 180, 233, 255 }; // blue
-const rgb_color kColorModelLabel  = { 204, 121,  90, 255 }; // orange (Haiku accent)
+const rgb_color kColorUserLabel   = {  86, 180, 233, 255 };
+const rgb_color kColorModelLabel  = { 204, 121,  90, 255 };
 const rgb_color kColorDim         = { 120, 120, 120, 255 };
 const rgb_color kColorError       = { 230,  75,  75, 255 };
 
-// Append text at a given colour to fOutput. Must be called on the main thread.
 void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
 {
 	if (text.empty()) return;
 	BFont font;
 	view->GetFont(&font);
-	text_run_array* tra = (text_run_array*)malloc(
-		sizeof(text_run_array) + sizeof(text_run) * 2);
+	text_run_array* tra = static_cast<text_run_array*>(
+		malloc(sizeof(text_run_array) + sizeof(text_run)));
 	if (!tra) {
-		view->Insert(text.c_str(), text.size());
+		view->Insert(text.c_str(), static_cast<int32>(text.size()));
 		return;
 	}
-	tra->count = 1;
+	tra->count       = 1;
 	tra->runs[0].offset = 0;
 	tra->runs[0].font   = font;
 	tra->runs[0].color  = color;
@@ -47,19 +48,28 @@ void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
 	free(tra);
 }
 
-// Scroll fOutput to the very end.
 void ScrollToBottom(BTextView* view)
 {
 	view->ScrollToOffset(view->TextLength());
 }
 
+// Count lines in a string.
+int CountLines(const std::string& s)
+{
+	int n = 0;
+	for (char c : s) if (c == '\n') ++n;
+	return n;
+}
+
 } // namespace
 
-// ── ChatWindow ───────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// ChatWindow
+// ---------------------------------------------------------------------------
 
 ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int maxTokens, const std::string& systemPrompt)
-	: BWindow(BRect(100, 100, 820, 620), "Claude",
+	: BWindow(BRect(100, 100, 820, 640), "Claude",
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
 	, fModel(model)
@@ -67,20 +77,30 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	, fSystemPrompt(systemPrompt)
 	, fMessages(nlohmann::json::array())
 {
+	// Try to load the Genio theme and language set.
+	const std::string themePath = styling::FindDefaultTheme();
+	const std::string langsDir  = styling::FindLanguagesDir();
+	if (!themePath.empty() && fTheme.LoadFile(themePath)
+	    && !langsDir.empty()  && fLangSet.LoadDir(langsDir)) {
+		fStyler = new styling::CodeStyler(fTheme, fLangSet);
+	}
+
 	_BuildLayout();
 }
 
 ChatWindow::~ChatWindow()
 {
-	// If a worker is somehow still alive (shouldn't happen after QuitRequested
-	// waits for it), detach to avoid terminate-on-destroy.
+	delete fStyler;
 	if (fWorker.joinable()) fWorker.detach();
 	delete fSink;
 }
 
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
 void ChatWindow::_BuildLayout()
 {
-	// Output area: stylable, read-only, word-wrapped BTextView.
 	BRect dummy(0, 0, 100, 100);
 	fOutput = new BTextView(dummy, "output", dummy.InsetByCopy(4, 4),
 	                        B_FOLLOW_ALL, B_WILL_DRAW | B_FRAME_EVENTS);
@@ -94,82 +114,72 @@ void ChatWindow::_BuildLayout()
 	fOutput->SetFontAndColor(be_fixed_font, B_FONT_ALL, &kColorText);
 
 	fScroll = new BScrollView("scroll", fOutput,
-	                          B_FOLLOW_ALL, 0, false, true,
-	                          B_FANCY_BORDER);
+	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
 
-	// Input row.
 	fInput = new BTextControl("input", nullptr, "",
 	                           new BMessage(gui::MSG_SEND));
-	fInput->SetAlignment(B_ALIGN_LEFT, B_ALIGN_LEFT);
-
-	fSend = new BButton("send", "Send", new BMessage(gui::MSG_SEND));
+	fSend  = new BButton("send", "Send", new BMessage(gui::MSG_SEND));
 	fSend->MakeDefault(true);
-
-	// Status bar (one line, left-aligned).
 	fStatus = new BStringView("status", "");
 	fStatus->SetAlignment(B_ALIGN_LEFT);
-	fStatus->SetFont(be_plain_font);
 
-	// Wire the layout: scroll area fills available space, input row at
-	// bottom, status bar below that.
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fScroll, 10.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.SetInsets(B_USE_SMALL_INSETS, 0, B_USE_SMALL_INSETS, 0)
-			.Add(fInput,  1.0f)
-			.Add(fSend,   0.0f)
+			.Add(fInput, 1.0f)
+			.Add(fSend,  0.0f)
 		.End()
 		.Add(fStatus, 0.0f)
 		.SetInsets(0, 0, 0, B_USE_SMALL_INSETS)
 	.End();
 
-	// Initial status.
-	const std::string status = "model: " + fModel + "  |  turns: 0";
-	fStatus->SetText(status.c_str());
-
+	const std::string s = "model: " + fModel + "  |  turns: 0";
+	fStatus->SetText(s.c_str());
 	SetSizeLimits(400, 30000, 300, 30000);
 }
 
-// ── MessageReceived ──────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// MessageReceived
+// ---------------------------------------------------------------------------
 
 void ChatWindow::MessageReceived(BMessage* msg)
 {
 	switch (msg->what) {
 
-	// ── User input ────────────────────────────────────────────────────────
 	case gui::MSG_SEND: {
-		if (fWorkerRunning.load()) break; // ignore while a turn is in flight
+		if (fWorkerRunning.load()) break;
 		const char* txt = fInput->Text();
 		if (!txt || txt[0] == '\0') break;
 		_SendTurn();
 		break;
 	}
 
-	// ── Streamed assistant text ───────────────────────────────────────────
 	case gui::MSG_CHUNK: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
-			_AppendText(text);
+			_ProcessChunk(text);
 			fPendingAssistantText += text;
 		}
 		break;
 	}
 
-	// ── Turn complete ─────────────────────────────────────────────────────
 	case gui::MSG_DONE:
-		// Nothing to do here visually — the final newline already came
-		// via MSG_CHUNK in GuiSink::EndMessage(). Worker done arrives
-		// separately as MSG_WORKER_DONE.
+		// Flush any open code block when the turn ends.
+		if (fInCodeBlock) {
+			fInCodeBlock = false;
+			_FlushCodeBlock();
+		}
+		fLineBuffer.clear();
 		break;
 
-	// ── Tool lifecycle ────────────────────────────────────────────────────
 	case gui::MSG_TOOL_START: {
 		const char* name    = nullptr;
 		const char* summary = nullptr;
 		msg->FindString("name",    &name);
 		msg->FindString("summary", &summary);
 		std::string line = "\n\xE2\x9A\x99 "; // ⚙
-		if (name)    { line += name; line += ": "; }
+		if (name)    { line += name;    line += ": "; }
 		if (summary) { line += summary; }
 		line += "\xE2\x80\xA6\n"; // …
 		_AppendToolLine(line);
@@ -180,66 +190,64 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		bool        ok   = true;
 		msg->FindString("name", &name);
 		msg->FindBool("ok",     &ok);
-		std::string line = ok ? "\xE2\x9C\x85 " : "\xE2\x9D\x8C "; // ✅ / ❌
+		std::string line = ok ? "\xE2\x9C\x85 " : "\xE2\x9D\x8C "; // ✅/❌
 		if (name) line += name;
 		line += '\n';
 		_AppendToolLine(line);
 		break;
 	}
 
-	// ── Permission request ────────────────────────────────────────────────
 	case gui::MSG_ASK_PERM:
 		_HandlePermRequest(msg);
 		break;
 
-	// ── Status update ─────────────────────────────────────────────────────
 	case gui::MSG_STATUS: {
 		int32 kind = 0;
 		msg->FindInt32("kind", &kind);
-		const char* label = nullptr;
 		switch (static_cast<sink::StatusKind>(kind)) {
-			case sink::StatusKind::kThinking:   label = "thinking…"; break;
-			case sink::StatusKind::kCallingTool: label = "running tool…"; break;
-			case sink::StatusKind::kIdle:        label = nullptr;     break;
-		}
-		if (label) {
-			fStatus->SetText(label);
-		} else {
-			const std::string s = "model: " + fModel
-			    + "  |  turns: " + std::to_string(fTurnCount);
-			fStatus->SetText(s.c_str());
+			case sink::StatusKind::kThinking:
+				fStatus->SetText("thinking\xE2\x80\xA6");
+				break;
+			case sink::StatusKind::kCallingTool:
+				fStatus->SetText("running tool\xE2\x80\xA6");
+				break;
+			case sink::StatusKind::kIdle: {
+				const std::string s = "model: " + fModel
+				    + "  |  turns: " + std::to_string(fTurnCount);
+				fStatus->SetText(s.c_str());
+				break;
+			}
 		}
 		break;
 	}
 
-	// ── Error from worker ─────────────────────────────────────────────────
 	case gui::MSG_ERR: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
-			const std::string line =
-				std::string("\n\xE2\x9A\xA0 ") + text + "\n"; // ⚠
-			AppendWithColor(fOutput, line, kColorError);
+			AppendWithColor(fOutput,
+				std::string("\n\xE2\x9A\xA0 ") + text + "\n", // ⚠
+				kColorError);
 			ScrollToBottom(fOutput);
+			fStatus->SetText("Error");
 		}
 		break;
 	}
 
-	// ── Worker thread finished ────────────────────────────────────────────
 	case gui::MSG_WORKER_DONE: {
 		fWorkerRunning.store(false);
 		if (fWorker.joinable()) fWorker.join();
 		delete fSink;
 		fSink = nullptr;
+		fInCodeBlock = false;
+		fCodeBuffer.clear();
+		fLineBuffer.clear();
 
-		// Commit the completed turn to conversation history.
-		if (!fPendingUserText.empty()) {
+		if (!fPendingUserText.empty())
 			fMessages.push_back({{"role", "user"},
 			                     {"content", fPendingUserText}});
-		}
-		if (!fPendingAssistantText.empty()) {
+		if (!fPendingAssistantText.empty())
 			fMessages.push_back({{"role", "assistant"},
 			                     {"content", fPendingAssistantText}});
-		}
 		fPendingUserText.clear();
 		fPendingAssistantText.clear();
 
@@ -255,17 +263,12 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	default:
 		BWindow::MessageReceived(msg);
-		break;
 	}
 }
 
 bool ChatWindow::QuitRequested()
 {
-	// Wait for any in-flight worker to finish before the window tears down,
-	// so we don't destroy the GuiSink (which holds a live BMessenger and
-	// sem_t) while the worker is still using it.
 	if (fWorkerRunning.load() && fWorker.joinable()) {
-		// Signal cancellation via g_interrupted so curl aborts quickly.
 		g_interrupted = 1;
 		fWorker.join();
 		delete fSink;
@@ -275,7 +278,9 @@ bool ChatWindow::QuitRequested()
 	return true;
 }
 
-// ── Private helpers ──────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
 
 void ChatWindow::_AppendText(const std::string& text)
 {
@@ -289,6 +294,133 @@ void ChatWindow::_AppendToolLine(const std::string& text)
 	ScrollToBottom(fOutput);
 }
 
+// ---------------------------------------------------------------------------
+// _ProcessChunk — fenced-code-block detection
+//
+// The streaming arrives token-by-token. We append each character to
+// fLineBuffer. On newline we check whether the complete line is a fence
+// (starts with "```"). When we find an opening fence we switch to
+// buffering mode; on the closing fence we flush to a BScintillaView.
+// ---------------------------------------------------------------------------
+
+static bool IsFence(const std::string& line, std::string& lang)
+{
+	if (line.size() < 3) return false;
+	if (line[0] != '`' || line[1] != '`' || line[2] != '`') return false;
+	// Closing fence: exactly "```" (possibly with trailing whitespace).
+	lang.clear();
+	for (size_t i = 3; i < line.size(); ++i) {
+		if (line[i] == '\n' || line[i] == '\r' || line[i] == ' ') break;
+		lang += line[i];
+	}
+	return true;
+}
+
+void ChatWindow::_ProcessChunk(const std::string& chunk)
+{
+	for (char c : chunk) {
+		fLineBuffer += c;
+		if (c != '\n') continue;
+
+		// We have a complete line in fLineBuffer.
+		const std::string line = fLineBuffer;
+		fLineBuffer.clear();
+
+		std::string lang;
+		if (!fInCodeBlock) {
+			// Check for opening fence.
+			if (IsFence(line, lang)) {
+				fInCodeBlock = true;
+				fCodeLang    = lang;
+				fCodeBuffer.clear();
+				// Don't emit the fence line itself.
+			} else {
+				_AppendText(line);
+			}
+		} else {
+			// Inside a code block.
+			if (IsFence(line, lang) && lang.empty()) {
+				// Closing fence — render the buffered code.
+				fInCodeBlock = false;
+				_FlushCodeBlock();
+			} else {
+				fCodeBuffer += line;
+			}
+		}
+	}
+
+	// Emit any partial line that didn't end with '\n' (plain text only —
+	// never emit mid-fence characters directly to the BTextView).
+	if (!fLineBuffer.empty() && !fInCodeBlock) {
+		_AppendText(fLineBuffer);
+		fLineBuffer.clear();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// _FlushCodeBlock — render the accumulated code in a BScintillaView
+// ---------------------------------------------------------------------------
+
+void ChatWindow::_FlushCodeBlock()
+{
+	if (fCodeBuffer.empty()) return;
+
+	// Calculate an appropriate height: 1 line ≈ 16px, min 60px, max 400px.
+	const int lines  = std::max(1, CountLines(fCodeBuffer) + 1);
+	const int height = std::min(400, std::max(60, lines * 16 + 8));
+
+	// The BScintillaView is added as a child of the output BTextView.
+	// We use a BScrollView wrapper for horizontal scrolling on wide code.
+	// Position: appended after the current text, left-aligned, full width.
+	const float viewWidth = fOutput->Bounds().Width() - 16.0f;
+	const float yPos      = fOutput->TextRect().bottom + 4.0f;
+
+	BScintillaView* sci = new BScintillaView(
+		"code", B_WILL_DRAW | B_NAVIGABLE, false, true, B_FANCY_BORDER);
+	sci->MoveTo(8.0f, yPos);
+	sci->ResizeTo(viewWidth, static_cast<float>(height));
+
+	fOutput->AddChild(sci);
+	fCodeViews.push_back(sci);
+
+	// Configure via SCI_* messages.
+	auto send = [sci](unsigned int msg, unsigned long w, long l) -> long {
+		return sci->SendMessage(msg, w, l);
+	};
+
+	if (fStyler) {
+		fStyler->Apply(send, fCodeLang);
+	} else {
+		// No theme: plain dark background, light text.
+		// SCI_STYLESETFORE/BACK on STYLE_DEFAULT = 32.
+		send(2051, 32, static_cast<long>(styling::CodeStyler::ParseColor("#DCDCDC")));
+		send(2052, 32, static_cast<long>(styling::CodeStyler::ParseColor("#1E1E1E")));
+		send(2050, 0, 0); // STYLECLEARALL
+	}
+
+	// Use fixed-width font (SCI_STYLESETFONT).
+	send(2056 + 1, 32, reinterpret_cast<long>("Noto Mono"));
+
+	// Set the code text.
+	sci->SetText(fCodeBuffer.c_str());
+
+	// Make read-only.
+	send(2171, 1, 0); // SCI_SETREADONLY
+
+	// Grow the BTextView's rect so the Scintilla view doesn't overlap text.
+	BRect tr = fOutput->TextRect();
+	tr.bottom += static_cast<float>(height) + 8.0f;
+	fOutput->SetTextRect(tr);
+
+	ScrollToBottom(fOutput);
+	fCodeBuffer.clear();
+	fCodeLang.clear();
+}
+
+// ---------------------------------------------------------------------------
+// _SendTurn / _LaunchWorker / _HandlePermRequest
+// ---------------------------------------------------------------------------
+
 void ChatWindow::_SendTurn()
 {
 	const char* raw = fInput->Text();
@@ -296,8 +428,7 @@ void ChatWindow::_SendTurn()
 	const std::string userText(raw);
 	fInput->SetText("");
 
-	// Echo the user line into the scrollback.
-	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel); // ▸
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
 	_AppendText(userText + "\n");
 	AppendWithColor(fOutput, "claude \xE2\x96\xB8 ", kColorModelLabel);
 
@@ -308,40 +439,34 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 {
 	fPendingUserText      = userText;
 	fPendingAssistantText.clear();
+	fInCodeBlock          = false;
+	fCodeBuffer.clear();
+	fLineBuffer.clear();
 
 	fSend->SetEnabled(false);
 	fInput->SetEnabled(false);
-	fStatus->SetText("thinking\xE2\x80\xA6"); // "thinking…"
+	fStatus->SetText("thinking\xE2\x80\xA6");
 	fWorkerRunning.store(true);
 
-	// Capture everything the worker needs by value so no shared state is
-	// accessed without the window lock. The GuiSink is the only shared
-	// object; it is valid for the entire thread lifetime.
-	const config::Auth   auth          = fAuth;
-	const std::string    model         = fModel;
-	const int            maxTokens     = fMaxTokens;
-	const std::string    systemPrompt  = config::ComposeSystem(fSystemPrompt);
-	nlohmann::json       messages      = fMessages; // snapshot
-
-	// Append the new user turn to the snapshot so SendWithTools sees it.
+	const config::Auth   auth         = fAuth;
+	const std::string    model        = fModel;
+	const int            maxTokens    = fMaxTokens;
+	const std::string    systemPrompt = config::ComposeSystem(fSystemPrompt);
+	nlohmann::json       messages     = fMessages;
 	messages.push_back({{"role", "user"}, {"content", userText}});
 
 	fSink = new gui::GuiSink(BMessenger(this));
-	gui::GuiSink* sink = fSink; // raw pointer for the lambda
-
-	// Signal BeginMessage so the role header appears before the first chunk.
+	gui::GuiSink* sink = fSink;
 	sink->BeginMessage("assistant");
 
 	fWorker = std::thread([=]() {
-		// Worker thread — no BView calls. Only BMessenger::SendMessage
-		// (via GuiSink) and api:: calls are safe here.
 		api::SendWithTools(auth, model, maxTokens,
 		                   const_cast<nlohmann::json&>(messages),
 		                   systemPrompt, sink);
 		sink->EndMessage();
 		BMessenger(this).SendMessage(gui::MSG_WORKER_DONE);
 	});
-	fWorker.detach(); // joined in MSG_WORKER_DONE
+	fWorker.detach();
 }
 
 void ChatWindow::_HandlePermRequest(BMessage* msg)
@@ -351,27 +476,17 @@ void ChatWindow::_HandlePermRequest(BMessage* msg)
 	msg->FindString("tool",    &tool);
 	msg->FindString("preview", &preview);
 
-	// Build the alert text.
 	std::string body = "Allow tool: ";
 	body += tool ? tool : "(unknown)";
 	if (preview && preview[0]) {
 		body += "\n\n";
-		// Cap preview at 400 chars so the alert stays readable.
 		const std::string pv(preview);
-		body += (pv.size() > 400) ? pv.substr(0, 400) + "…" : pv;
+		body += (pv.size() > 400) ? pv.substr(0, 400) + "\xE2\x80\xA6" : pv;
 	}
 
-	BAlert* alert = new BAlert("Tool Permission",
-	    body.c_str(),
-	    "Deny", "Allow",
-	    nullptr,
-	    B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-	alert->SetShortcut(0, B_ESCAPE); // Esc = Deny
-
-	// Go() runs a nested event loop — safe on the BLooper thread.
-	// The worker is blocked on sem_wait() throughout.
-	const int32 choice = alert->Go();
-	const bool  granted = (choice == 1);
-
-	if (fSink) fSink->DeliverPermissionReply(granted);
+	BAlert* alert = new BAlert("Tool Permission", body.c_str(),
+	    "Deny", "Allow", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->SetShortcut(0, B_ESCAPE);
+	const int32 choice  = alert->Go();
+	if (fSink) fSink->DeliverPermissionReply(choice == 1);
 }

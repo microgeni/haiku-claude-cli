@@ -16,19 +16,20 @@
 
 #include <nlohmann/json.hpp>
 
+#include "code_styler.h"
 #include "config.h"
 #include "gui_sink.h"
 
-// ChatWindow — the single chat surface. Owns all BViews; the only
-// thread that mutates them is the BLooper thread (main thread).
+// ChatWindow — the single chat surface. Owns all BViews on the main thread.
 //
-// A worker std::thread runs api::SendWithTools with a GuiSink whose
-// callbacks post BMessages here. MessageReceived handles each code and
-// appends text / shows alerts / updates the status bar — all on the
-// main thread, safely under the window lock.
+// Code-block streaming model (Step 6):
+//   While fInCodeBlock == false: text goes to fOutput (BTextView).
+//   When "```lang" arrives: fInCodeBlock = true, fCodeLang = "lang".
+//   While fInCodeBlock: text accumulates in fCodeBuffer.
+//   When closing "```" arrives: render fCodeBuffer in an embedded
+//     BScintillaView with CodeStyler applied, then resume BTextView output.
 class ChatWindow : public BWindow {
 public:
-	// `auth` and `model` come from config::Load() in ReadyToRun().
 	ChatWindow(const config::Auth& auth, const std::string& model,
 	           int maxTokens, const std::string& systemPrompt);
 	~ChatWindow() override;
@@ -37,52 +38,61 @@ public:
 	bool QuitRequested() override;
 
 private:
-	// Build the BLayoutBuilder layout once during construction.
 	void _BuildLayout();
 
-	// Append plain text to the scrollback on the main thread.
-	// Automatically scrolls to the bottom.
+	// Append plain text to the BTextView scrollback (main thread only).
 	void _AppendText(const std::string& text);
-
-	// Append a dim "tool" line (⚙ name… / ✓ name).
 	void _AppendToolLine(const std::string& text);
 
-	// Submit the current input line as a new user turn.
+	// Process a chunk of streamed text, detecting fenced code blocks.
+	// Plain text goes to BTextView; code blocks are buffered until closed.
+	void _ProcessChunk(const std::string& chunk);
+
+	// Flush fCodeBuffer as a BScintillaView embedded below the BTextView.
+	void _FlushCodeBlock();
+
 	void _SendTurn();
-
-	// Spawn the worker thread for one api::SendWithTools call.
 	void _LaunchWorker(const std::string& userText);
-
-	// Show a BAlert for a tool permission request and unblock the sink.
 	void _HandlePermRequest(BMessage* msg);
 
-	// ── Widgets (owned by the layout, not freed in destructor) ───────────
-	BTextView*    fOutput  = nullptr; // scrollback — read-only, stylable
-	BScrollView*  fScroll  = nullptr;
-	BTextControl* fInput   = nullptr; // single-line prompt
-	BButton*      fSend    = nullptr;
-	BStringView*  fStatus  = nullptr; // model / turn counter
+	// ── Widgets ────────────────────────────────────────────────────────────
+	BTextView*    fOutput    = nullptr;
+	BScrollView*  fScroll    = nullptr;
+	BTextControl* fInput     = nullptr;
+	BButton*      fSend      = nullptr;
+	BStringView*  fStatus    = nullptr;
 
-	// ── Conversation state ────────────────────────────────────────────────
+	// ── Conversation state ─────────────────────────────────────────────────
 	config::Auth       fAuth;
 	std::string        fModel;
 	int                fMaxTokens;
 	std::string        fSystemPrompt;
-	nlohmann::json     fMessages; // rolling history passed to SendWithTools
+	nlohmann::json     fMessages;
 	int                fTurnCount = 0;
 
-	// ── Worker thread ─────────────────────────────────────────────────────
-	// The GuiSink is heap-allocated before the thread starts and deleted
-	// in MSG_WORKER_DONE after join() confirms the thread has exited.
-	// Both the thread and the sink are valid only while fWorkerRunning.
+	// ── Code-block streaming state ─────────────────────────────────────────
+	// Two-phase: buffer during streaming, render on closing fence.
+	bool               fInCodeBlock  = false;
+	std::string        fCodeLang;    // fence tag, e.g. "cpp"
+	std::string        fCodeBuffer;  // accumulates code lines
+	std::string        fLineBuffer;  // partial line for fence detection
+
+	// CodeStyler loaded once at startup; nullptr if no theme/languages found.
+	styling::Theme       fTheme;
+	styling::LanguageSet fLangSet;
+	styling::CodeStyler* fStyler = nullptr;
+
+	// List of BScintillaView* we've embedded; kept so they can be
+	// destroyed with the window (they are not part of fOutput's view
+	// hierarchy in the same way as regular child views).
+	std::vector<BView*>  fCodeViews;
+
+	// ── Worker thread ──────────────────────────────────────────────────────
 	std::thread           fWorker;
 	std::atomic<bool>     fWorkerRunning { false };
 	gui::GuiSink*         fSink = nullptr;
-
-	// The last user text, kept so MSG_WORKER_DONE can push the completed
-	// assistant turn into fMessages.
 	std::string           fPendingUserText;
-	std::string           fPendingAssistantText; // accumulated from MSG_CHUNK
+	std::string           fPendingAssistantText;
 };
 
 #endif // HAIKU_CLAUDE_CLI_CHAT_WINDOW_H

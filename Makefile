@@ -47,6 +47,7 @@ BIN      := $(BUILDDIR)/claude
 GUI_ONLY_SRCS := \
     $(SRCDIR)/gui_sink.cpp     \
     $(SRCDIR)/gui_stubs.cpp    \
+    $(SRCDIR)/code_styler.cpp  \
     $(SRCDIR)/chat_window.cpp  \
     $(SRCDIR)/app_main_gui.cpp
 
@@ -101,6 +102,7 @@ GUI_CORE_SRCS := \
 # GUI-specific front-end files.
 GUI_FRONT_SRCS := \
     $(SRCDIR)/tui.cpp         \
+    $(SRCDIR)/code_styler.cpp \
     $(SRCDIR)/gui_stubs.cpp   \
     $(SRCDIR)/gui_sink.cpp    \
     $(SRCDIR)/chat_window.cpp \
@@ -110,10 +112,13 @@ GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
 GUI_OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/gui_%.o,$(GUI_SRCS))
 GUI_DEPS := $(GUI_OBJS:.o=.d)
 
-# Same compile flags as the CLI + libbe headers (already on the system path
-# on Haiku; no pkg-config entry needed).
-GUI_CXXFLAGS := $(CXXFLAGS)
-GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) -pthread -lbe -lnetwork
+YAMLCPP_CFLAGS := $(shell $(PKG_CONFIG) --cflags yaml-cpp 2>/dev/null)
+YAMLCPP_LIBS   := $(shell $(PKG_CONFIG) --libs   yaml-cpp 2>/dev/null || echo -lyaml-cpp)
+
+# Same compile flags as the CLI + libbe headers + yaml-cpp.
+GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS)
+GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
+                -pthread -lbe -lnetwork -lscintilla -llexilla
 
 $(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	$(CXX) $(GUI_CXXFLAGS) -MMD -MP -MF $(@:.o=.d) -c -o $@ $<
