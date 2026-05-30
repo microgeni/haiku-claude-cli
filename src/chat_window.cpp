@@ -1085,6 +1085,11 @@ void ChatWindow::_NewChat()
 	fSessionOutputTokens = 0;
 	if (fTokenBar) fTokenBar->SetTokens(0, fMaxTokens);
 	_UpdateTitle();
+
+	// Always restore the input to a ready state — _CancelWorker() only
+	// requests interruption and leaves _SetBusy(false) to MSG_WORKER_DONE,
+	// but if no worker was running the input would stay disabled/hidden.
+	_SetBusy(false);
 }
 
 void ChatWindow::_ClearOutput()
