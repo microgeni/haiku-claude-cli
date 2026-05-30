@@ -125,16 +125,23 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 class TokenBar : public BView {
 public:
-	static const int kBarHeight = 14;
+	static const int kBarHeight = 18;
 
 	TokenBar();
 
 	void	Draw(BRect updateRect) override;
 	void	SetTokens(int used, int maxCtx);
 
+	// Per-session counters mirrored from the CLI status row:
+	// turn number plus cumulative upstream (↑) / downstream (↓) tokens.
+	void	SetStats(int turn, int sessionInput, int sessionOutput);
+
 private:
-	int  fUsed = 0;
-	int  fMax  = 200000; // default until first real value arrives
+	int  fUsed    = 0;
+	int  fMax     = 200000; // default until first real value arrives
+	int  fTurn    = 0;
+	int  fInput   = 0;
+	int  fOutput  = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@
 #include "chat_window.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -487,8 +488,25 @@ void TokenBar::Draw(BRect /*updateRect*/)
 	SetFont(&f);
 	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
 	float strW = f.StringWidth(lbl.c_str());
-	MovePenTo(r.right - strW - 4.0f, r.bottom - 3.0f);
+	MovePenTo(std::floor(r.right - strW - 8.0f), r.bottom - 3.0f);
 	DrawString(lbl.c_str());
+
+	// Left-aligned per-session stats, mirroring the CLI status row:
+	// "turn N · ↑ 1.2k · ↓ 420".
+	const std::string stats =
+		"turn " + std::to_string(fTurn)
+		+ "  \xC2\xB7  \xE2\x86\x91 " + models::CompactTokens(fInput)
+		+ "  \xC2\xB7  \xE2\x86\x93 " + models::CompactTokens(fOutput);
+	MovePenTo(r.left + 4.0f, r.bottom - 3.0f);
+	DrawString(stats.c_str());
+}
+
+void TokenBar::SetStats(int turn, int sessionInput, int sessionOutput)
+{
+	fTurn   = turn;
+	fInput  = sessionInput;
+	fOutput = sessionOutput;
+	Invalidate();
 }
 
 void TokenBar::SetTokens(int used, int maxCtx)
@@ -1212,7 +1230,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		msg->FindInt32("max",    &maxCtx);
 		fSessionInputTokens  += input;
 		fSessionOutputTokens += output;
-		if (fTokenBar) fTokenBar->SetTokens(fSessionInputTokens, maxCtx > 0 ? maxCtx : fMaxTokens);
+		if (fTokenBar) {
+			fTokenBar->SetTokens(fSessionInputTokens, maxCtx > 0 ? maxCtx : fMaxTokens);
+			fTokenBar->SetStats(fTurnCount, fSessionInputTokens, fSessionOutputTokens);
+		}
 		break;
 	}
 
@@ -1245,6 +1266,8 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		fPendingAssistantText.clear();
 
 		++fTurnCount;
+		if (fTokenBar)
+			fTokenBar->SetStats(fTurnCount, fSessionInputTokens, fSessionOutputTokens);
 		_SetBusy(false);
 		_UpdateTitle();
 
@@ -1549,7 +1572,10 @@ void ChatWindow::_NewChat()
 	fSessionPath.clear();
 	fSessionInputTokens  = 0;
 	fSessionOutputTokens = 0;
-	if (fTokenBar) fTokenBar->SetTokens(0, fMaxTokens);
+	if (fTokenBar) {
+		fTokenBar->SetTokens(0, fMaxTokens);
+		fTokenBar->SetStats(0, 0, 0);
+	}
 	_UpdateTitle();
 
 	// Always restore the input to a ready state — _CancelWorker() only
@@ -1676,6 +1702,15 @@ void ChatWindow::_LoadSession(const std::string& path)
 	_UpdateTitle();
 	_ScrollToBottom();
 	fInput->MakeFocus(true);
+
+	// Loaded sessions don't carry token totals; reset and show the
+	// replayed turn count so the bar stays consistent with the CLI.
+	fSessionInputTokens  = 0;
+	fSessionOutputTokens = 0;
+	if (fTokenBar) {
+		fTokenBar->SetTokens(0, fMaxTokens);
+		fTokenBar->SetStats(fTurnCount, 0, 0);
+	}
 }
 
 void ChatWindow::_RefsReceived(BMessage* msg)
