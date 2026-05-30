@@ -36,12 +36,15 @@
 #include <TextView.h>
 #include <Window.h>
 
+#include <ListView.h>
+#include <StringItem.h>
 #include "api.h"
 #include "code_styler.h"
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
 #include "scintilla_view.h"
+#include "session_store.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -471,6 +474,87 @@ void SpinnerView::SetVisible(bool v)
 
 
 // ===========================================================================
+// SessionPanel
+// ===========================================================================
+
+SessionPanel::SessionPanel(BHandler* target)
+	: BView("sessions", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
+	, fTarget(target)
+{
+	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	_BuildLayout();
+	Hide(); // starts hidden
+}
+
+void SessionPanel::_BuildLayout()
+{
+	BStringView* label = new BStringView("seslbl", "Sessions");
+	BFont bold(be_bold_font);
+	bold.SetSize(be_plain_font->Size());
+	label->SetFont(&bold);
+
+	fList = new BListView("seslist", B_SINGLE_SELECTION_LIST);
+	fList->SetSelectionMessage(new BMessage(gui::MSG_SESSION_LOAD));
+	fList->SetTarget(fTarget);
+	fScroll = new BScrollView("sesscroll", fList,
+	                           0, false, true, B_FANCY_BORDER);
+
+	BButton* refreshBtn = new BButton("sesrefresh", "Refresh",
+	                                   new BMessage(gui::MSG_SESSIONS));
+	refreshBtn->SetTarget(fTarget);
+
+	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_SMALL_INSETS)
+		.Add(label)
+		.Add(fScroll, 1.0f)
+		.Add(refreshBtn)
+	.End();
+}
+
+void SessionPanel::Refresh()
+{
+	fSessions = session::List();
+
+	// Repopulate the list view.
+	fList->MakeEmpty();
+	for (const auto& info : fSessions) {
+		// Format: "Title\nmodel • N turns • date"
+		char dateBuf[32];
+		struct tm tm_buf;
+		localtime_r(&info.modified, &tm_buf);
+		std::strftime(dateBuf, sizeof(dateBuf), "%d %b %Y", &tm_buf);
+
+		std::string label = info.title.empty() ? "(untitled)" : info.title;
+		label += "\n";
+		label += info.model.empty() ? "?" : info.model;
+		label += " \xE2\x80\xA2 ";  // •
+		label += std::to_string(info.turns) + " turns \xE2\x80\xA2 ";
+		label += dateBuf;
+
+		fList->AddItem(new BStringItem(label.c_str()));
+	}
+}
+
+void SessionPanel::Toggle()
+{
+	fOpen = !fOpen;
+	if (fOpen) {
+		Refresh();
+		Show();
+	} else {
+		Hide();
+	}
+}
+
+const session::SessionInfo* SessionPanel::InfoAt(int32_t index) const
+{
+	if (index < 0 || index >= static_cast<int32_t>(fSessions.size()))
+		return nullptr;
+	return &fSessions[static_cast<size_t>(index)];
+}
+
+
+// ===========================================================================
 // ChatWindow
 // ===========================================================================
 
@@ -497,6 +581,9 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
 
+	// Ensure BFS attribute indexes exist for fast session queries.
+	session::EnsureIndexes();
+
 	// Update title with model name.
 	_UpdateTitle();
 
@@ -504,6 +591,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	AddShortcut('N', B_COMMAND_KEY, new BMessage(gui::MSG_NEW_CHAT));
 	AddShortcut('L', B_COMMAND_KEY, new BMessage(gui::MSG_CLEAR_OUTPUT));
 	AddShortcut(',', B_COMMAND_KEY, new BMessage(gui::MSG_SETTINGS));
+	AddShortcut('H', B_COMMAND_KEY, new BMessage(gui::MSG_SESSIONS));
 }
 
 ChatWindow::~ChatWindow()
@@ -575,13 +663,17 @@ void ChatWindow::_BuildLayout()
 	fSettingsBtn = new BButton("settingsbtn", "\xE2\x9A\x99", // ⚙
 	                            new BMessage(gui::MSG_SETTINGS));
 	fSettingsBtn->SetToolTip("Settings (Cmd+,)");
+	fSessionBtn  = new BButton("sessionbtn",  "History",  new BMessage(gui::MSG_SESSIONS));
+	fSessionBtn->SetToolTip("Session history (Cmd+H)");
 
-	// ── Settings panel ────────────────────────────────────────────────────────
-	fSettings = new SettingsPanel(fSystemPrompt, fMaxTokens);
+	// ── Session panel (left) + Settings panel (right) ─────────────────────────
+	fSessionPanel = new SessionPanel(this);
+	fSettings     = new SettingsPanel(fSystemPrompt, fMaxTokens);
 
 	// ── Layout ────────────────────────────────────────────────────────────────
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.AddGroup(B_HORIZONTAL, 0)
+			.Add(fSessionPanel, 0.0f)
 			.Add(fScroll, 1.0f)
 			.Add(fSettings, 0.0f)
 		.End()
@@ -600,6 +692,7 @@ void ChatWindow::_BuildLayout()
 			.Add(fModelField, 1.0f)
 			.Add(fNewBtn)
 			.Add(fClearBtn)
+			.Add(fSessionBtn)
 			.Add(fSettingsBtn)
 		.End()
 	.End();
@@ -696,6 +789,19 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		}
 		fSettings->Toggle();
 		break;
+
+	case gui::MSG_SESSIONS:
+		fSessionPanel->Toggle();
+		break;
+
+	case gui::MSG_SESSION_LOAD: {
+		if (!fSessionPanel) break;
+		const int32_t idx = fSessionPanel->fList
+		    ? fSessionPanel->fList->CurrentSelection() : -1;
+		const session::SessionInfo* info = fSessionPanel->InfoAt(idx);
+		if (info) _LoadSession(info->path);
+		break;
+	}
 
 	case gui::MSG_MODEL_PICK: {
 		const char* model = nullptr;
@@ -857,6 +963,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		++fTurnCount;
 		_SetBusy(false);
 		_UpdateTitle();
+
+		// Auto-save session to BFS after every completed turn.
+		_SaveSession();
+		if (fSessionPanel && fSessionPanel->IsOpen())
+			fSessionPanel->Refresh();
 
 		// Desktop notification when the window is not active.
 		if (!IsActive()) {
@@ -1104,6 +1215,7 @@ void ChatWindow::_NewChat()
 	fMessages    = nlohmann::json::array();
 	fTurnCount   = 0;
 	fConvTopic.clear();
+	fSessionPath.clear();
 	fSessionInputTokens  = 0;
 	fSessionOutputTokens = 0;
 	if (fTokenBar) fTokenBar->SetTokens(0, fMaxTokens);
@@ -1174,4 +1286,63 @@ void ChatWindow::_UpdateTitle()
 	if (!fConvTopic.empty())
 		title += " \xE2\x80\x94 " + fConvTopic;
 	SetTitle(title.c_str());
+}
+
+void ChatWindow::_SaveSession()
+{
+	if (fMessages.empty()) return;
+	const std::string saved = session::Save(
+	    fSessionPath,
+	    fConvTopic.empty() ? "Untitled" : fConvTopic,
+	    fModel,
+	    fTurnCount,
+	    fMessages);
+	if (!saved.empty())
+		fSessionPath = saved;
+}
+
+void ChatWindow::_LoadSession(const std::string& path)
+{
+	if (path.empty()) return;
+	nlohmann::json loaded = session::Load(path);
+	if (loaded.empty()) return;
+
+	// Cancel any running worker first.
+	_CancelWorker();
+	_ClearOutput();
+
+	fMessages    = loaded;
+	fSessionPath = path;
+	fTurnCount   = 0;
+	fConvTopic.clear();
+
+	// Replay the conversation into the output view so the user can see it.
+	for (const auto& turn : fMessages) {
+		const std::string role    = turn.value("role", "");
+		const std::string content = turn.value("content", "");
+		if (content.empty()) continue;
+
+		if (role == "user") {
+			if (fConvTopic.empty()) {
+				fConvTopic = content.size() > 60
+				    ? content.substr(0, 57) + "\xE2\x80\xA6"
+				    : content;
+			}
+			AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+			_AppendText(content + "\n");
+			++fTurnCount;
+		} else if (role == "assistant") {
+			AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+			if (fMdRenderer) {
+				fMdRenderer->Write(content);
+				fMdRenderer->Flush();
+			} else {
+				_AppendText(content + "\n");
+			}
+		}
+	}
+
+	_UpdateTitle();
+	_ScrollToBottom();
+	fInput->MakeFocus(true);
 }

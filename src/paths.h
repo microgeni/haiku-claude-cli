@@ -24,9 +24,10 @@ std::string HistoryPath();              // <ConfigDir>/history.json
 std::string NamedHistoryPath(         // <ConfigDir>/history-<name>.json
 	const std::string& name);
 std::string ReplHistoryPath();         // <ConfigDir>/repl_history
-std::string LogDir();              // <ConfigDir>/logs
-std::string UserMemoryPath();     // <ConfigDir>/CLAUDE.md
-std::string ProjectMemoryPath();  // ./CLAUDE.md (cwd-relative)
+std::string LogDir();                  // <ConfigDir>/logs
+std::string UserMemoryPath();          // <ConfigDir>/CLAUDE.md
+std::string ProjectMemoryPath();       // ./CLAUDE.md (cwd-relative)
+std::string SessionsDir();             // <ConfigDir>/sessions  (GUI)
 
 // Create `path` and any missing parent directories with mode 0700.
 // Returns false only if a mkdir(2) call fails for a reason other

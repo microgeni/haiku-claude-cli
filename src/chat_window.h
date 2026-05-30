@@ -23,6 +23,7 @@
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
+#include "session_store.h"
 
 // Additional MSG_ codes beyond those in gui_sink.h.
 namespace gui {
@@ -34,6 +35,8 @@ constexpr uint32_t MSG_SETTINGS     = 'STNG'; // toggle settings panel
 constexpr uint32_t MSG_TOKENS       = 'TOKN'; // int32 "input","output","max"
 constexpr uint32_t MSG_JUMP_BOTTOM  = 'JBOT'; // jump-to-bottom button
 constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
+constexpr uint32_t MSG_SESSIONS     = 'SESS'; // toggle session panel
+constexpr uint32_t MSG_SESSION_LOAD = 'SLOD'; // load a session (int32 "index")
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +150,40 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SessionPanel — slide-in panel docked on the LEFT side of the window.
+// Lists saved sessions sorted by most-recent-first. Click a row to load it.
+// ─────────────────────────────────────────────────────────────────────────────
+class BListView;
+class BScrollView;
+
+class SessionPanel : public BView {
+public:
+	static constexpr float kPanelWidth = 240.0f;
+
+	explicit SessionPanel(BHandler* target);
+
+	// Reload session list from disk and repopulate the BListView.
+	void	Refresh();
+
+	bool	IsOpen() const { return fOpen; }
+	void	Toggle();
+
+	// Return the SessionInfo for row index, or nullptr if out of range.
+	const session::SessionInfo* InfoAt(int32_t index) const;
+
+	// Public so ChatWindow::MessageReceived can query the selection.
+	BListView*                      fList    = nullptr;
+
+private:
+	void	_BuildLayout();
+
+	BScrollView*                    fScroll  = nullptr;
+	BHandler*                       fTarget  = nullptr;
+	std::vector<session::SessionInfo> fSessions;
+	bool                            fOpen    = false;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ChatWindow — the main application window.
 //
 // Layout (simplified):
@@ -202,6 +239,8 @@ private:
 	// ── Toolbar / UI state ───────────────────────────────────────────────────
 	void _SetBusy(bool busy);    // swap Send↔Stop, enable/disable input
 	void _UpdateTitle();         // set window title from model + state
+	void _SaveSession();         // persist current conversation to BFS
+	void _LoadSession(const std::string& path); // restore a saved session
 
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BTextView*     fOutput        = nullptr;
@@ -251,6 +290,11 @@ private:
 
 	// Code views kept for cleanup.
 	std::vector<BView*>  fCodeViews;
+
+	// ── Session persistence ──────────────────────────────────────────────────
+	std::string    fSessionPath;   // path of the current saved session file
+	SessionPanel*  fSessionPanel  = nullptr;
+	BButton*       fSessionBtn    = nullptr;
 
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
 	bool           fUserScrolled  = false;

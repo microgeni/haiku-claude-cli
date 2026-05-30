@@ -107,6 +107,7 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/md_renderer.cpp  \
     $(SRCDIR)/gui_stubs.cpp    \
     $(SRCDIR)/gui_sink.cpp     \
+    $(SRCDIR)/session_store.cpp \
     $(SRCDIR)/chat_window.cpp  \
     $(SRCDIR)/app_main_gui.cpp
 
