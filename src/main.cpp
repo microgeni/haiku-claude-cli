@@ -11,7 +11,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
-
 #include <nlohmann/json.hpp>
 
 #include "api.h"
