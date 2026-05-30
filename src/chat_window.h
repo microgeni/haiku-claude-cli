@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <Button.h>
+#include <CheckBox.h>
 #include <MenuField.h>
 #include <Messenger.h>
 #include <PopUpMenu.h>
@@ -119,6 +120,7 @@ public:
 	// Read back edited values.
 	std::string	SystemPrompt() const;
 	int         MaxTokens() const;
+	bool        NotificationsEnabled() const;
 
 	bool	IsOpen() const { return fOpen; }
 	void	Toggle();
@@ -128,6 +130,7 @@ private:
 
 	BTextView*    fSysPromptView  = nullptr;
 	BTextControl* fMaxTokensCtl   = nullptr;
+	BCheckBox*    fNotifyChk      = nullptr;
 	bool          fOpen           = false;
 };
 
@@ -303,8 +306,9 @@ private:
 	BMessageRunner* fSpinnerTimer  = nullptr;
 
 	// ── Turn timing & tool tracking ───────────────────────────────────────────
-	bigtime_t       fTurnStartTime = 0;   // system_time() when worker launched
-	int             fToolsUsed     = 0;   // tool calls in the current turn
+	bigtime_t       fTurnStartTime        = 0;
+	int             fToolsUsed            = 0;
+	bool            fNotificationsEnabled = true; // per-window, toggled in settings
 
 	// ── Worker thread ────────────────────────────────────────────────────────
 	std::thread         fWorker;

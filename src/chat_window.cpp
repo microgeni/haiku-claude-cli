@@ -380,6 +380,11 @@ void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens)
 	fMaxTokensCtl = new BTextControl("maxtokens", "Max tokens:",
 	                                  std::to_string(maxTokens).c_str(), nullptr);
 
+	// Notifications checkbox.
+	fNotifyChk = new BCheckBox("notify", "Notify on completed turns",
+	                            nullptr);
+	fNotifyChk->SetValue(B_CONTROL_ON); // enabled by default
+
 	// Close button.
 	BButton* closeBtn = new BButton("closesettings", "Close",
 	                                 new BMessage(gui::MSG_SETTINGS));
@@ -389,6 +394,7 @@ void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens)
 		.Add(sysLabel)
 		.Add(sysScroll, 1.0f)
 		.Add(fMaxTokensCtl)
+		.Add(fNotifyChk)
 		.Add(closeBtn)
 	.End();
 }
@@ -415,6 +421,12 @@ int SettingsPanel::MaxTokens() const
 	if (!t || t[0] == '\0') return 8192;
 	int v = std::atoi(t);
 	return (v > 0) ? v : 8192;
+}
+
+bool SettingsPanel::NotificationsEnabled() const
+{
+	if (!fNotifyChk) return true;
+	return fNotifyChk->Value() == B_CONTROL_ON;
 }
 
 void SettingsPanel::Toggle()
@@ -785,8 +797,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_SETTINGS:
 		if (fSettings->IsOpen()) {
 			// Panel is open — closing it: read back the edited values.
-			fSystemPrompt = fSettings->SystemPrompt();
-			fMaxTokens    = fSettings->MaxTokens();
+			fSystemPrompt         = fSettings->SystemPrompt();
+			fMaxTokens            = fSettings->MaxTokens();
+			fNotificationsEnabled = fSettings->NotificationsEnabled();
 		}
 		fSettings->Toggle();
 		break;
@@ -980,7 +993,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			const bool      longTurn   = elapsedSec >= 5;
 			const bool      hadTools   = fToolsUsed > 0;
 
-			if (longTurn || hadTools || !IsActive()) {
+			if (fNotificationsEnabled && (longTurn || hadTools || !IsActive())) {
 				BNotification notif(B_INFORMATION_NOTIFICATION);
 				notif.SetGroup("Claude");
 				notif.SetMessageID("claude-response"); // replaces previous
