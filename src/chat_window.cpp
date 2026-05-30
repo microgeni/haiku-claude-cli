@@ -113,7 +113,7 @@ int CountLines(const std::string& s)
 // ===========================================================================
 
 CommandPopup::CommandPopup(BHandler* target)
-	: BView(BRect(0, 0, 240, 120), "cmdpopup",
+	: BView(BRect(-9999, -9999, -9759, -9879), "cmdpopup",
 	        B_FOLLOW_NONE, B_WILL_DRAW | B_FRAME_EVENTS)
 	, fTarget(target)
 {
@@ -127,13 +127,12 @@ CommandPopup::CommandPopup(BHandler* target)
 	fScroll = new BScrollView("cmdscroll", fList,
 	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
 	AddChild(fScroll);
-
-	Hide();
+	// Start off-screen (not hidden — Hide/Show breaks layout-managed windows).
+	fVisible = false;
 }
 
 void CommandPopup::Draw(BRect /*updateRect*/)
 {
-	// Draw a subtle shadow border.
 	SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_DARKEN_3_TINT));
 	StrokeRect(Bounds());
 }
@@ -172,29 +171,45 @@ void CommandPopup::Populate(const std::string& prefix, BRect inputFrame)
 		fList->AddItem(new BStringItem(m.c_str()));
 	fList->Select(0);
 
-	// Size and position: float above the input area.
+	// Compute size.
 	BFont f(be_plain_font);
 	font_height fh;
 	f.GetHeight(&fh);
 	const float itemH = ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f;
-	const float h     = itemH * static_cast<float>(std::min((int)fMatches.size(), 6)) + 4.0f;
-	const float w     = inputFrame.Width();
-	const float y     = inputFrame.top - h;
+	fPopupH = itemH * static_cast<float>(std::min((int)fMatches.size(), 6)) + 4.0f;
+	fPopupW = inputFrame.Width();
+	fPopupX = inputFrame.left;
+	fPopupY = inputFrame.top - fPopupH;
+	if (fPopupY < 0) fPopupY = inputFrame.bottom;
+	fVisible = true;
 
-	MoveTo(inputFrame.left, y > 0 ? y : inputFrame.bottom);
-	ResizeTo(w, h);
+	// Apply position — must happen AFTER any layout pass.
+	_ApplyFrame();
+}
 
-	// Resize fScroll to fill.
-	fScroll->ResizeTo(w, h);
-	fList->ResizeTo(w - B_V_SCROLL_BAR_WIDTH - 4, h - 4);
-
-	if (IsHidden()) Show();
+void CommandPopup::_ApplyFrame()
+{
+	MoveTo(fPopupX, fPopupY);
+	ResizeTo(fPopupW, fPopupH);
+	fScroll->MoveTo(0, 0);
+	fScroll->ResizeTo(fPopupW, fPopupH);
+	fList->ResizeTo(fPopupW - B_V_SCROLL_BAR_WIDTH - 4, fPopupH - 4);
 	Invalidate();
+}
+
+void CommandPopup::FrameResized(float /*w*/, float /*h*/)
+{
+	// Layout reset our frame — reapply our desired position.
+	if (fVisible) _ApplyFrame();
 }
 
 void CommandPopup::HidePopup()
 {
-	if (!IsHidden()) Hide();
+	if (fVisible) {
+		MoveTo(-9999, -9999);
+		fVisible = false;
+		Invalidate();
+	}
 }
 
 void CommandPopup::SelectNext()
@@ -221,7 +236,6 @@ bool CommandPopup::Confirm()
 	HidePopup();
 	return true;
 }
-
 
 // ===========================================================================
 // InputView
@@ -358,16 +372,8 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 	if (Window()) {
 		const std::string txt(Text(), static_cast<size_t>(TextLength()));
 		if (!txt.empty() && txt[0] == '/') {
-			// Convert input view's frame to window coordinates for popup positioning.
-			BRect frame = Frame();  // in parent (BScrollView) coords
-			// Convert to window coords.
-			BPoint origin(frame.left, frame.top);
-			Parent()->ConvertToParent(&origin); // BScrollView → window
-			frame.OffsetTo(origin);
-
 			BMessage upd(gui::MSG_POPUP_UPDATE);
 			upd.AddString("prefix", txt.c_str());
-			upd.AddRect("inputFrame", frame);
 			Window()->PostMessage(&upd);
 			fPopupOpen = true;
 		} else if (fPopupOpen) {
@@ -1002,15 +1008,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case gui::MSG_POPUP_UPDATE: {
-		if (!fCommandPopup) break;
+		if (!fCommandPopup || !fInputScroll) break;
 		const char* prefix = nullptr;
-		BRect inputFrame;
-		msg->FindString("prefix",     &prefix);
-		msg->FindRect  ("inputFrame", &inputFrame);
-		// inputFrame is in BScrollView coords — convert to window coords.
-		if (fInputScroll)
-			inputFrame.OffsetBy(fInputScroll->Frame().left,
-			                    fInputScroll->Frame().top);
+		msg->FindString("prefix", &prefix);
+		// Position popup just above the input scroll view, full width.
+		BRect inputFrame = fInputScroll->Frame();
 		fCommandPopup->Populate(prefix ? prefix : "/", inputFrame);
 		break;
 	}

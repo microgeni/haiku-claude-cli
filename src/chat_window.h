@@ -61,21 +61,28 @@ public:
 	explicit CommandPopup(BHandler* target);
 
 	void	Draw(BRect updateRect) override;
+	void	FrameResized(float w, float h) override;
 
 	// Called by ChatWindow — always on the window's looper.
 	void	Populate(const std::string& prefix, BRect inputFrameInWindow);
 	void	HidePopup();
 	void	SelectNext();
 	void	SelectPrev();
-	bool	Confirm();       // posts MSG_COMPLETE_CMD to target; returns true if item selected
+	bool	Confirm();
 
-	bool	IsPopupVisible() const { return !IsHidden(); }
+	bool	IsPopupVisible() const { return fVisible; }
 
 private:
+	void	_ApplyFrame();
+
 	BListView*               fList    = nullptr;
 	BScrollView*             fScroll  = nullptr;
 	BHandler*                fTarget  = nullptr;
 	std::vector<std::string> fMatches;
+	bool                     fVisible = false;
+	// Desired position/size — reapplied after layout passes.
+	float   fPopupX = -9999, fPopupY = -9999;
+	float   fPopupW = 240,   fPopupH = 120;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
