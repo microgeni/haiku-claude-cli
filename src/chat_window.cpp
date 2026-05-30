@@ -29,6 +29,7 @@
 #include <Message.h>
 #include <MessageRunner.h>
 #include <Notification.h>
+#include <OS.h>
 #include <ScrollBar.h>
 #include <SeparatorView.h>
 #include <SpaceLayoutItem.h>
@@ -459,7 +460,7 @@ void SpinnerView::Draw(BRect /*updateRect*/)
 
 void SpinnerView::Tick()
 {
-	fStep = (fStep + 1) % 12;
+	fStep = (fStep + 11) % 12;
 	if (fVisible) Invalidate();
 }
 
@@ -884,6 +885,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (name) line += name;
 		line += '\n';
 		_AppendToolLine(line);
+		++fToolsUsed;
 		break;
 	}
 
@@ -969,13 +971,57 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (fSessionPanel && fSessionPanel->IsOpen())
 			fSessionPanel->Refresh();
 
-		// Desktop notification when the window is not active.
-		if (!IsActive()) {
-			BNotification notif(B_INFORMATION_NOTIFICATION);
-			notif.SetGroup("Claude");
-			notif.SetTitle("Response ready");
-			notif.SetMessageID("claude-response");
-			notif.Send();
+		// Desktop notification — always fire for longer turns (>5 s) so
+		// the user knows the result is ready even while focused on the app
+		// doing something else. Short turns are silent to avoid noise.
+		{
+			const bigtime_t elapsed = system_time() - fTurnStartTime;
+			const int       elapsedSec = static_cast<int>(elapsed / 1000000LL);
+			const bool      longTurn   = elapsedSec >= 5;
+			const bool      hadTools   = fToolsUsed > 0;
+
+			if (longTurn || hadTools || !IsActive()) {
+				BNotification notif(B_INFORMATION_NOTIFICATION);
+				notif.SetGroup("Claude");
+				notif.SetMessageID("claude-response"); // replaces previous
+
+				// Title describes what happened.
+				if (hadTools) {
+					std::string t = "Done \xE2\x80\x94 ";  // em dash
+					t += std::to_string(fToolsUsed);
+					t += (fToolsUsed == 1) ? " tool run" : " tools run";
+					t += " (" + std::to_string(elapsedSec) + "s)";
+					notif.SetTitle(t.c_str());
+				} else {
+					std::string t = "Response ready";
+					if (elapsedSec >= 5)
+						t += " (" + std::to_string(elapsedSec) + "s)";
+					notif.SetTitle(t.c_str());
+				}
+
+				// Content: first non-empty line of the assistant reply.
+				std::string preview;
+				if (!fPendingAssistantText.empty()) {
+					// fPendingAssistantText was already cleared above;
+					// use the last committed assistant message instead.
+					for (auto it = fMessages.rbegin(); it != fMessages.rend(); ++it) {
+						if ((*it).value("role", "") == "assistant") {
+							preview = (*it).value("content", "");
+							break;
+						}
+					}
+				}
+				// Strip leading whitespace / newlines.
+				const size_t start = preview.find_first_not_of(" \t\n\r");
+				if (start != std::string::npos) preview = preview.substr(start);
+				// Truncate to ~120 chars for the notification body.
+				if (preview.size() > 120)
+					preview = preview.substr(0, 117) + "\xE2\x80\xA6"; // …
+				if (!preview.empty())
+					notif.SetContent(preview.c_str());
+
+				notif.Send();
+			}
 		}
 		break;
 	}
@@ -1166,6 +1212,10 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 	fWebFetchBuf.clear();
 
 	_SetBusy(true);
+
+	// Record turn start time and reset tool counter for this turn.
+	fTurnStartTime = system_time();
+	fToolsUsed     = 0;
 
 	// Start spinner timer (80ms ticks).
 	if (fSpinner) fSpinner->SetVisible(true);

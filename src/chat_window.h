@@ -302,6 +302,10 @@ private:
 	// ── Spinner timer ────────────────────────────────────────────────────────
 	BMessageRunner* fSpinnerTimer  = nullptr;
 
+	// ── Turn timing & tool tracking ───────────────────────────────────────────
+	bigtime_t       fTurnStartTime = 0;   // system_time() when worker launched
+	int             fToolsUsed     = 0;   // tool calls in the current turn
+
 	// ── Worker thread ────────────────────────────────────────────────────────
 	std::thread         fWorker;
 	std::atomic<bool>   fWorkerRunning { false };
