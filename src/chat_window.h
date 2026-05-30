@@ -40,53 +40,41 @@ constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
 constexpr uint32_t MSG_SESSIONS     = 'SESS'; // toggle session panel
 constexpr uint32_t MSG_SESSION_LOAD = 'SLOD'; // load a session (int32 "index")
 constexpr uint32_t MSG_COMPLETE_CMD = 'CCMD'; // slash command selected (string "cmd")
+constexpr uint32_t MSG_POPUP_UPDATE = 'PUPT'; // InputView → ChatWindow: update popup
+constexpr uint32_t MSG_POPUP_NEXT   = 'PNXT'; // InputView → ChatWindow: next item
+constexpr uint32_t MSG_POPUP_PREV   = 'PPRV'; // InputView → ChatWindow: prev item
+constexpr uint32_t MSG_POPUP_CONF   = 'PCNF'; // InputView → ChatWindow: confirm
+constexpr uint32_t MSG_POPUP_HIDE   = 'PDIS'; // InputView → ChatWindow: hide
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CommandPopup — floating BWindow that appears above the input area when
-// the user types '/' and lists matching slash commands.
+// CommandPopup — overlay BView added directly to ChatWindow, positioned just
+// above the input area. Uses no separate BWindow — avoids all cross-looper
+// threading issues. Show/hide/populate all happen on ChatWindow's looper.
 //
-// THREADING: CommandPopup runs in its own looper. InputView::KeyDown runs
-// inside ChatWindow's looper (which is locked). We must NEVER call Lock()
-// on CommandPopup from KeyDown — that causes a deadlock. All communication
-// is one-way via BMessenger::SendMessage (non-blocking, no lock needed).
-//
-// Message protocol (ChatWindow/InputView → CommandPopup):
-//   MSG_POPUP_UPDATE  — string "prefix", point "pos", float "width"
-//   MSG_POPUP_NEXT    — select next item
-//   MSG_POPUP_PREV    — select previous item
-//   MSG_POPUP_CONFIRM — confirm selection (posts MSG_COMPLETE_CMD back)
-//   MSG_POPUP_DISMISS — hide the popup
-//
-// CommandPopup → ChatWindow:
-//   MSG_COMPLETE_CMD  — string "cmd" (selected command)
+// ChatWindow calls ShowPopup(prefix, rect) from MSG_POPUP_UPDATE and
+// hides it via HidePopup(). InputView sends MSG_POPUP_* to ChatWindow
+// (its own window), which handles everything safely in MessageReceived.
 // ─────────────────────────────────────────────────────────────────────────────
-
-namespace gui {
-constexpr uint32_t MSG_POPUP_UPDATE  = 'PUPT';
-constexpr uint32_t MSG_POPUP_NEXT    = 'PNXT';
-constexpr uint32_t MSG_POPUP_PREV    = 'PPRV';
-constexpr uint32_t MSG_POPUP_CONFIRM = 'PCNF';
-constexpr uint32_t MSG_POPUP_DISMISS = 'PDIS';
-} // namespace gui
-
-class CommandPopup : public BWindow {
+class CommandPopup : public BView {
 public:
-	CommandPopup(BMessenger chatWindow);
+	explicit CommandPopup(BHandler* target);
 
-	void	MessageReceived(BMessage* msg) override;
-	bool	QuitRequested() override { return false; } // never auto-quit
+	void	Draw(BRect updateRect) override;
 
-	// Safe to call from any thread — uses BMessenger (non-blocking).
-	BMessenger	Messenger() const { return BMessenger(this); }
+	// Called by ChatWindow — always on the window's looper.
+	void	Populate(const std::string& prefix, BRect inputFrameInWindow);
+	void	HidePopup();
+	void	SelectNext();
+	void	SelectPrev();
+	bool	Confirm();       // posts MSG_COMPLETE_CMD to target; returns true if item selected
+
+	bool	IsPopupVisible() const { return !IsHidden(); }
 
 private:
-	void	_Populate(const std::string& prefix,
-	                  BPoint screenPos, float width);
-
 	BListView*               fList    = nullptr;
 	BScrollView*             fScroll  = nullptr;
-	BMessenger               fChat;      // back-channel to ChatWindow
+	BHandler*                fTarget  = nullptr;
 	std::vector<std::string> fMatches;
 };
 
@@ -141,7 +129,6 @@ private:
 
 public:
 	bool                     fPopupOpen  = false; // tracks popup visibility
-	BMessenger               fPopupMsgr; // set by ChatWindow after construction
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,7 +348,7 @@ private:
 	BButton*       fSessionBtn    = nullptr;
 
 	// ── Slash-command autocomplete ───────────────────────────────────────────
-	CommandPopup*  fCommandPopup  = nullptr;
+	CommandPopup*  fCommandPopup  = nullptr;   // overlay view, child of window
 
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
 	bool           fUserScrolled  = false;
