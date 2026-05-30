@@ -38,7 +38,9 @@
 #include <Window.h>
 
 #include <ListView.h>
+#include <MenuItem.h>
 #include <Path.h>
+#include <PopUpMenu.h>
 #include <StringItem.h>
 #include "api.h"
 #include "code_styler.h"
@@ -109,132 +111,50 @@ int CountLines(const std::string& s)
 
 
 // ===========================================================================
-// CommandPopup  (BView overlay — no separate BWindow, no threading issues)
+// CommandPopup  (BPopUpMenu wrapper)
 // ===========================================================================
 
-CommandPopup::CommandPopup(BHandler* target)
-	: BView(BRect(-9999, -9999, -9759, -9879), "cmdpopup",
-	        B_FOLLOW_NONE, B_WILL_DRAW | B_FRAME_EVENTS)
-	, fTarget(target)
-{
-	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-
-	fList = new BListView(BRect(0, 0, 238, 118), "cmdlist",
-	                      B_SINGLE_SELECTION_LIST, B_FOLLOW_ALL);
-	fList->SetSelectionMessage(new BMessage(gui::MSG_COMPLETE_CMD));
-	fList->SetTarget(fTarget);
-
-	fScroll = new BScrollView("cmdscroll", fList,
-	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
-	AddChild(fScroll);
-	// Start off-screen (not hidden — Hide/Show breaks layout-managed windows).
-	fVisible = false;
-}
-
-void CommandPopup::Draw(BRect /*updateRect*/)
-{
-	SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_DARKEN_3_TINT));
-	StrokeRect(Bounds());
-}
-
-void CommandPopup::Populate(const std::string& prefix, BRect inputFrame)
+void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
 {
 	static const char* kBuiltins[] = {
 		"/help", "/clear", "/new", "/model", "/compact",
 		"/memory", "/usage", "/version", nullptr
 	};
 
-	fMatches.clear();
+	// Collect matching commands.
+	std::vector<std::string> matches;
 	for (const auto& name : commands::Names()) {
 		if (name.size() >= prefix.size() &&
 		    name.substr(0, prefix.size()) == prefix)
-			fMatches.push_back(name);
+			matches.push_back(name);
 	}
 	for (int i = 0; kBuiltins[i]; ++i) {
 		const std::string b(kBuiltins[i]);
 		if (b.size() >= prefix.size() &&
 		    b.substr(0, prefix.size()) == prefix) {
 			bool dup = false;
-			for (const auto& m : fMatches) if (m == b) { dup = true; break; }
-			if (!dup) fMatches.push_back(b);
+			for (const auto& m : matches) if (m == b) { dup = true; break; }
+			if (!dup) matches.push_back(b);
 		}
 	}
-	std::sort(fMatches.begin(), fMatches.end());
+	std::sort(matches.begin(), matches.end());
+	if (matches.empty()) return;
 
-	if (fMatches.empty()) {
-		HidePopup();
-		return;
+	// Build the BPopUpMenu.
+	BPopUpMenu* menu = new BPopUpMenu("commands", false, false);
+	for (const auto& m : matches) {
+		BMessage* msg = new BMessage(gui::MSG_COMPLETE_CMD);
+		msg->AddString("cmd", m.c_str());
+		menu->AddItem(new BMenuItem(m.c_str(), msg));
 	}
+	menu->SetTargetForItems(fTarget);
 
-	fList->MakeEmpty();
-	for (const auto& m : fMatches)
-		fList->AddItem(new BStringItem(m.c_str()));
-	fList->Select(0);
-
-	// Compute size.
-	BFont f(be_plain_font);
-	font_height fh;
-	f.GetHeight(&fh);
-	const float itemH = ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f;
-	fPopupH = itemH * static_cast<float>(std::min((int)fMatches.size(), 6)) + 4.0f;
-	fPopupW = inputFrame.Width();
-	fPopupX = inputFrame.left;
-	fPopupY = inputFrame.top - fPopupH;
-	if (fPopupY < 0) fPopupY = inputFrame.bottom;
+	// Go() runs a nested event loop — safe from MessageReceived context.
+	// It blocks until the user picks or dismisses.
 	fVisible = true;
-
-	// Apply position — must happen AFTER any layout pass.
-	_ApplyFrame();
-}
-
-void CommandPopup::_ApplyFrame()
-{
-	MoveTo(fPopupX, fPopupY);
-	ResizeTo(fPopupW, fPopupH);
-	fScroll->MoveTo(0, 0);
-	fScroll->ResizeTo(fPopupW, fPopupH);
-	fList->ResizeTo(fPopupW - B_V_SCROLL_BAR_WIDTH - 4, fPopupH - 4);
-	Invalidate();
-}
-
-void CommandPopup::FrameResized(float /*w*/, float /*h*/)
-{
-	// Layout reset our frame — reapply our desired position.
-	if (fVisible) _ApplyFrame();
-}
-
-void CommandPopup::HidePopup()
-{
-	if (fVisible) {
-		MoveTo(-9999, -9999);
-		fVisible = false;
-		Invalidate();
-	}
-}
-
-void CommandPopup::SelectNext()
-{
-	int32 sel = fList->CurrentSelection();
-	if (sel < fList->CountItems() - 1) fList->Select(sel + 1);
-	fList->ScrollToSelection();
-}
-
-void CommandPopup::SelectPrev()
-{
-	int32 sel = fList->CurrentSelection();
-	if (sel > 0) fList->Select(sel - 1);
-	fList->ScrollToSelection();
-}
-
-bool CommandPopup::Confirm()
-{
-	const int32 sel = fList->CurrentSelection();
-	if (sel < 0 || sel >= static_cast<int32>(fMatches.size())) return false;
-	BMessage msg(gui::MSG_COMPLETE_CMD);
-	msg.AddString("cmd", fMatches[static_cast<size_t>(sel)].c_str());
-	BMessenger(fTarget).SendMessage(&msg);
-	HidePopup();
-	return true;
+	menu->Go(screenPt, true, true, true);
+	fVisible = false;
+	delete menu;
 }
 
 // ===========================================================================
@@ -319,26 +239,6 @@ void InputView::MakeFocus(bool focused)
 
 void InputView::KeyDown(const char* bytes, int32 numBytes)
 {
-	// Popup navigation — post to ChatWindow (same looper, no deadlock).
-	if (fPopupOpen && Window()) {
-		if (numBytes == 1) {
-			if (bytes[0] == B_ESCAPE) {
-				Window()->PostMessage(gui::MSG_POPUP_HIDE);
-				fPopupOpen = false;
-				return;
-			}
-			if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
-				Window()->PostMessage(gui::MSG_POPUP_CONF);
-				fPopupOpen = false;
-				return;
-			}
-		}
-		if (numBytes == 3 && bytes[0] == '\x1B') {
-			if (bytes[2] == 'A') { Window()->PostMessage(gui::MSG_POPUP_PREV); return; }
-			if (bytes[2] == 'B') { Window()->PostMessage(gui::MSG_POPUP_NEXT); return; }
-		}
-	}
-
 	if (numBytes == 1) {
 		if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
 			if (modifiers() & B_SHIFT_KEY) {
@@ -350,35 +250,27 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 			return;
 		}
 		if (bytes[0] == B_ESCAPE) {
-			if (fPopupOpen) {
-				if (Window()) Window()->PostMessage(gui::MSG_POPUP_HIDE);
-				fPopupOpen = false;
-				return;
-			}
 			if (Window()) Window()->PostMessage(gui::MSG_CANCEL);
 			return;
 		}
 	}
 
-	// Up/Down → history (only when popup closed).
-	if (!fPopupOpen && numBytes == 3 && bytes[0] == '\x1B') {
+	// Up/Down → history.
+	if (numBytes == 3 && bytes[0] == '\x1B') {
 		if (bytes[2] == 'A') { _HistoryUp();   return; }
 		if (bytes[2] == 'B') { _HistoryDown(); return; }
 	}
 
 	BTextView::KeyDown(bytes, numBytes);
 
-	// After inserting, trigger popup update via PostMessage to ChatWindow.
+	// After inserting '/' as the first character, show the command popup.
+	// BPopUpMenu::Go() handles its own keyboard navigation.
 	if (Window()) {
 		const std::string txt(Text(), static_cast<size_t>(TextLength()));
 		if (!txt.empty() && txt[0] == '/') {
 			BMessage upd(gui::MSG_POPUP_UPDATE);
 			upd.AddString("prefix", txt.c_str());
 			Window()->PostMessage(&upd);
-			fPopupOpen = true;
-		} else if (fPopupOpen) {
-			Window()->PostMessage(gui::MSG_POPUP_HIDE);
-			fPopupOpen = false;
 		}
 	}
 
@@ -780,9 +672,8 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
 
-	// Create the slash-command popup overlay and add it directly to the window.
+	// Create the slash-command popup.
 	fCommandPopup = new CommandPopup(this);
-	AddChild(fCommandPopup); // hidden by default, positioned on demand
 
 	// Ensure BFS attribute indexes exist for fast session queries.
 	session::EnsureIndexes();
@@ -1011,29 +902,21 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (!fCommandPopup || !fInputScroll) break;
 		const char* prefix = nullptr;
 		msg->FindString("prefix", &prefix);
-		// Position popup just above the input scroll view, full width.
-		BRect inputFrame = fInputScroll->Frame();
-		fCommandPopup->Populate(prefix ? prefix : "/", inputFrame);
+		// Compute screen point: top-left of the input scroll view.
+		BPoint pt = fInputScroll->Frame().LeftTop();
+		ConvertToScreen(&pt);
+		fInput->fPopupOpen = false; // Go() is blocking; reset before call
+		fCommandPopup->Show(prefix ? prefix : "/", pt);
 		break;
 	}
 
+	// Arrow-key navigation and Escape/Enter are handled inside BPopUpMenu's
+	// own event loop — these messages are no longer needed but kept for
+	// safety in case old messages arrive.
 	case gui::MSG_POPUP_NEXT:
-		if (fCommandPopup) fCommandPopup->SelectNext();
-		break;
-
 	case gui::MSG_POPUP_PREV:
-		if (fCommandPopup) fCommandPopup->SelectPrev();
-		break;
-
 	case gui::MSG_POPUP_CONF:
-		if (fCommandPopup) {
-			fCommandPopup->Confirm();
-			fInput->fPopupOpen = false;
-		}
-		break;
-
 	case gui::MSG_POPUP_HIDE:
-		if (fCommandPopup) fCommandPopup->HidePopup();
 		fInput->fPopupOpen = false;
 		break;
 
@@ -1046,7 +929,6 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			fInput->MakeFocus(true);
 		}
 		fInput->fPopupOpen = false;
-		if (fCommandPopup) fCommandPopup->HidePopup();
 		break;
 	}
 

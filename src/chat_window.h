@@ -48,41 +48,25 @@ constexpr uint32_t MSG_POPUP_HIDE   = 'PDIS'; // InputView → ChatWindow: hide
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CommandPopup — overlay BView added directly to ChatWindow, positioned just
-// above the input area. Uses no separate BWindow — avoids all cross-looper
-// threading issues. Show/hide/populate all happen on ChatWindow's looper.
-//
-// ChatWindow calls ShowPopup(prefix, rect) from MSG_POPUP_UPDATE and
-// hides it via HidePopup(). InputView sends MSG_POPUP_* to ChatWindow
-// (its own window), which handles everything safely in MessageReceived.
+// CommandPopup — thin wrapper around BPopUpMenu for slash-command completion.
+// BPopUpMenu::Go() runs its own nested event loop safely from MessageReceived.
+// ChatWindow calls Show(prefix, screenPt) which blocks until user picks or
+// dismisses, then posts MSG_COMPLETE_CMD with the chosen command.
 // ─────────────────────────────────────────────────────────────────────────────
-class CommandPopup : public BView {
+class CommandPopup {
 public:
-	explicit CommandPopup(BHandler* target);
+	explicit CommandPopup(BHandler* target) : fTarget(target) {}
 
-	void	Draw(BRect updateRect) override;
-	void	FrameResized(float w, float h) override;
-
-	// Called by ChatWindow — always on the window's looper.
-	void	Populate(const std::string& prefix, BRect inputFrameInWindow);
-	void	HidePopup();
-	void	SelectNext();
-	void	SelectPrev();
-	bool	Confirm();
+	// Show the menu at screenPt. Blocks until dismissed (BPopUpMenu::Go).
+	// Posts MSG_COMPLETE_CMD to fTarget if an item was selected.
+	void	Show(const std::string& prefix, BPoint screenPt);
 
 	bool	IsPopupVisible() const { return fVisible; }
+	void	SetVisible(bool v) { fVisible = v; }
 
 private:
-	void	_ApplyFrame();
-
-	BListView*               fList    = nullptr;
-	BScrollView*             fScroll  = nullptr;
-	BHandler*                fTarget  = nullptr;
-	std::vector<std::string> fMatches;
-	bool                     fVisible = false;
-	// Desired position/size — reapplied after layout passes.
-	float   fPopupX = -9999, fPopupY = -9999;
-	float   fPopupW = 240,   fPopupH = 120;
+	BHandler* fTarget  = nullptr;
+	bool      fVisible = false;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -355,7 +339,7 @@ private:
 	BButton*       fSessionBtn    = nullptr;
 
 	// ── Slash-command autocomplete ───────────────────────────────────────────
-	CommandPopup*  fCommandPopup  = nullptr;   // overlay view, child of window
+	CommandPopup*  fCommandPopup  = nullptr;
 
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
 	bool           fUserScrolled  = false;
