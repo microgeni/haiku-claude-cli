@@ -522,7 +522,9 @@ ChatWindow::~ChatWindow()
 void ChatWindow::_BuildLayout()
 {
 	// ── Output BTextView (always-dark chat area) ─────────────────────────────
-	fOutput = new BTextView("output", B_WILL_DRAW | B_FRAME_EVENTS);
+	fOutput = new BTextView(BRect(0, 0, 600, 400), "output",
+	                        BRect(4, 4, 596, 396),
+	                        B_FOLLOW_ALL, B_WILL_DRAW | B_FRAME_EVENTS);
 	fOutput->MakeEditable(false);
 	fOutput->MakeSelectable(true);
 	fOutput->SetWordWrap(true);
@@ -647,6 +649,12 @@ void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
 	_RepositionOverlays();
+	// Keep output text rect in sync with the view bounds so word-wrap
+	// and Insert() render correctly after the window is resized.
+	if (fOutput) {
+		BRect b = fOutput->Bounds();
+		fOutput->SetTextRect(b.InsetByCopy(4.0f, 4.0f));
+	}
 }
 
 // ---------------------------------------------------------------------------
