@@ -23,18 +23,10 @@ GuiSink::~GuiSink()
 
 // ── StructuredSink methods ────────────────────────────────────────────────────
 
-void GuiSink::BeginMessage(const std::string& role)
+void GuiSink::BeginMessage(const std::string& /*role*/)
 {
-	// Emit a role header into the scrollback so the user can distinguish
-	// who is speaking. "claude ▸\n" or "you ▸\n" etc.
-	std::string header;
-	if (role == "assistant") header = "\nclaude \xE2\x96\xB8 "; // ▸
-	else if (role == "user") header = "\nyou \xE2\x96\xB8 ";
-	else                     header = "\n" + role + " \xE2\x96\xB8 ";
-
-	BMessage msg(MSG_CHUNK);
-	msg.AddString("text", header.c_str());
-	fWindow.SendMessage(&msg);
+	// Header ("claude ▸") is written directly by ChatWindow::_SendTurn()
+	// before the worker starts. Nothing to do here.
 }
 
 void GuiSink::AppendText(const std::string& chunk)

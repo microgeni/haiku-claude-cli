@@ -1074,10 +1074,17 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 
 	fWorkerRunning.store(true);
 	fWorker = std::thread([=]() {
-		api::SendWithTools(auth, model, maxTokens,
+		const api::SendResult result = api::SendWithTools(auth, model, maxTokens,
 		                   const_cast<nlohmann::json&>(messages),
 		                   systemPrompt, sink);
 		sink->EndMessage();
+
+		// Post token counts so the TokenBar can update.
+		BMessage tokMsg(gui::MSG_TOKENS);
+		tokMsg.AddInt32("input",  result.input_tokens);
+		tokMsg.AddInt32("output", result.output_tokens);
+		tokMsg.AddInt32("max",    maxTokens);
+		BMessenger(this).SendMessage(&tokMsg);
 		BMessenger(this).SendMessage(gui::MSG_WORKER_DONE);
 	});
 	fWorker.detach();
