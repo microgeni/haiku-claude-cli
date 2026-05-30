@@ -689,6 +689,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 
 	case gui::MSG_SETTINGS:
+		if (fSettings->IsOpen()) {
+			// Panel is open — closing it: read back the edited values.
+			fSystemPrompt = fSettings->SystemPrompt();
+			fMaxTokens    = fSettings->MaxTokens();
+		}
 		fSettings->Toggle();
 		break;
 
