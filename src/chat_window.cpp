@@ -112,16 +112,18 @@ int CountLines(const std::string& s)
 // CommandPopup
 // ===========================================================================
 
-CommandPopup::CommandPopup(BHandler* target)
-	: BWindow(BRect(0, 0, 200, 120), "cmdpopup",
+CommandPopup::CommandPopup(BMessenger chatWindow)
+	: BWindow(BRect(0, 0, 240, 120), "cmdpopup",
 	          B_NO_BORDER_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
 	          B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE
 	          | B_NOT_MINIMIZABLE | B_AVOID_FOCUS | B_AUTO_UPDATE_SIZE_LIMITS)
-	, fTarget(target)
+	, fChat(chatWindow)
 {
 	fList = new BListView("cmdlist", B_SINGLE_SELECTION_LIST);
-	fList->SetSelectionMessage(new BMessage(gui::MSG_COMPLETE_CMD));
-	fList->SetTarget(fTarget);
+	// Selection posts MSG_POPUP_CONFIRM back to ourselves.
+	fList->SetSelectionMessage(new BMessage(gui::MSG_POPUP_CONFIRM));
+	fList->SetTarget(this);
+
 	fScroll = new BScrollView("cmdscroll", fList,
 	                           0, false, true, B_FANCY_BORDER);
 
@@ -129,44 +131,92 @@ CommandPopup::CommandPopup(BHandler* target)
 		.Add(fScroll)
 	.End();
 
-	Hide(); // starts hidden
+	Hide();
 }
 
-void CommandPopup::Update(const std::string& prefix,
-                           BPoint screenPos, float width)
+void CommandPopup::MessageReceived(BMessage* msg)
+{
+	switch (msg->what) {
+
+	case gui::MSG_POPUP_UPDATE: {
+		const char* prefix = nullptr;
+		BPoint pos;
+		float width = 240.0f;
+		msg->FindString("prefix", &prefix);
+		msg->FindPoint("pos",     &pos);
+		msg->FindFloat("width",   &width);
+		_Populate(prefix ? prefix : "/", pos, width);
+		break;
+	}
+
+	case gui::MSG_POPUP_NEXT: {
+		int32 sel = fList->CurrentSelection();
+		if (sel < fList->CountItems() - 1) fList->Select(sel + 1);
+		fList->ScrollToSelection();
+		break;
+	}
+
+	case gui::MSG_POPUP_PREV: {
+		int32 sel = fList->CurrentSelection();
+		if (sel > 0) fList->Select(sel - 1);
+		fList->ScrollToSelection();
+		break;
+	}
+
+	case gui::MSG_POPUP_CONFIRM: {
+		// Also fired by BListView double-click / selection message.
+		const int32 sel = fList->CurrentSelection();
+		if (sel >= 0 && sel < static_cast<int32>(fMatches.size())) {
+			BMessage reply(gui::MSG_COMPLETE_CMD);
+			reply.AddString("cmd", fMatches[static_cast<size_t>(sel)].c_str());
+			fChat.SendMessage(&reply);
+		}
+		Hide();
+		break;
+	}
+
+	case gui::MSG_POPUP_DISMISS:
+		Hide();
+		break;
+
+	default:
+		BWindow::MessageReceived(msg);
+	}
+}
+
+void CommandPopup::_Populate(const std::string& prefix,
+                              BPoint screenPos, float width)
 {
 	// Collect matching commands.
 	fMatches.clear();
+	static const char* kBuiltins[] = {
+		"/help", "/clear", "/new", "/model", "/compact",
+		"/memory", "/usage", "/version", nullptr
+	};
+	// User-defined commands from commands::Names().
 	for (const auto& name : commands::Names()) {
 		if (name.size() >= prefix.size() &&
 		    name.substr(0, prefix.size()) == prefix)
 			fMatches.push_back(name);
 	}
-	// Also include built-ins not in Names() (they live in Dispatch).
-	static const char* kBuiltins[] = {
-		"/help", "/clear", "/new", "/model", "/compact",
-		"/memory", "/usage", "/version", nullptr
-	};
+	// Built-ins (deduplicated).
 	for (int i = 0; kBuiltins[i]; ++i) {
 		const std::string b(kBuiltins[i]);
 		if (b.size() >= prefix.size() &&
 		    b.substr(0, prefix.size()) == prefix) {
-			bool found = false;
-			for (const auto& m : fMatches) if (m == b) { found = true; break; }
-			if (!found) fMatches.push_back(b);
+			bool dup = false;
+			for (const auto& m : fMatches) if (m == b) { dup = true; break; }
+			if (!dup) fMatches.push_back(b);
 		}
 	}
 	std::sort(fMatches.begin(), fMatches.end());
 
 	if (fMatches.empty()) {
-		if (!IsHidden()) {
-			if (Lock()) { Hide(); Unlock(); }
-		}
+		if (!IsHidden()) Hide();
 		return;
 	}
 
-	// Estimate item height from font metrics (avoid calling ItemFrame before
-	// the list has been shown and laid out — that's what caused the crash).
+	// Estimate height from font metrics.
 	BFont f(be_plain_font);
 	font_height fh;
 	f.GetHeight(&fh);
@@ -174,13 +224,9 @@ void CommandPopup::Update(const std::string& prefix,
 	const float listH  = itemH * static_cast<float>(std::min((int)fMatches.size(), 6));
 	const float totalH = listH + 4.0f;
 
-	// Position and resize BEFORE showing, so the window has a valid frame
-	// when BListView::AddItem calls _FixupScrollBar → Bounds().
+	// Resize and reposition before populating so views have valid bounds.
 	ResizeTo(width, totalH);
 	MoveTo(screenPos.x, screenPos.y - totalH);
-
-	// Now lock the popup window and populate the list.
-	if (!Lock()) return;
 
 	fList->MakeEmpty();
 	for (const auto& m : fMatches)
@@ -188,53 +234,6 @@ void CommandPopup::Update(const std::string& prefix,
 	fList->Select(0);
 
 	if (IsHidden()) Show();
-
-	Unlock();
-}
-
-bool CommandPopup::SelectNext()
-{
-	if (IsHidden()) return false;
-	if (!Lock()) return false;
-	int32 sel = fList->CurrentSelection();
-	if (sel < fList->CountItems() - 1) fList->Select(sel + 1);
-	fList->ScrollToSelection();
-	Unlock();
-	return true;
-}
-
-bool CommandPopup::SelectPrev()
-{
-	if (IsHidden()) return false;
-	if (!Lock()) return false;
-	int32 sel = fList->CurrentSelection();
-	if (sel > 0) fList->Select(sel - 1);
-	fList->ScrollToSelection();
-	Unlock();
-	return true;
-}
-
-bool CommandPopup::Confirm()
-{
-	if (IsHidden() || fMatches.empty()) return false;
-	if (!Lock()) return false;
-	const int32 sel = fList->CurrentSelection();
-	Unlock();
-	if (sel < 0 || sel >= static_cast<int32>(fMatches.size())) return false;
-
-	BMessage msg(gui::MSG_COMPLETE_CMD);
-	msg.AddString("cmd", fMatches[static_cast<size_t>(sel)].c_str());
-	BMessenger(fTarget).SendMessage(&msg);
-
-	if (Lock()) { Hide(); Unlock(); }
-	return true;
-}
-
-void CommandPopup::Dismiss()
-{
-	if (!IsHidden()) {
-		if (Lock()) { Hide(); Unlock(); }
-	}
 }
 
 
@@ -320,68 +319,82 @@ void InputView::MakeFocus(bool focused)
 
 void InputView::KeyDown(const char* bytes, int32 numBytes)
 {
-	// If the command popup is open, intercept navigation keys.
-	if (fPopup && fPopup->IsVisible()) {
+	// Popup navigation — all via BMessenger (non-blocking, no lock needed).
+	if (fPopupOpen && fPopupMsgr.IsValid()) {
 		if (numBytes == 1) {
 			if (bytes[0] == B_ESCAPE) {
-				fPopup->Dismiss();
+				fPopupMsgr.SendMessage(gui::MSG_POPUP_DISMISS);
+				fPopupOpen = false;
 				return;
 			}
 			if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
-				if (fPopup->Confirm()) return; // consumed
+				fPopupMsgr.SendMessage(gui::MSG_POPUP_CONFIRM);
+				fPopupOpen = false;
+				return;
 			}
 		}
 		if (numBytes == 3 && bytes[0] == '\x1B') {
-			if (bytes[2] == 'A') { fPopup->SelectPrev(); return; }
-			if (bytes[2] == 'B') { fPopup->SelectNext(); return; }
+			if (bytes[2] == 'A') {
+				fPopupMsgr.SendMessage(gui::MSG_POPUP_PREV);
+				return;
+			}
+			if (bytes[2] == 'B') {
+				fPopupMsgr.SendMessage(gui::MSG_POPUP_NEXT);
+				return;
+			}
 		}
 	}
 
 	if (numBytes == 1) {
-		// Enter: send unless Shift is held.
 		if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
 			if (modifiers() & B_SHIFT_KEY) {
-				// Shift+Enter → insert newline.
 				BTextView::KeyDown(bytes, numBytes);
 				if (Window()) Window()->PostMessage(gui::MSG_JUMP_BOTTOM);
 			} else {
-				// Plain Enter → send.
 				if (Window()) Window()->PostMessage(gui::MSG_SEND);
 			}
 			return;
 		}
-		// Escape → dismiss popup or cancel turn.
 		if (bytes[0] == B_ESCAPE) {
-			if (fPopup && fPopup->IsVisible()) { fPopup->Dismiss(); return; }
+			if (fPopupOpen && fPopupMsgr.IsValid()) {
+				fPopupMsgr.SendMessage(gui::MSG_POPUP_DISMISS);
+				fPopupOpen = false;
+				return;
+			}
 			if (Window()) Window()->PostMessage(gui::MSG_CANCEL);
 			return;
 		}
 	}
 
-	// Up/Down → history (only when popup not open).
-	if (numBytes == 3 && bytes[0] == '\x1B') {
+	// Up/Down → history (only when popup closed).
+	if (!fPopupOpen && numBytes == 3 && bytes[0] == '\x1B') {
 		if (bytes[2] == 'A') { _HistoryUp();   return; }
 		if (bytes[2] == 'B') { _HistoryDown(); return; }
 	}
 
 	BTextView::KeyDown(bytes, numBytes);
 
-	// After inserting a character, check whether to show/update the popup.
-	if (fPopup && Window()) {
+	// After inserting, check whether to show/update the popup.
+	if (fPopupMsgr.IsValid() && Window()) {
 		const std::string txt(Text(), static_cast<size_t>(TextLength()));
-		// Only show popup when the entire input starts with '/'.
 		if (!txt.empty() && txt[0] == '/') {
-			// Compute screen position just above the input view.
 			BPoint pos(0, 0);
 			ConvertToScreen(&pos);
-			const float w = Window() ? Window()->Frame().Width() * 0.5f : 240.0f;
-			fPopup->Update(txt, pos, w);
-		} else if (fPopup->IsVisible()) {
-			fPopup->Dismiss();
+			const float w = Window()->Frame().Width() * 0.5f;
+
+			BMessage upd(gui::MSG_POPUP_UPDATE);
+			upd.AddString("prefix", txt.c_str());
+			upd.AddPoint("pos",     pos);
+			upd.AddFloat("width",   w);
+			fPopupMsgr.SendMessage(&upd);
+			fPopupOpen = true;
+		} else if (fPopupOpen) {
+			fPopupMsgr.SendMessage(gui::MSG_POPUP_DISMISS);
+			fPopupOpen = false;
 		}
 	}
 
-	Invalidate(); // repaint placeholder if text becomes empty
+	Invalidate();
 }
 
 void InputView::FrameResized(float w, float h)
@@ -779,9 +792,9 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
 
-	// Create the slash-command popup and wire it to the input view.
-	fCommandPopup = new CommandPopup(this);
-	fInput->fPopup = fCommandPopup;
+	// Create the slash-command popup and wire its messenger to the input.
+	fCommandPopup = new CommandPopup(BMessenger(this));
+	fInput->fPopupMsgr = fCommandPopup->Messenger();
 
 	// Ensure BFS attribute indexes exist for fast session queries.
 	session::EnsureIndexes();
@@ -1007,17 +1020,16 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case gui::MSG_COMPLETE_CMD: {
-		// A slash command was selected from the popup — replace the
-		// input text with the completed command + a trailing space.
 		const char* cmd = nullptr;
 		if (msg->FindString("cmd", &cmd) == B_OK && cmd) {
 			fInput->SetText(cmd);
-			// Position cursor after the command text.
 			const int32 len = fInput->TextLength();
 			fInput->Select(len, len);
 			fInput->MakeFocus(true);
 		}
-		if (fCommandPopup) fCommandPopup->Dismiss();
+		fInput->fPopupOpen = false;
+		if (fCommandPopup)
+			fCommandPopup->Messenger().SendMessage(gui::MSG_POPUP_DISMISS);
 		break;
 	}
 

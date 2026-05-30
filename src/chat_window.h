@@ -44,29 +44,49 @@ constexpr uint32_t MSG_COMPLETE_CMD = 'CCMD'; // slash command selected (string 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CommandPopup — floating BWindow that appears above the input area when
-// the user types '/' and lists matching slash commands. Arrow keys navigate,
-// Enter selects, Escape dismisses. Positioned by ChatWindow::_UpdatePopup().
+// the user types '/' and lists matching slash commands.
+//
+// THREADING: CommandPopup runs in its own looper. InputView::KeyDown runs
+// inside ChatWindow's looper (which is locked). We must NEVER call Lock()
+// on CommandPopup from KeyDown — that causes a deadlock. All communication
+// is one-way via BMessenger::SendMessage (non-blocking, no lock needed).
+//
+// Message protocol (ChatWindow/InputView → CommandPopup):
+//   MSG_POPUP_UPDATE  — string "prefix", point "pos", float "width"
+//   MSG_POPUP_NEXT    — select next item
+//   MSG_POPUP_PREV    — select previous item
+//   MSG_POPUP_CONFIRM — confirm selection (posts MSG_COMPLETE_CMD back)
+//   MSG_POPUP_DISMISS — hide the popup
+//
+// CommandPopup → ChatWindow:
+//   MSG_COMPLETE_CMD  — string "cmd" (selected command)
 // ─────────────────────────────────────────────────────────────────────────────
+
+namespace gui {
+constexpr uint32_t MSG_POPUP_UPDATE  = 'PUPT';
+constexpr uint32_t MSG_POPUP_NEXT    = 'PNXT';
+constexpr uint32_t MSG_POPUP_PREV    = 'PPRV';
+constexpr uint32_t MSG_POPUP_CONFIRM = 'PCNF';
+constexpr uint32_t MSG_POPUP_DISMISS = 'PDIS';
+} // namespace gui
+
 class CommandPopup : public BWindow {
 public:
-	CommandPopup(BHandler* target);
+	CommandPopup(BMessenger chatWindow);
 
-	// Filter the list to commands starting with `prefix` (e.g. "/co").
-	// Hides itself when no matches; shows and repositions when there are.
-	void	Update(const std::string& prefix, BPoint screenPos, float width);
+	void	MessageReceived(BMessage* msg) override;
+	bool	QuitRequested() override { return false; } // never auto-quit
 
-	// Keyboard navigation — called by InputView::KeyDown.
-	bool	SelectNext();    // returns false if popup not visible
-	bool	SelectPrev();
-	bool	Confirm();       // inserts selected command into input
-	void	Dismiss();
-
-	bool	IsVisible() const { return !IsHidden(); }
+	// Safe to call from any thread — uses BMessenger (non-blocking).
+	BMessenger	Messenger() const { return BMessenger(this); }
 
 private:
-	BListView*               fList   = nullptr;
-	BScrollView*             fScroll = nullptr;
-	BHandler*                fTarget = nullptr;
+	void	_Populate(const std::string& prefix,
+	                  BPoint screenPos, float width);
+
+	BListView*               fList    = nullptr;
+	BScrollView*             fScroll  = nullptr;
+	BMessenger               fChat;      // back-channel to ChatWindow
 	std::vector<std::string> fMatches;
 };
 
@@ -120,8 +140,8 @@ private:
 	bool                     fDropTarget = false;
 
 public:
-	// Set by ChatWindow after construction so KeyDown can drive the popup.
-	CommandPopup*            fPopup      = nullptr;
+	bool                     fPopupOpen  = false; // tracks popup visibility
+	BMessenger               fPopupMsgr; // set by ChatWindow after construction
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
