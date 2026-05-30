@@ -38,9 +38,11 @@
 #include <Window.h>
 
 #include <ListView.h>
+#include <Path.h>
 #include <StringItem.h>
 #include "api.h"
 #include "code_styler.h"
+#include "commands.h"
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
@@ -107,6 +109,120 @@ int CountLines(const std::string& s)
 
 
 // ===========================================================================
+// CommandPopup
+// ===========================================================================
+
+CommandPopup::CommandPopup(BHandler* target)
+	: BWindow(BRect(0, 0, 200, 120), "cmdpopup",
+	          B_NO_BORDER_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+	          B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE
+	          | B_NOT_MINIMIZABLE | B_AVOID_FOCUS | B_AUTO_UPDATE_SIZE_LIMITS)
+	, fTarget(target)
+{
+	fList = new BListView("cmdlist", B_SINGLE_SELECTION_LIST);
+	fList->SetSelectionMessage(new BMessage(gui::MSG_COMPLETE_CMD));
+	fList->SetTarget(fTarget);
+	fScroll = new BScrollView("cmdscroll", fList,
+	                           0, false, true, B_FANCY_BORDER);
+
+	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+		.Add(fScroll)
+	.End();
+
+	Hide(); // starts hidden
+}
+
+void CommandPopup::Update(const std::string& prefix,
+                           BPoint screenPos, float width)
+{
+	// Collect matching commands.
+	fMatches.clear();
+	for (const auto& name : commands::Names()) {
+		if (name.size() >= prefix.size() &&
+		    name.substr(0, prefix.size()) == prefix)
+			fMatches.push_back(name);
+	}
+	// Also include built-ins not in Names() (they live in Dispatch).
+	static const char* kBuiltins[] = {
+		"/help", "/clear", "/new", "/model", "/compact",
+		"/memory", "/usage", "/version", nullptr
+	};
+	for (int i = 0; kBuiltins[i]; ++i) {
+		const std::string b(kBuiltins[i]);
+		if (b.size() >= prefix.size() &&
+		    b.substr(0, prefix.size()) == prefix) {
+			// Avoid duplicates.
+			bool found = false;
+			for (const auto& m : fMatches) if (m == b) { found = true; break; }
+			if (!found) fMatches.push_back(b);
+		}
+	}
+	std::sort(fMatches.begin(), fMatches.end());
+
+	if (fMatches.empty()) {
+		if (!IsHidden()) Hide();
+		return;
+	}
+
+	// Repopulate list.
+	fList->MakeEmpty();
+	for (const auto& m : fMatches)
+		fList->AddItem(new BStringItem(m.c_str()));
+	fList->Select(0);
+
+	// Size: fixed width, height fits items up to 6.
+	const float itemH  = fList->ItemFrame(0).Height() + 1.0f;
+	const float listH  = itemH * static_cast<float>(std::min((int)fMatches.size(), 6));
+	const float totalH = listH + 4.0f; // border
+
+	// Position just above the input area.
+	ResizeTo(width, totalH);
+	MoveTo(screenPos.x, screenPos.y - totalH);
+
+	if (IsHidden()) Show();
+	SetFeel(B_FLOATING_APP_WINDOW_FEEL);
+}
+
+bool CommandPopup::SelectNext()
+{
+	if (IsHidden()) return false;
+	int32 sel = fList->CurrentSelection();
+	if (sel < fList->CountItems() - 1) fList->Select(sel + 1);
+	fList->ScrollToSelection();
+	return true;
+}
+
+bool CommandPopup::SelectPrev()
+{
+	if (IsHidden()) return false;
+	int32 sel = fList->CurrentSelection();
+	if (sel > 0) fList->Select(sel - 1);
+	fList->ScrollToSelection();
+	return true;
+}
+
+bool CommandPopup::Confirm()
+{
+	if (IsHidden() || fMatches.empty()) return false;
+	const int32 sel = fList->CurrentSelection();
+	if (sel < 0 || sel >= static_cast<int32>(fMatches.size())) return false;
+
+	// Post the selected command back to the ChatWindow.
+	BMessage msg(gui::MSG_COMPLETE_CMD);
+	msg.AddString("cmd", fMatches[static_cast<size_t>(sel)].c_str());
+	BMessenger(fTarget).SendMessage(&msg);
+
+	Hide();
+	return true;
+}
+
+void CommandPopup::Dismiss()
+{
+	if (!IsHidden()) Hide();
+}
+
+
+// ===========================================================================
 // InputView
 // ===========================================================================
 
@@ -145,6 +261,25 @@ void InputView::Draw(BRect updateRect)
 		SetHighColor(ui_color(B_KEYBOARD_NAVIGATION_COLOR));
 		StrokeRect(Bounds().InsetByCopy(-1, -1));
 	}
+	// Draw drop-target highlight when a file is dragged over.
+	if (fDropTarget) {
+		SetHighColor(ui_color(B_KEYBOARD_NAVIGATION_COLOR));
+		SetPenSize(2.0f);
+		StrokeRect(Bounds().InsetByCopy(1, 1));
+		SetPenSize(1.0f);
+	}
+}
+
+void InputView::MouseMoved(BPoint /*where*/, uint32 transit,
+                            const BMessage* drag)
+{
+	const bool wasDrop = fDropTarget;
+	if (drag != nullptr) {
+		fDropTarget = (transit == B_ENTERED_VIEW || transit == B_INSIDE_VIEW);
+	} else {
+		fDropTarget = false;
+	}
+	if (fDropTarget != wasDrop) Invalidate();
 }
 
 void InputView::_DrawPlaceholder()
@@ -169,6 +304,23 @@ void InputView::MakeFocus(bool focused)
 
 void InputView::KeyDown(const char* bytes, int32 numBytes)
 {
+	// If the command popup is open, intercept navigation keys.
+	if (fPopup && fPopup->IsVisible()) {
+		if (numBytes == 1) {
+			if (bytes[0] == B_ESCAPE) {
+				fPopup->Dismiss();
+				return;
+			}
+			if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
+				if (fPopup->Confirm()) return; // consumed
+			}
+		}
+		if (numBytes == 3 && bytes[0] == '\x1B') {
+			if (bytes[2] == 'A') { fPopup->SelectPrev(); return; }
+			if (bytes[2] == 'B') { fPopup->SelectNext(); return; }
+		}
+	}
+
 	if (numBytes == 1) {
 		// Enter: send unless Shift is held.
 		if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
@@ -182,20 +334,37 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 			}
 			return;
 		}
-		// Escape → cancel.
+		// Escape → dismiss popup or cancel turn.
 		if (bytes[0] == B_ESCAPE) {
+			if (fPopup && fPopup->IsVisible()) { fPopup->Dismiss(); return; }
 			if (Window()) Window()->PostMessage(gui::MSG_CANCEL);
 			return;
 		}
 	}
 
-	// Up/Down when the caret is on the first/last line → history.
+	// Up/Down → history (only when popup not open).
 	if (numBytes == 3 && bytes[0] == '\x1B') {
 		if (bytes[2] == 'A') { _HistoryUp();   return; }
 		if (bytes[2] == 'B') { _HistoryDown(); return; }
 	}
 
 	BTextView::KeyDown(bytes, numBytes);
+
+	// After inserting a character, check whether to show/update the popup.
+	if (fPopup && Window()) {
+		const std::string txt(Text(), static_cast<size_t>(TextLength()));
+		// Only show popup when the entire input starts with '/'.
+		if (!txt.empty() && txt[0] == '/') {
+			// Compute screen position just above the input view.
+			BPoint pos(0, 0);
+			ConvertToScreen(&pos);
+			const float w = Window() ? Window()->Frame().Width() * 0.5f : 240.0f;
+			fPopup->Update(txt, pos, w);
+		} else if (fPopup->IsVisible()) {
+			fPopup->Dismiss();
+		}
+	}
+
 	Invalidate(); // repaint placeholder if text becomes empty
 }
 
@@ -594,6 +763,10 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
 
+	// Create the slash-command popup and wire it to the input view.
+	fCommandPopup = new CommandPopup(this);
+	fInput->fPopup = fCommandPopup;
+
 	// Ensure BFS attribute indexes exist for fast session queries.
 	session::EnsureIndexes();
 
@@ -816,6 +989,26 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (info) _LoadSession(info->path);
 		break;
 	}
+
+	case gui::MSG_COMPLETE_CMD: {
+		// A slash command was selected from the popup — replace the
+		// input text with the completed command + a trailing space.
+		const char* cmd = nullptr;
+		if (msg->FindString("cmd", &cmd) == B_OK && cmd) {
+			fInput->SetText(cmd);
+			// Position cursor after the command text.
+			const int32 len = fInput->TextLength();
+			fInput->Select(len, len);
+			fInput->MakeFocus(true);
+		}
+		if (fCommandPopup) fCommandPopup->Dismiss();
+		break;
+	}
+
+	case B_SIMPLE_DATA:
+	case B_REFS_RECEIVED:
+		_RefsReceived(msg);
+		break;
 
 	case gui::MSG_MODEL_PICK: {
 		const char* model = nullptr;
@@ -1407,5 +1600,87 @@ void ChatWindow::_LoadSession(const std::string& path)
 
 	_UpdateTitle();
 	_ScrollToBottom();
+	fInput->MakeFocus(true);
+}
+
+void ChatWindow::_RefsReceived(BMessage* msg)
+{
+	// Handle files dropped onto the window or passed via B_REFS_RECEIVED.
+	// Each file's text content is inserted into the input as a fenced
+	// code block so the user can ask Claude about it.
+	entry_ref ref;
+	for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; ++i) {
+		BEntry entry(&ref);
+		BPath  path;
+		if (entry.GetPath(&path) == B_OK)
+			_InsertFileContent(path.Path());
+	}
+}
+
+void ChatWindow::_InsertFileContent(const std::string& path)
+{
+	// Read the file — cap at 64 KB to avoid flooding the context.
+	constexpr size_t kMaxBytes = 64 * 1024;
+	BFile file(path.c_str(), B_READ_ONLY);
+	if (file.InitCheck() != B_OK) return;
+
+	off_t size = 0;
+	file.GetSize(&size);
+	if (size <= 0) return;
+
+	const size_t readLen = static_cast<size_t>(
+	    std::min(static_cast<off_t>(kMaxBytes), size));
+	std::string content(readLen, '\0');
+	if (file.Read(&content[0], readLen) <= 0) return;
+
+	// Detect if the content looks like binary — if more than 10% of
+	// the first 512 bytes are non-printable, skip it.
+	const size_t sample = std::min(readLen, size_t(512));
+	size_t nonPrint = 0;
+	for (size_t i = 0; i < sample; ++i) {
+		const unsigned char c = static_cast<unsigned char>(content[i]);
+		if (c < 32 && c != '\t' && c != '\n' && c != '\r') ++nonPrint;
+	}
+	if (nonPrint > sample / 10) {
+		BAlert* alert = new BAlert("Binary file",
+		    "That file appears to be binary and cannot be attached as text.",
+		    "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		alert->Go();
+		return;
+	}
+
+	// Truncation notice.
+	bool truncated = (static_cast<off_t>(readLen) < size);
+
+	// Derive a language hint from the file extension for the fence.
+	const std::string spath(path);
+	std::string lang;
+	const auto dot = spath.rfind('.');
+	if (dot != std::string::npos) lang = spath.substr(dot + 1);
+	// Map common extensions.
+	if (lang == "h" || lang == "cc" || lang == "cxx") lang = "cpp";
+	if (lang == "py") lang = "python";
+	if (lang == "js") lang = "javascript";
+	if (lang == "md") lang = "markdown";
+	if (lang == "sh") lang = "bash";
+
+	// Extract just the filename for the header.
+	std::string filename = spath;
+	const auto slash = spath.rfind('/');
+	if (slash != std::string::npos) filename = spath.substr(slash + 1);
+
+	// Build the fenced block to insert.
+	std::string block = "\n`" + filename + "`\n";
+	block += "```" + lang + "\n";
+	block += content;
+	if (!content.empty() && content.back() != '\n') block += '\n';
+	if (truncated)
+		block += "... [truncated at 64 KB]\n";
+	block += "```\n";
+
+	// Append to whatever is already in the input.
+	const int32 end = fInput->TextLength();
+	fInput->Insert(end, block.c_str(), static_cast<int32>(block.size()));
+	fInput->Select(fInput->TextLength(), fInput->TextLength());
 	fInput->MakeFocus(true);
 }

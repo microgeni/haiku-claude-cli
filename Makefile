@@ -91,6 +91,7 @@ GUI_APP_SIG ?= application/x-vnd.Microgeni-claude-gui
 # Modules shared between CLI and GUI (core logic, no terminal UI).
 GUI_CORE_SRCS := \
     $(SRCDIR)/api.cpp         \
+    $(SRCDIR)/commands.cpp    \
     $(SRCDIR)/config.cpp      \
     $(SRCDIR)/hooks.cpp       \
     $(SRCDIR)/mcp.cpp         \
@@ -98,6 +99,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/notify.cpp      \
     $(SRCDIR)/oauth.cpp       \
     $(SRCDIR)/paths.cpp       \
+    $(SRCDIR)/stats.cpp       \
     $(SRCDIR)/tools.cpp
 
 # GUI-specific front-end files.

@@ -8,6 +8,7 @@
 
 #include <Button.h>
 #include <CheckBox.h>
+#include <ListView.h>
 #include <MenuField.h>
 #include <Messenger.h>
 #include <PopUpMenu.h>
@@ -38,7 +39,36 @@ constexpr uint32_t MSG_JUMP_BOTTOM  = 'JBOT'; // jump-to-bottom button
 constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
 constexpr uint32_t MSG_SESSIONS     = 'SESS'; // toggle session panel
 constexpr uint32_t MSG_SESSION_LOAD = 'SLOD'; // load a session (int32 "index")
+constexpr uint32_t MSG_COMPLETE_CMD = 'CCMD'; // slash command selected (string "cmd")
 } // namespace gui
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CommandPopup — floating BWindow that appears above the input area when
+// the user types '/' and lists matching slash commands. Arrow keys navigate,
+// Enter selects, Escape dismisses. Positioned by ChatWindow::_UpdatePopup().
+// ─────────────────────────────────────────────────────────────────────────────
+class CommandPopup : public BWindow {
+public:
+	CommandPopup(BHandler* target);
+
+	// Filter the list to commands starting with `prefix` (e.g. "/co").
+	// Hides itself when no matches; shows and repositions when there are.
+	void	Update(const std::string& prefix, BPoint screenPos, float width);
+
+	// Keyboard navigation — called by InputView::KeyDown.
+	bool	SelectNext();    // returns false if popup not visible
+	bool	SelectPrev();
+	bool	Confirm();       // inserts selected command into input
+	void	Dismiss();
+
+	bool	IsVisible() const { return !IsHidden(); }
+
+private:
+	BListView*               fList   = nullptr;
+	BScrollView*             fScroll = nullptr;
+	BHandler*                fTarget = nullptr;
+	std::vector<std::string> fMatches;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InputView — multi-line BTextView that sends on Enter, inserts newline on
@@ -57,6 +87,10 @@ public:
 	void	KeyDown(const char* bytes, int32 numBytes) override;
 	void	FrameResized(float w, float h) override;
 	void	MakeFocus(bool focused) override;
+	void	MouseMoved(BPoint where, uint32 transit,
+	                   const BMessage* drag) override;
+	// Drop is handled via the window's MessageReceived(B_SIMPLE_DATA).
+	// InputView::MessageDropped forwards the message there.
 
 	// Push an entry onto the history ring.
 	void	PushHistory(const std::string& text);
@@ -79,10 +113,15 @@ private:
 	void	_DrawPlaceholder();
 
 	std::vector<std::string> fHistory;       // ring of past prompts
-	int                      fHistIdx = -1;  // -1 = current draft
-	std::string              fDraft;         // saved draft while browsing
-	bool                     fEnabled = true;
-	bool                     fFocused = false;
+	int                      fHistIdx   = -1;
+	std::string              fDraft;
+	bool                     fEnabled    = true;
+	bool                     fFocused    = false;
+	bool                     fDropTarget = false;
+
+public:
+	// Set by ChatWindow after construction so KeyDown can drive the popup.
+	CommandPopup*            fPopup      = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -214,6 +253,7 @@ public:
 	~ChatWindow() override;
 
 	void MessageReceived(BMessage* msg) override;
+	void _RefsReceived(BMessage* msg); // drag-drop / file open handler
 	bool QuitRequested() override;
 	void FrameResized(float w, float h) override;
 
@@ -244,6 +284,7 @@ private:
 	void _UpdateTitle();         // set window title from model + state
 	void _SaveSession();         // persist current conversation to BFS
 	void _LoadSession(const std::string& path); // restore a saved session
+	void _InsertFileContent(const std::string& path); // drag-drop helper
 
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BTextView*     fOutput        = nullptr;
@@ -298,6 +339,9 @@ private:
 	std::string    fSessionPath;   // path of the current saved session file
 	SessionPanel*  fSessionPanel  = nullptr;
 	BButton*       fSessionBtn    = nullptr;
+
+	// ── Slash-command autocomplete ───────────────────────────────────────────
+	CommandPopup*  fCommandPopup  = nullptr;
 
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
 	bool           fUserScrolled  = false;
