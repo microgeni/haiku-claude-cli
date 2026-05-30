@@ -34,7 +34,6 @@ constexpr unsigned int kStyleSetFore       = 2051;
 constexpr unsigned int kStyleSetBack       = 2052;
 constexpr unsigned int kStyleSetBold       = 2053;
 constexpr unsigned int kStyleSetItalic     = 2056;
-constexpr unsigned int kStyleSetFont       = 2056 + 1; // SCI_STYLESETFONT = 2057
 constexpr unsigned int kStyleSetSize       = 2055;
 constexpr unsigned int kStyleClearAll      = 2050;
 constexpr unsigned int kStyleResetDefault  = 2058;
@@ -82,13 +81,11 @@ SciOutput::SciOutput(const char* name,
 }
 
 // ---------------------------------------------------------------------------
-// AttachedToWindow — configure Scintilla after the view is on-screen.
-// This is the ONLY safe place to send SCI_* messages at startup.
+// Configure — call explicitly after _BuildLayout() to apply styles.
 // ---------------------------------------------------------------------------
 
-void SciOutput::AttachedToWindow()
+void SciOutput::Configure()
 {
-	BScintillaView::AttachedToWindow();
 	if (fConfigured) return;
 	fConfigured = true;
 	_ConfigureBaseStyles();
@@ -108,11 +105,10 @@ void SciOutput::_ConfigureBaseStyles()
 	_Sci(kSetScrollWidthTracking, 1);
 	_Sci(kSetEndAtLastLine, 1);
 
-	// Default style — dark background, light text, fixed font.
+	// Default style — dark background, light text.
 	_Sci(kStyleResetDefault);
-	_Sci(kStyleSetBack, 32, rgb(0x1C, 0x1C, 0x1E)); // kColorChatBg
-	_Sci(kStyleSetFore, 32, rgb(0xDC, 0xDC, 0xDC)); // kColorText
-	_Sci(kStyleSetFont, 32, reinterpret_cast<long>("Noto Mono"));
+	_Sci(kStyleSetBack, 32, rgb(0x1C, 0x1C, 0x1E));
+	_Sci(kStyleSetFore, 32, rgb(0xDC, 0xDC, 0xDC));
 	_Sci(kStyleSetSize, 32, 10);
 	_Sci(kStyleClearAll); // propagate STYLE_DEFAULT to all styles
 
@@ -137,9 +133,8 @@ void SciOutput::_ConfigureBaseStyles()
 	// Style 4: error — red.
 	_Sci(kStyleSetFore, kStyleError,      rgb(0xE6, 0x4B, 0x4B));
 
-	// Style 5: inline code — warm monospace.
-	_Sci(kStyleSetFore, kStyleCode,       rgb(0xC8, 0xC8, 0xA0));
-	_Sci(kStyleSetFont, kStyleCode,       reinterpret_cast<long>("Noto Mono"));
+	// Style 5: inline code — warm monospace (uses default font).
+	_Sci(kStyleSetFore, kStyleCode, rgb(0xC8, 0xC8, 0xA0));
 
 	// Style 6: H1 — golden, larger.
 	_Sci(kStyleSetFore, kStyleH1,         rgb(0xFF, 0xC8, 0x64));

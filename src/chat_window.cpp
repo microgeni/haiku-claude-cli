@@ -742,6 +742,10 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 
 	_BuildLayout();
 
+	// Configure SciOutput styles now that the view is attached and the
+	// Scintilla engine is initialised (happens during _BuildLayout's AddView).
+	if (fOutput) fOutput->Configure();
+
 	// Markdown renderer — uses SciOutput backend.
 	fMdRenderer = new md::MdRenderer(fOutput);
 

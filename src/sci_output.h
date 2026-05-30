@@ -58,6 +58,11 @@ public:
 	          styling::Theme* theme,
 	          styling::LanguageSet* langSet);
 
+	// Must be called explicitly after the window is shown (not from
+	// AttachedToWindow — that fires during layout construction before
+	// the Scintilla engine is ready for SCI_STYLESETFONT calls).
+	void	Configure();
+
 	// ── Text output ──────────────────────────────────────────────────────────
 
 	// Append text with a fixed style index (see kStyle* above).
@@ -77,7 +82,7 @@ public:
 	bool	IsNearBottom(int threshold = 3) const;
 
 	// ── BScintillaView overrides ─────────────────────────────────────────────
-	void	AttachedToWindow() override;
+	// (none needed — configuration is explicit via Configure())
 
 private:
 	void	_ConfigureBaseStyles();
