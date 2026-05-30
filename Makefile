@@ -107,6 +107,7 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/tui.cpp          \
     $(SRCDIR)/code_styler.cpp  \
     $(SRCDIR)/md_renderer.cpp  \
+    $(SRCDIR)/sci_output.cpp   \
     $(SRCDIR)/gui_stubs.cpp    \
     $(SRCDIR)/gui_sink.cpp     \
     $(SRCDIR)/session_store.cpp \

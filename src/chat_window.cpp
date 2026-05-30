@@ -32,10 +32,8 @@
 #include <OS.h>
 #include <ScrollBar.h>
 #include <SeparatorView.h>
-#include <Slider.h>
 #include <SpaceLayoutItem.h>
 #include <StringItem.h>
-#include <TextView.h>
 #include <Window.h>
 
 #include <ListView.h>
@@ -147,26 +145,6 @@ const char* kKnownModels[] = {
 	"claude-3-opus-20240229",
 	nullptr
 };
-
-void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
-{
-	if (text.empty()) return;
-	BFont font;
-	view->GetFont(&font);
-	text_run_array* tra = static_cast<text_run_array*>(
-		malloc(sizeof(text_run_array) + sizeof(text_run)));
-	if (!tra) {
-		view->Insert(text.c_str(), static_cast<int32>(text.size()));
-		return;
-	}
-	tra->count          = 1;
-	tra->runs[0].offset = 0;
-	tra->runs[0].font   = font;
-	tra->runs[0].color  = color;
-	const int32 start   = view->TextLength();
-	view->Insert(start, text.c_str(), static_cast<int32>(text.size()), tra);
-	free(tra);
-}
 
 int CountLines(const std::string& s)
 {
@@ -754,22 +732,20 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	, fMaxTokens(maxTokens)
 	, fSystemPrompt(systemPrompt)
 	, fMessages(nlohmann::json::array())
+	, fNotifyMinSec(notifyMinSec)
 {
-	fNotifyMinSec = (notifyMinSec < 0) ? 0 : notifyMinSec;
-	// Try to load the Genio theme and language set.
+	// Load Genio theme and language set — passed to SciOutput for code highlighting.
 	const std::string themePath = styling::FindDefaultTheme();
 	const std::string langsDir  = styling::FindLanguagesDir();
-	if (!themePath.empty() && fTheme.LoadFile(themePath)
-	    && !langsDir.empty()  && fLangSet.LoadDir(langsDir)) {
-		fStyler = new styling::CodeStyler(fTheme, fLangSet);
-	}
+	if (!themePath.empty()) fTheme.LoadFile(themePath);
+	if (!langsDir.empty())  fLangSet.LoadDir(langsDir);
 
 	_BuildLayout();
 
-	// Markdown renderer (needs fOutput to exist).
+	// Markdown renderer — uses SciOutput backend.
 	fMdRenderer = new md::MdRenderer(fOutput);
 
-	// Create the slash-command popup.
+	// Slash-command popup.
 	fCommandPopup = new CommandPopup(this);
 
 	// Ensure BFS attribute indexes exist for fast session queries.
@@ -787,7 +763,6 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 
 ChatWindow::~ChatWindow()
 {
-	delete fStyler;
 	delete fMdRenderer;
 	if (fWorker.joinable()) fWorker.detach();
 	delete fSink;
@@ -800,28 +775,20 @@ ChatWindow::~ChatWindow()
 
 void ChatWindow::_BuildLayout()
 {
-	// ── Output BTextView (always-dark chat area) ─────────────────────────────
-	fOutput = new BTextView(BRect(0, 0, 600, 400), "output",
-	                        BRect(4, 4, 596, 396),
-	                        B_FOLLOW_ALL, B_WILL_DRAW | B_FRAME_EVENTS);
-	fOutput->MakeEditable(false);
-	fOutput->MakeSelectable(true);
-	fOutput->SetWordWrap(true);
-	fOutput->SetStylable(true);
-	fOutput->SetViewColor(kColorChatBg);
-	fOutput->SetLowColor(kColorChatBg);
-	fOutput->SetHighColor(kColorText);
-	fOutput->SetFontAndColor(be_fixed_font, B_FONT_ALL, &kColorText);
+	// ── SciOutput — chat scrollback ───────────────────────────────────────────
+	// Direct child of the window (not inside a BScrollView).
+	// BScintillaView provides built-in vertical scrolling.
+	// Theme and language set are passed in for future syntax highlighting.
+	fOutput = new SciOutput("output",
+	    fTheme.IsLoaded()   ? &fTheme   : nullptr,
+	    fLangSet.IsLoaded() ? &fLangSet : nullptr);
 
-	fScroll = new BScrollView("scroll", fOutput,
-	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
-
-	// Floating jump-to-bottom button (overlaid, repositioned in FrameResized).
-	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93 New", // ↓
+	// Floating jump-to-bottom button.
+	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93 New",
 	                        new BMessage(gui::MSG_JUMP_BOTTOM));
 	fJumpBtn->SetExplicitSize(BSize(80, 26));
 	fJumpBtn->Hide();
-	AddChild(fJumpBtn); // added directly to window, not layout
+	AddChild(fJumpBtn);
 
 	// ── Token bar ────────────────────────────────────────────────────────────
 	fTokenBar = new TokenBar();
@@ -841,7 +808,7 @@ void ChatWindow::_BuildLayout()
 	fSend->MakeDefault(true);
 
 	fStop = new BButton("stop", "Stop", new BMessage(gui::MSG_CANCEL));
-	fStop->Hide(); // hidden until busy
+	fStop->Hide();
 
 	// ── Model picker ─────────────────────────────────────────────────────────
 	fModelMenu  = new BPopUpMenu(fModel.c_str());
@@ -851,7 +818,7 @@ void ChatWindow::_BuildLayout()
 	// ── Secondary toolbar buttons ─────────────────────────────────────────────
 	fNewBtn      = new BButton("newbtn",      "New",      new BMessage(gui::MSG_NEW_CHAT));
 	fClearBtn    = new BButton("clearbtn",    "Clear",    new BMessage(gui::MSG_CLEAR_OUTPUT));
-	fSettingsBtn = new BButton("settingsbtn", "\xE2\x9A\x99", // ⚙
+	fSettingsBtn = new BButton("settingsbtn", "\xE2\x9A\x99",
 	                            new BMessage(gui::MSG_SETTINGS));
 	fSettingsBtn->SetToolTip("Settings (Cmd+,)");
 	fSessionBtn  = new BButton("sessionbtn",  "History",  new BMessage(gui::MSG_SESSIONS));
@@ -862,10 +829,12 @@ void ChatWindow::_BuildLayout()
 	fSettings     = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec);
 
 	// ── Layout ────────────────────────────────────────────────────────────────
+	// SciOutput replaces the BScrollView+BTextView combo — it's a single
+	// view with built-in scrolling, added directly to the layout.
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.AddGroup(B_HORIZONTAL, 0)
 			.Add(fSessionPanel, 0.0f)
-			.Add(fScroll, 1.0f)
+			.Add(fOutput, 1.0f)          // SciOutput directly in layout
 			.Add(fSettings, 0.0f)
 		.End()
 		.Add(fTokenBar, 0.0f)
@@ -889,8 +858,6 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	SetSizeLimits(420, 32767, 300, 32767);
-
-	// Give input focus on startup.
 	fInput->MakeFocus(true);
 }
 
@@ -940,23 +907,17 @@ void ChatWindow::_PopulateModelMenu()
 
 void ChatWindow::_RepositionOverlays()
 {
-	if (!fJumpBtn || !fScroll) return;
-	const BRect sb = fScroll->Frame();
+	if (!fJumpBtn || !fOutput) return;
+	const BRect ob = fOutput->Frame();
 	const float bw = fJumpBtn->Frame().Width();
 	const float bh = fJumpBtn->Frame().Height();
-	fJumpBtn->MoveTo(sb.right - bw - 12.0f, sb.bottom - bh - 12.0f);
+	fJumpBtn->MoveTo(ob.right - bw - 12.0f, ob.bottom - bh - 12.0f);
 }
 
 void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
 	_RepositionOverlays();
-	// Keep output text rect in sync with the view bounds so word-wrap
-	// and Insert() render correctly after the window is resized.
-	if (fOutput) {
-		BRect b = fOutput->Bounds();
-		fOutput->SetTextRect(b.InsetByCopy(4.0f, 4.0f));
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,9 +1156,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_ERR: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
-			AppendWithColor(fOutput,
-			    std::string("\n\xE2\x9A\xA0 ") + text + "\n", // ⚠
-			    kColorError);
+			fOutput->AppendText(
+			    std::string("\n\xE2\x9A\xA0 ") + text + "\n",
+			    SciOutput::kStyleError);
 			_ScrollToBottom();
 		}
 		break;
@@ -1331,28 +1292,24 @@ bool ChatWindow::QuitRequested()
 
 void ChatWindow::_AppendText(const std::string& text)
 {
-	AppendWithColor(fOutput, text, kColorText);
+	fOutput->AppendText(text, SciOutput::kStyleDefault);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
 void ChatWindow::_AppendToolLine(const std::string& text)
 {
-	AppendWithColor(fOutput, text, kColorToolLine);
+	fOutput->AppendText(text, SciOutput::kStyleToolLine);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
 void ChatWindow::_ScrollToBottom()
 {
-	fOutput->ScrollToOffset(fOutput->TextLength());
+	fOutput->ScrollToEnd();
 }
 
 bool ChatWindow::_IsNearBottom() const
 {
-	const BScrollBar* sb = fScroll->ScrollBar(B_VERTICAL);
-	if (!sb) return true;
-	float sbMin = 0.0f, sbMax = 0.0f;
-	sb->GetRange(&sbMin, &sbMax);
-	return (sbMax - sb->Value()) < 24.0f;
+	return fOutput ? fOutput->IsNearBottom() : true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,35 +1376,9 @@ void ChatWindow::_FlushCodeBlock()
 {
 	if (fCodeBuffer.empty()) return;
 
-	// Render the code block as styled text in the BTextView.
-	// Embedding BScintillaView as a child of BTextView is unreliable —
-	// Scintilla's internal state isn't ready until the view is fully
-	// attached to the screen, causing GPF crashes on SendMessage().
-	// Styled BTextView runs are simpler and crash-free.
-
-	// Opening fence with language label.
-	if (fMdRenderer) {
-		if (!fCodeLang.empty()) {
-			md::Run langRun;
-			langRun.text     = fCodeLang + "\n";
-			langRun.hasColor = true;
-			langRun.color    = {120, 120, 140, 255};
-			langRun.italic   = true;
-			fMdRenderer->AppendRun(langRun);
-		}
-		md::Run codeRun;
-		codeRun.text      = fCodeBuffer;
-		codeRun.monospace = true;
-		codeRun.hasColor  = true;
-		codeRun.color     = {200, 200, 160, 255};
-		fMdRenderer->AppendRun(codeRun);
-		md::Run nl;
-		nl.text = "\n";
-		fMdRenderer->AppendRun(nl);
-		fMdRenderer->ScrollToEnd();
-	} else {
-		_AppendText(fCodeBuffer);
-	}
+	// Append the code block through SciOutput — styled monospace with
+	// language tag. Syntax highlighting (Stage 2) will be added here.
+	fOutput->AppendCodeBlock(fCodeBuffer, fCodeLang);
 
 	if (!fUserScrolled) _ScrollToBottom();
 	fCodeBuffer.clear();
@@ -1474,9 +1405,9 @@ void ChatWindow::_SendTurn()
 	}
 
 	// Emit user label + text into the output.
-	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);   // ▸
+	fOutput->AppendText("\nyou \xE2\x96\xB8 ", SciOutput::kStyleUserLabel);
 	_AppendText(userText + "\n");
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	fOutput->AppendText("claude \xE2\x96\xB8 \n", SciOutput::kStyleModelLabel);
 
 	_LaunchWorker(userText);
 }
@@ -1560,15 +1491,7 @@ void ChatWindow::_NewChat()
 
 void ChatWindow::_ClearOutput()
 {
-	fOutput->SetText("");
-	// Remove all embedded code views.
-	for (BView* v : fCodeViews) {
-		fOutput->RemoveChild(v);
-		delete v;
-	}
-	fCodeViews.clear();
-	// Reset the TextRect to fit the now-empty view.
-	fOutput->SetTextRect(fOutput->Bounds().InsetByCopy(4, 4));
+	fOutput->Clear();
 }
 
 void ChatWindow::_HandlePermRequest(BMessage* msg)
@@ -1659,11 +1582,11 @@ void ChatWindow::_LoadSession(const std::string& path)
 				    ? content.substr(0, 57) + "\xE2\x80\xA6"
 				    : content;
 			}
-			AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+			fOutput->AppendText("\nyou \xE2\x96\xB8 ", SciOutput::kStyleUserLabel);
 			_AppendText(content + "\n");
 			++fTurnCount;
 		} else if (role == "assistant") {
-			AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+			fOutput->AppendText("claude \xE2\x96\xB8 \n", SciOutput::kStyleModelLabel);
 			if (fMdRenderer) {
 				fMdRenderer->Write(content);
 				fMdRenderer->Flush();
