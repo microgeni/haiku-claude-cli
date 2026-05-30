@@ -136,7 +136,11 @@ struct TurnJob {
 	int             maxTokens;
 	config::Auth    auth;
 	std::string     systemPrompt;
-	bool            hasTelegram;    // true → call Mirror*/Acquire/Release
+	// When true the worker constructs a TelegramSink and passes it to
+	// SendWithTools so the local turn streams live to the primary chat.
+	bool            hasTelegram = false;
+	// The primary chat ID to stream to (fPrimaryUserId from RemoteControl).
+	int64_t         telegramChatId = 0;
 };
 
 struct TurnResult {
@@ -224,13 +228,29 @@ static void LocalWorkerFunc(LocalWorker& w)
 		TurnResult result;
 		const auto turn_start = std::chrono::steady_clock::now();
 
-		api::StreamProgress stream_progress;
+		// Build the sink: when remote-control is active, construct a
+		// TelegramSink for the primary chat so the local turn streams
+		// live to the phone. The TelegramSink implements OutputSink and
+		// is passed to SendWithTools; it handles BeginMessage/AppendText/
+		// EndMessage/ToolStarted/ToolFinished/AskPermission directly.
+		// No more MirrorPrompt / StartThinkingUpdater globals needed.
+		std::unique_ptr<telegram::TelegramSink> tg_sink;
+		OutputSink* active_sink = nullptr;
 
-		if (job.hasTelegram && w.fRemote) {
+		if (job.hasTelegram && w.fRemote && job.telegramChatId != 0) {
 			w.fRemote->AcquireTurn();
-			api::g_stream_progress = &stream_progress;
-			w.fRemote->MirrorPrompt(job.userText);
-			w.fRemote->StartThinkingUpdater(&stream_progress);
+			// Send the user prompt as a "> text" preamble so the phone
+			// sees what is being asked before the reply starts.
+			w.fRemote->SendPromptNotice(job.userText);
+			// Create a TelegramSink for the primary chat.
+			tg_sink = std::make_unique<telegram::TelegramSink>(
+				w.fRemote->GetClient(),
+				job.telegramChatId,
+				w.fRemote->AllowDestructive(),
+				w.fRemote->AllowedToolsRef(),
+				w.fRemote->PermQueueRef());
+			tg_sink->BeginMessage("assistant");
+			active_sink = tg_sink.get();
 		}
 
 		// Append user turn to the shared messages array.
@@ -240,11 +260,13 @@ static void LocalWorkerFunc(LocalWorker& w)
 
 		const api::SendResult api_result = api::SendWithTools(
 			job.auth, job.model, job.maxTokens,
-			*w.fMessages, job.systemPrompt);
+			*w.fMessages, job.systemPrompt, active_sink);
 
 		if (job.hasTelegram && w.fRemote) {
-			w.fRemote->StopThinkingUpdater();
-			api::g_stream_progress = nullptr;
+			if (tg_sink) {
+				tg_sink->EndMessage();
+				tg_sink.reset();
+			}
 			w.fRemote->ReleaseTurn();
 		}
 
@@ -524,8 +546,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		tui::SetStatusBar(compose_status());
 
 		if (!result.ok) {
-			if (remote && remote->Running())
-				remote->MirrorCancel();
 			if (!result.cancelledInput.empty()) {
 				repl::RemoveLastRecord();
 				repl::RestoreInput(result.cancelledInput);
@@ -583,9 +603,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 		tui::SetStatusBar(compose_status());
 
-		if (remote && remote->Running())
-			remote->MirrorToPrimary(result.assistantText);
-
 		config::SaveHistory(messages, model, resume_name);
 		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistantText}});
 		// Discard any keystrokes typed during the turn (e.g. menu
@@ -608,7 +625,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		job.maxTokens    = max_tokens;
 		job.auth         = auth;
 		job.systemPrompt = std::move(system_for_turn);
-		job.hasTelegram  = (remote && remote->Running());
+		job.hasTelegram      = (remote && remote->Running());
+		job.telegramChatId   = (remote && remote->Running())
+		                     ? remote->PrimaryUserId() : 0;
 
 		// Install the stdout interceptor before waking the worker so
 		// the very first byte it writes goes into the pending buffer.

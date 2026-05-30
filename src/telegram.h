@@ -21,9 +21,9 @@
 #include "output_sink.h"
 #include "structured_sink.h"
 
-// Forward declarations kept for MirrorPrompt / StartThinkingUpdater
-// which still use StreamProgress for local mirroring of REPL turns.
-namespace api { struct StreamProgress; }
+// StreamProgress is still used by api.h for the local-mirror stub.
+// No longer needed directly in telegram.h after Step 5.
+
 
 // Tiny Telegram Bot API client over libcurl. Enough for the v1.1
 // remote-control bridge: long-polling getUpdates and sending text
@@ -291,30 +291,17 @@ public:
 	void SetSharedHistoryAppender(
 		std::function<void(nlohmann::json, nlohmann::json)> appender);
 
-	// Mirror a locally-initiated turn to the primary Telegram chat.
-	// Call order (all called from the local REPL turn, after
-	// AcquireTurn() so the turn lock is already held):
-	//   1. MirrorPrompt()  — sends "> text" + placeholder to Telegram.
-	//   2. StartThinkingUpdater(progress) — starts the animated
-	//      placeholder thread, pinned to the caller's StreamProgress.
-	//   3. api::SendWithTools(…)
-	//   4. StopThinkingUpdater() — joins the updater thread.
-	//   5. ReleaseTurn()   — MUST be after StopThinkingUpdater.
-	//   6. MirrorToPrimary() or MirrorCancel().
-	void MirrorPrompt(const std::string& user_text);
-	void MirrorToPrimary(const std::string& assistant_text);
-	void MirrorCancel();
+	// Accessors used by session.cpp LocalWorker to construct a
+	// TelegramSink for local turns that should stream to the primary chat.
+	int64_t                          PrimaryUserId()    const { return fPrimaryUserId; }
+	Client&                          GetClient()              { return fClient; }
+	bool                             AllowDestructive() const { return fAllowDestructive; }
+	std::unordered_set<std::string>& AllowedToolsRef()        { return fAllowedTools; }
+	TelegramSink::PermQueue&         PermQueueRef()           { return fPermQueue; }
 
-	// Animate the primary chat's "thinking" placeholder while a
-	// local turn is in progress. `progress` must remain valid for
-	// the lifetime of the updater thread — pass the StreamProgress
-	// that lives on the same stack frame as api::SendWithTools so
-	// the pointer is guaranteed live until StopThinkingUpdater()
-	// returns. Pass nullptr to suppress streaming-text updates (dot
-	// animation only).
-	// StopThinkingUpdater() must be called before ReleaseTurn().
-	void StartThinkingUpdater(api::StreamProgress* progress);
-	void StopThinkingUpdater();
+	// Send a "> user_text" preamble to the primary chat before a local
+	// turn starts streaming. Called by LocalWorker under the turn lock.
+	void SendPromptNotice(const std::string& user_text);
 
 private:
 	void PollLoop();
@@ -331,14 +318,8 @@ private:
 	Client                       fClient;
 	std::unordered_set<int64_t>  fAllowed;
 	int64_t                      fPrimaryUserId = 0;
-	int64_t                      fPrimaryThinkingMsgId = 0;
-	// Chat ID of the turn currently running. Set by ProcessUpdate,
-	// reset to fPrimaryUserId when that turn ends. Used by MirrorPrompt
-	// to route local-turn mirrors correctly.
+	// Chat ID of the turn currently running. Set by ProcessUpdate.
 	std::atomic<int64_t>         fActiveChatId { 0 };
-	// Spinner for local turns mirrored to Telegram.
-	std::atomic<bool>            fUpdaterRunning { false };
-	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
 	// Session-scoped always-allow set. Shared between TelegramSink
 	// instances (one per turn) so "allow always" persists across turns.

@@ -182,16 +182,19 @@ grep -q 'fPermQueue' "$SRC" \
     || fail 'TelegramSink does not drain fPermQueue for permission responses'
 pass
 
-# ── T19: MirrorToPrimary guards against double-join (StopThinkingUpdater first)
-step "T19: MirrorToPrimary calls StopThinkingUpdater before touching the thread"
-# Verify StopThinkingUpdater appears before the fClient.EditMessageText call
-# in MirrorToPrimary. We check line ordering in the file.
-LINE_STOP=$(grep -n 'StopThinkingUpdater' "$SRC" | grep -v 'void RemoteControl::Stop\b' | head -1 | cut -d: -f1)
-LINE_EDIT=$(grep -n 'EditMessageText.*fPrimaryUserId' "$SRC" | head -1 | cut -d: -f1)
-[ -n "$LINE_STOP" ] || fail "StopThinkingUpdater call not found"
-[ -n "$LINE_EDIT" ] || fail "EditMessageText(fPrimaryUserId,...) call not found"
-[ "$LINE_STOP" -lt "$LINE_EDIT" ] \
-    || fail "StopThinkingUpdater (L$LINE_STOP) must appear before EditMessageText (L$LINE_EDIT)"
+# ── T19: Local turns stream to Telegram via TelegramSink (step 5) ────────────
+step "T19: LocalWorker uses TelegramSink for local turns (not MirrorToPrimary)"
+# After step 5, the old MirrorPrompt/StartThinkingUpdater/MirrorToPrimary path
+# is replaced. Verify TelegramSink is constructed in session.cpp's LocalWorker.
+grep -q 'TelegramSink' src/session.cpp \
+    || fail 'TelegramSink not constructed in session.cpp LocalWorker'
+grep -q 'SendPromptNotice' src/session.cpp \
+    || fail 'SendPromptNotice not called in session.cpp'
+# Verify the old global mirror methods are gone from telegram.cpp.
+grep -q 'void RemoteControl::MirrorToPrimary' "$SRC" \
+    && fail 'MirrorToPrimary still present — should be removed in step 5' || true
+grep -q 'void RemoteControl::StartThinkingUpdater' "$SRC" \
+    && fail 'StartThinkingUpdater still present — should be removed in step 5' || true
 pass
 
 # ── T20: ANSI stripping is applied before sending text to Telegram ────────────
