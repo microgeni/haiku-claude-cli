@@ -23,6 +23,12 @@ struct ToolResult {
     std::string toolUseId;
     std::string content;    // accumulated stdout/stderr (buffered, see note)
     bool        isError{false};
+
+    // Convenience constructors so tool handlers can return
+    // {content, isError} without spelling out field names.
+    ToolResult() = default;
+    ToolResult(std::string c, bool err)
+        : content(std::move(c)), isError(err) {}
 };
 
 // A handler runs a ToolCall and returns its result. It is given a StreamSink so
@@ -56,6 +62,11 @@ struct FileSearch {
     // Returns matching paths for an attribute/name query, or empty on miss.
     std::function<std::vector<std::string>(const std::string& query)> query;
 };
+
+// Populate a registry with all built-in tool handlers (Read, Write, Edit,
+// Glob, Grep, Bash, WebFetch, WebSearch, TodoWrite, TodoRead, and the
+// Haiku BFS tools on __HAIKU__ builds). Called once at startup.
+void RegisterBuiltins(ToolRegistry& reg);
 
 } // namespace cch
 
