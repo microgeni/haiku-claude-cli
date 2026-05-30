@@ -151,7 +151,6 @@ void CommandPopup::Update(const std::string& prefix,
 		const std::string b(kBuiltins[i]);
 		if (b.size() >= prefix.size() &&
 		    b.substr(0, prefix.size()) == prefix) {
-			// Avoid duplicates.
 			bool found = false;
 			for (const auto& m : fMatches) if (m == b) { found = true; break; }
 			if (!found) fMatches.push_back(b);
@@ -160,65 +159,82 @@ void CommandPopup::Update(const std::string& prefix,
 	std::sort(fMatches.begin(), fMatches.end());
 
 	if (fMatches.empty()) {
-		if (!IsHidden()) Hide();
+		if (!IsHidden()) {
+			if (Lock()) { Hide(); Unlock(); }
+		}
 		return;
 	}
 
-	// Repopulate list.
+	// Estimate item height from font metrics (avoid calling ItemFrame before
+	// the list has been shown and laid out — that's what caused the crash).
+	BFont f(be_plain_font);
+	font_height fh;
+	f.GetHeight(&fh);
+	const float itemH  = ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f;
+	const float listH  = itemH * static_cast<float>(std::min((int)fMatches.size(), 6));
+	const float totalH = listH + 4.0f;
+
+	// Position and resize BEFORE showing, so the window has a valid frame
+	// when BListView::AddItem calls _FixupScrollBar → Bounds().
+	ResizeTo(width, totalH);
+	MoveTo(screenPos.x, screenPos.y - totalH);
+
+	// Now lock the popup window and populate the list.
+	if (!Lock()) return;
+
 	fList->MakeEmpty();
 	for (const auto& m : fMatches)
 		fList->AddItem(new BStringItem(m.c_str()));
 	fList->Select(0);
 
-	// Size: fixed width, height fits items up to 6.
-	const float itemH  = fList->ItemFrame(0).Height() + 1.0f;
-	const float listH  = itemH * static_cast<float>(std::min((int)fMatches.size(), 6));
-	const float totalH = listH + 4.0f; // border
-
-	// Position just above the input area.
-	ResizeTo(width, totalH);
-	MoveTo(screenPos.x, screenPos.y - totalH);
-
 	if (IsHidden()) Show();
-	SetFeel(B_FLOATING_APP_WINDOW_FEEL);
+
+	Unlock();
 }
 
 bool CommandPopup::SelectNext()
 {
 	if (IsHidden()) return false;
+	if (!Lock()) return false;
 	int32 sel = fList->CurrentSelection();
 	if (sel < fList->CountItems() - 1) fList->Select(sel + 1);
 	fList->ScrollToSelection();
+	Unlock();
 	return true;
 }
 
 bool CommandPopup::SelectPrev()
 {
 	if (IsHidden()) return false;
+	if (!Lock()) return false;
 	int32 sel = fList->CurrentSelection();
 	if (sel > 0) fList->Select(sel - 1);
 	fList->ScrollToSelection();
+	Unlock();
 	return true;
 }
 
 bool CommandPopup::Confirm()
 {
 	if (IsHidden() || fMatches.empty()) return false;
+	if (!Lock()) return false;
 	const int32 sel = fList->CurrentSelection();
+	Unlock();
 	if (sel < 0 || sel >= static_cast<int32>(fMatches.size())) return false;
 
-	// Post the selected command back to the ChatWindow.
 	BMessage msg(gui::MSG_COMPLETE_CMD);
 	msg.AddString("cmd", fMatches[static_cast<size_t>(sel)].c_str());
 	BMessenger(fTarget).SendMessage(&msg);
 
-	Hide();
+	if (Lock()) { Hide(); Unlock(); }
 	return true;
 }
 
 void CommandPopup::Dismiss()
 {
-	if (!IsHidden()) Hide();
+	if (!IsHidden()) {
+		if (Lock()) { Hide(); Unlock(); }
+	}
 }
 
 
