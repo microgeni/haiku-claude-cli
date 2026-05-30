@@ -42,7 +42,16 @@ LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread
 SRCDIR   := src
 BIN      := $(BUILDDIR)/claude
 
-SRCS := $(wildcard $(SRCDIR)/*.cpp)
+# GUI-only sources must be excluded from the CLI wildcard so BeAPI
+# headers and symbols don't bleed into the terminal build.
+GUI_ONLY_SRCS := \
+    $(SRCDIR)/gui_sink.cpp     \
+    $(SRCDIR)/gui_stubs.cpp    \
+    $(SRCDIR)/chat_window.cpp  \
+    $(SRCDIR)/app_main_gui.cpp
+
+_ALL_SRCS := $(wildcard $(SRCDIR)/*.cpp)
+SRCS := $(filter-out $(GUI_ONLY_SRCS), $(_ALL_SRCS))
 OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
@@ -66,9 +75,64 @@ PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all clean install package release lint security check
+.PHONY: all gui clean install package release lint security check
 
 all: $(BIN)
+
+# ── GUI target (Haiku only — links libbe) ────────────────────────────────────
+# The GUI reuses all the core logic modules from src/ but substitutes the
+# terminal-specific files (main, session, repl, tui, commands, stats,
+# terminal_sink, telegram) for the BeAPI front-end files.
+GUI_BIN     := $(BUILDDIR)/claude-gui
+GUI_APP_SIG ?= application/x-vnd.Microgeni-claude-gui
+
+# Modules shared between CLI and GUI (core logic, no terminal UI).
+GUI_CORE_SRCS := \
+    $(SRCDIR)/api.cpp         \
+    $(SRCDIR)/config.cpp      \
+    $(SRCDIR)/hooks.cpp       \
+    $(SRCDIR)/mcp.cpp         \
+    $(SRCDIR)/models.cpp      \
+    $(SRCDIR)/notify.cpp      \
+    $(SRCDIR)/oauth.cpp       \
+    $(SRCDIR)/paths.cpp       \
+    $(SRCDIR)/tools.cpp
+
+# GUI-specific front-end files.
+GUI_FRONT_SRCS := \
+    $(SRCDIR)/tui.cpp         \
+    $(SRCDIR)/gui_stubs.cpp   \
+    $(SRCDIR)/gui_sink.cpp    \
+    $(SRCDIR)/chat_window.cpp \
+    $(SRCDIR)/app_main_gui.cpp
+
+GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
+GUI_OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/gui_%.o,$(GUI_SRCS))
+GUI_DEPS := $(GUI_OBJS:.o=.d)
+
+# Same compile flags as the CLI + libbe headers (already on the system path
+# on Haiku; no pkg-config entry needed).
+GUI_CXXFLAGS := $(CXXFLAGS)
+GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) -pthread -lbe -lnetwork
+
+$(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
+	$(CXX) $(GUI_CXXFLAGS) -MMD -MP -MF $(@:.o=.d) -c -o $@ $<
+
+$(GUI_BIN): $(GUI_OBJS) | $(BUILDDIR)
+	$(CXX) $(LDFLAGS) -o $@ $^ $(GUI_LIBS)
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON on $(GUI_BIN)"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$@"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(GUI_APP_SIG)"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$@"; \
+	fi
+
+-include $(GUI_DEPS)
+
+.PHONY: gui
+gui: $(GUI_BIN)
 
 # Optimized build in a separate directory so it doesn't invalidate
 # incremental dev builds. Reinvokes make with MODE=release.
