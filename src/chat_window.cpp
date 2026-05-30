@@ -893,19 +893,19 @@ void ChatWindow::_PopulateModelMenu()
 	}
 	fModelMenu->SetRadioMode(true);
 
-	// Background fetch — replace menu items when results arrive.
-	const config::Auth auth = fAuth;
-	std::thread([auth, this]() {
+	// Background fetch — capture messenger by value so it becomes invalid
+	// cleanly if the window closes before the fetch completes.
+	const config::Auth auth    = fAuth;
+	const BMessenger   window  = BMessenger(this);
+	std::thread([auth, window]() {
 		std::vector<models::ModelEntry> fetched = models::FetchModels(auth);
-		if (fetched.empty()) return;
-		// Pack ids into a BMessage and post to ourselves.
-		BMessage* ready = new BMessage(gui::MSG_MODELS_READY);
+		if (fetched.empty() || !window.IsValid()) return;
+		BMessage ready(gui::MSG_MODELS_READY);
 		for (const auto& e : fetched) {
-			ready->AddString("id",   e.id.c_str());
-			ready->AddString("name", e.display_name.c_str());
+			ready.AddString("id",   e.id.c_str());
+			ready.AddString("name", e.display_name.c_str());
 		}
-		BMessenger(this).SendMessage(ready);
-		delete ready;
+		window.SendMessage(&ready);
 	}).detach();
 }
 

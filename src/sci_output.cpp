@@ -97,9 +97,7 @@ void SciOutput::Configure()
 
 void SciOutput::_ConfigureBaseStyles()
 {
-	// Minimal safe configuration — only view behaviour, no style calls.
-	// Style calls (SCI_STYLESETFORE etc.) are deferred until we confirm
-	// which ones are safe on this Scintilla version.
+	// View behaviour — these are all integer params, no string pointers.
 	_Sci(kSetReadOnly, 1);
 	_Sci(kSetMarginWidthN, 0, 0);
 	_Sci(kSetMarginWidthN, 1, 0);
@@ -107,6 +105,39 @@ void SciOutput::_ConfigureBaseStyles()
 	_Sci(kSetScrollWidthTracking, 1);
 	_Sci(kSetEndAtLastLine, 1);
 	_Sci(kSetCaretLineVisible, 0);
+	_Sci(kSetCaretFore, rgb(0xFF, 0xFF, 0xFF));
+	_Sci(kSetSelBack, 1, rgb(0x44, 0x44, 0x66));
+
+	// Background and foreground for all styles 0-40.
+	// Set individually — avoids SCI_STYLECLEARALL which triggers
+	// internal font propagation and crashes on this Scintilla build.
+	const long bg = rgb(0x1C, 0x1C, 0x1E);
+	const long fg = rgb(0xDC, 0xDC, 0xDC);
+	for (int s = 0; s <= 40; ++s) {
+		_Sci(kStyleSetBack, static_cast<unsigned long>(s), bg);
+		_Sci(kStyleSetFore, static_cast<unsigned long>(s), fg);
+	}
+
+	// Named prose styles — fore colour only (back inherited above).
+	_Sci(kStyleSetFore, kStyleUserLabel,    rgb(0x56, 0xB4, 0xE9));
+	_Sci(kStyleSetBold, kStyleUserLabel,    1);
+	_Sci(kStyleSetFore, kStyleModelLabel,   rgb(0xCC, 0x79, 0x5A));
+	_Sci(kStyleSetBold, kStyleModelLabel,   1);
+	_Sci(kStyleSetFore, kStyleToolLine,     rgb(0x82, 0x82, 0x8C));
+	_Sci(kStyleSetFore, kStyleError,        rgb(0xE6, 0x4B, 0x4B));
+	_Sci(kStyleSetFore, kStyleCode,         rgb(0xC8, 0xC8, 0xA0));
+	_Sci(kStyleSetFore, kStyleH1,           rgb(0xFF, 0xC8, 0x64));
+	_Sci(kStyleSetBold, kStyleH1,           1);
+	_Sci(kStyleSetFore, kStyleH2,           rgb(0xB4, 0xDC, 0xFF));
+	_Sci(kStyleSetBold, kStyleH2,           1);
+	_Sci(kStyleSetFore, kStyleH3,           rgb(0xC8, 0xFF, 0xC8));
+	_Sci(kStyleSetBold, kStyleH3,           1);
+	_Sci(kStyleSetFore, kStyleLink,         rgb(0x56, 0xB4, 0xE9));
+	_Sci(kStyleSetFore,   kStyleBlockquote, rgb(0x96, 0x96, 0x96));
+	_Sci(kStyleSetItalic, kStyleBlockquote, 1);
+	_Sci(kStyleSetFore, kStyleDim,          rgb(0x78, 0x78, 0x78));
+	_Sci(kStyleSetFore,   kStyleCodeLang,   rgb(0x78, 0x78, 0x8C));
+	_Sci(kStyleSetItalic, kStyleCodeLang,   1);
 }
 
 // ---------------------------------------------------------------------------
