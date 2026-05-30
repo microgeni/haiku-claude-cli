@@ -314,9 +314,14 @@ void MdRenderer::ScrollToEnd()
 void MdRenderer::AppendHRule()
 {
 	// A row of U+2500 BOX DRAWINGS LIGHT HORIZONTAL characters.
-	// Width ≈ view width in chars (approximate at 8px/char).
-	const float viewW = fView->Bounds().Width();
-	const int   nchars = std::max(10, static_cast<int>(viewW / 8.0f));
+	// Measure actual fixed-font glyph width so the rule fits in one line
+	// without wrapping.  Leave a small right-margin (16 px).
+	BFont mono(be_fixed_font);
+	const float glyphW = mono.StringWidth("\xE2\x94\x80"); // width of one ─
+	const float viewW  = fView->Bounds().Width() - 16.0f;
+	const int   nchars = (glyphW > 0.0f)
+	    ? std::max(4, static_cast<int>(viewW / glyphW))
+	    : 40; // safe fallback
 	std::string rule;
 	rule.reserve(static_cast<size_t>(nchars) * 3 + 1);
 	for (int i = 0; i < nchars; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
