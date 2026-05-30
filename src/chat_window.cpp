@@ -14,6 +14,7 @@
 #include "code_styler.h"
 #include "config.h"
 #include "gui_sink.h"
+#include "md_renderer.h"
 #include "scintilla_view.h"
 
 // ---------------------------------------------------------------------------
@@ -86,11 +87,15 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	}
 
 	_BuildLayout();
+
+	// Create the markdown renderer now that fOutput exists.
+	fMdRenderer = new md::MdRenderer(fOutput);
 }
 
 ChatWindow::~ChatWindow()
 {
 	delete fStyler;
+	delete fMdRenderer;
 	if (fWorker.joinable()) fWorker.detach();
 	delete fSink;
 }
@@ -158,7 +163,30 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_CHUNK: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
-			_ProcessChunk(text);
+			// WebFetch HTML is buffered; everything else goes through
+			// the two-phase markdown/_ProcessChunk pipeline.
+			// Detection: tool_result text starting with "HTTP NNN" where
+			// the content-type contains "html". We check fInWebFetch which
+			// was set by MSG_TOOL_START("WebFetch").
+			if (fInWebFetch) {
+				fWebFetchBuf += text;
+				// Check if this looks like plain text (not HTML) — if the
+				// first line is "HTTP 200 (text/plain..." just pass through.
+				if (fWebFetchBuf.find("text/html") == std::string::npos &&
+				    fWebFetchBuf.find("<html") == std::string::npos &&
+				    fWebFetchBuf.find("<HTML") == std::string::npos &&
+				    fWebFetchBuf.size() > 40) {
+					// Not HTML — emit directly.
+					fInWebFetch = false;
+					if (fMdRenderer)
+						fMdRenderer->Write(fWebFetchBuf);
+					else
+						_AppendText(fWebFetchBuf);
+					fWebFetchBuf.clear();
+				}
+			} else {
+				_ProcessChunk(text);
+			}
 			fPendingAssistantText += text;
 		}
 		break;
@@ -170,7 +198,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			fInCodeBlock = false;
 			_FlushCodeBlock();
 		}
+		// Flush any partial markdown line.
+		if (fMdRenderer) fMdRenderer->Flush();
 		fLineBuffer.clear();
+		fInWebFetch = false;
+		fWebFetchBuf.clear();
 		break;
 
 	case gui::MSG_TOOL_START: {
@@ -178,6 +210,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		const char* summary = nullptr;
 		msg->FindString("name",    &name);
 		msg->FindString("summary", &summary);
+		// Detect WebFetch so we can strip HTML from its output.
+		if (name && std::string(name) == "WebFetch") {
+			fInWebFetch = true;
+			fWebFetchBuf.clear();
+		}
 		std::string line = "\n\xE2\x9A\x99 "; // ⚙
 		if (name)    { line += name;    line += ": "; }
 		if (summary) { line += summary; }
@@ -190,6 +227,18 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		bool        ok   = true;
 		msg->FindString("name", &name);
 		msg->FindBool("ok",     &ok);
+		// If this was a WebFetch, flush the stripped HTML now.
+		if (fInWebFetch) {
+			fInWebFetch = false;
+			if (!fWebFetchBuf.empty()) {
+				const std::string stripped = md::StripHtml(fWebFetchBuf);
+				if (fMdRenderer)
+					fMdRenderer->Write(stripped + "\n");
+				else
+					_AppendText(stripped + "\n");
+				fWebFetchBuf.clear();
+			}
+		}
 		std::string line = ok ? "\xE2\x9C\x85 " : "\xE2\x9D\x8C "; // ✅/❌
 		if (name) line += name;
 		line += '\n';
@@ -241,6 +290,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		fInCodeBlock = false;
 		fCodeBuffer.clear();
 		fLineBuffer.clear();
+		fInWebFetch = false;
+		fWebFetchBuf.clear();
+		if (fMdRenderer) fMdRenderer->Flush();
 
 		if (!fPendingUserText.empty())
 			fMessages.push_back({{"role", "user"},
@@ -322,25 +374,27 @@ void ChatWindow::_ProcessChunk(const std::string& chunk)
 		fLineBuffer += c;
 		if (c != '\n') continue;
 
-		// We have a complete line in fLineBuffer.
 		const std::string line = fLineBuffer;
 		fLineBuffer.clear();
 
 		std::string lang;
 		if (!fInCodeBlock) {
-			// Check for opening fence.
 			if (IsFence(line, lang)) {
+				// Flush any buffered markdown before entering code block.
+				if (fMdRenderer) fMdRenderer->Flush();
 				fInCodeBlock = true;
 				fCodeLang    = lang;
 				fCodeBuffer.clear();
-				// Don't emit the fence line itself.
 			} else {
-				_AppendText(line);
+				// Route through markdown renderer.
+				if (fMdRenderer) {
+					fMdRenderer->Write(line);
+				} else {
+					_AppendText(line);
+				}
 			}
 		} else {
-			// Inside a code block.
 			if (IsFence(line, lang) && lang.empty()) {
-				// Closing fence — render the buffered code.
 				fInCodeBlock = false;
 				_FlushCodeBlock();
 			} else {
@@ -349,11 +403,13 @@ void ChatWindow::_ProcessChunk(const std::string& chunk)
 		}
 	}
 
-	// Emit any partial line that didn't end with '\n' (plain text only —
-	// never emit mid-fence characters directly to the BTextView).
+	// Partial line: pass to markdown renderer (it buffers until '\n').
 	if (!fLineBuffer.empty() && !fInCodeBlock) {
-		_AppendText(fLineBuffer);
-		fLineBuffer.clear();
+		if (fMdRenderer) {
+			fMdRenderer->Write(fLineBuffer);
+			fLineBuffer.clear();
+		}
+		// If no renderer, keep in fLineBuffer and emit later.
 	}
 }
 
@@ -430,7 +486,7 @@ void ChatWindow::_SendTurn()
 
 	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
 	_AppendText(userText + "\n");
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 ", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
 
 	_LaunchWorker(userText);
 }
@@ -442,6 +498,8 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 	fInCodeBlock          = false;
 	fCodeBuffer.clear();
 	fLineBuffer.clear();
+	fInWebFetch           = false;
+	fWebFetchBuf.clear();
 
 	fSend->SetEnabled(false);
 	fInput->SetEnabled(false);

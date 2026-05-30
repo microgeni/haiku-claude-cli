@@ -19,6 +19,7 @@
 #include "code_styler.h"
 #include "config.h"
 #include "gui_sink.h"
+#include "md_renderer.h"
 
 // ChatWindow — the single chat surface. Owns all BViews on the main thread.
 //
@@ -81,6 +82,15 @@ private:
 	styling::Theme       fTheme;
 	styling::LanguageSet fLangSet;
 	styling::CodeStyler* fStyler = nullptr;
+
+	// Markdown renderer — processes assistant text with inline styling.
+	// Created once layout is complete (fOutput must exist first).
+	md::MdRenderer*      fMdRenderer = nullptr;
+
+	// WebFetch output detection: when fInWebFetch == true we're inside
+	// a WebFetch tool result block and pass text through StripHtml.
+	bool                 fInWebFetch = false;
+	std::string          fWebFetchBuf; // accumulates raw WebFetch text
 
 	// List of BScintillaView* we've embedded; kept so they can be
 	// destroyed with the window (they are not part of fOutput's view

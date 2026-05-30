@@ -48,6 +48,7 @@ GUI_ONLY_SRCS := \
     $(SRCDIR)/gui_sink.cpp     \
     $(SRCDIR)/gui_stubs.cpp    \
     $(SRCDIR)/code_styler.cpp  \
+    $(SRCDIR)/md_renderer.cpp  \
     $(SRCDIR)/chat_window.cpp  \
     $(SRCDIR)/app_main_gui.cpp
 
@@ -101,11 +102,12 @@ GUI_CORE_SRCS := \
 
 # GUI-specific front-end files.
 GUI_FRONT_SRCS := \
-    $(SRCDIR)/tui.cpp         \
-    $(SRCDIR)/code_styler.cpp \
-    $(SRCDIR)/gui_stubs.cpp   \
-    $(SRCDIR)/gui_sink.cpp    \
-    $(SRCDIR)/chat_window.cpp \
+    $(SRCDIR)/tui.cpp          \
+    $(SRCDIR)/code_styler.cpp  \
+    $(SRCDIR)/md_renderer.cpp  \
+    $(SRCDIR)/gui_stubs.cpp    \
+    $(SRCDIR)/gui_sink.cpp     \
+    $(SRCDIR)/chat_window.cpp  \
     $(SRCDIR)/app_main_gui.cpp
 
 GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
