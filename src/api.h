@@ -13,17 +13,29 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "output_sink.h"
 
 // Anthropic Messages API client and tool-use loop. SendConversation
 // does one streamed POST to /v1/messages; SendWithTools wraps that
 // in a loop that dispatches each tool_use block back through the
 // tools:: registry, re-feeding tool_results until the model stops
 // requesting tools.
+
+// RAII handle so terminal_sink.cpp can pause/resume the ESC-interrupt
+// background thread around SelectOption calls without knowing the
+// concrete EscInterruptGuard type (which is private to api.cpp).
+struct EscInterruptGuardHandle {
+	virtual void pause()  = 0;
+	virtual void resume() = 0;
+	virtual ~EscInterruptGuardHandle() = default;
+};
+
 namespace api {
 
 using json = nlohmann::json;
 
-enum class Permission { Allow, Deny };
+// api::Permission is defined in output_sink.h; it is in the api::
+// namespace there so all existing api::Permission references compile.
 
 struct SendResult {
 	int                exit_code = 0;
@@ -95,6 +107,11 @@ extern std::atomic<bool> g_ludicrous_mode;
 // message.
 extern std::atomic<bool> g_telegram_updater_paused;
 
+// Pointer to the currently active EscInterruptGuard, exposed so
+// TerminalSink::AskPermission can pause/resume it around SelectOption
+// calls. Null when no turn is in flight.
+extern EscInterruptGuardHandle* g_active_esc_guard;
+
 // Response-header cache populated by the SSE client. Keys are the
 // lowercased `anthropic-*` header names. Consumed by /usage.
 extern std::map<std::string, std::string> g_last_rate_headers;
@@ -120,10 +137,12 @@ private:
 // whether the tools array is sent — set false for sub-agents that
 // must not call tools. `auth` is taken by value so the 401-refresh
 // path can swap in a renewed token and retry without touching the
-// caller's copy.
+// caller's copy. `sink_in` is the OutputSink to use; if null a
+// fresh TerminalSink is created for this call.
 SendResult SendConversation(config::Auth auth, const std::string& model,
                             int max_tokens, const json& messages,
-                            const std::string& custom_system, bool include_tools);
+                            const std::string& custom_system, bool include_tools,
+                            OutputSink* sink_in = nullptr);
 
 // Multi-round tool-use loop: SendConversation → dispatch tool_use
 // blocks → append tool_results → repeat until stop_reason leaves

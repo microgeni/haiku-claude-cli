@@ -19,8 +19,10 @@
 #include <curl/curl.h>
 
 #include "hooks.h"
+#include "output_sink.h"
 #include "repl.h"
 #include "stats.h"
+#include "terminal_sink.h"
 #include "tools.h"
 #include "tui.h"
 
@@ -78,7 +80,7 @@ int xfer_callback(void* /*clientp*/,
 // uses. Destructor tears down the thread and restores termios.
 //
 // No-op when stdin isn't a TTY (piped input, CI, subprocess).
-class EscInterruptGuard {
+class EscInterruptGuard : public EscInterruptGuardHandle {
 public:
 	EscInterruptGuard() {
 		// Always operate on the real tty fd, not STDIN_FILENO, because
@@ -223,10 +225,10 @@ private:
 	int               fWakePipe[2] = {-1, -1};    // self-pipe: pause() → thread
 };
 
-// Pointer to the currently active EscInterruptGuard (if any). Set
-// in SendWithTools so PromptPermission can pause/resume it around
-// tui::SelectOption() calls.
-EscInterruptGuard* g_active_esc_guard = nullptr;
+} // anonymous namespace
+
+// Definition of the global declared extern in api.h.
+EscInterruptGuardHandle* g_active_esc_guard = nullptr;
 
 struct StreamState {
 	std::string          sse_buffer;
@@ -240,8 +242,7 @@ struct StreamState {
 	bool                 stream_error        = false;
 	std::string          stream_error_type;
 	std::string          stream_error_message;
-	tui::Spinner*        spinner             = nullptr;
-	tui::MarkdownRenderer renderer;
+	OutputSink*          sink                = nullptr; // injected
 
 	// Structured content accumulation for tool-use support.
 	std::vector<json>    content_blocks;
@@ -308,7 +309,7 @@ void ProcessSseEvent(const std::string& event, StreamState* state) {
 			const std::string dtype = delta.value("type", std::string{});
 			if (dtype == "text_delta") {
 				const std::string chunk = delta.value("text", "");
-				state->renderer.Write(chunk);
+				if (state->sink) state->sink->OnText(chunk);
 				state->current_text += chunk;
 				state->text += chunk;
 				state->saw_text = true;
@@ -431,242 +432,6 @@ std::string ShortInputSummary(const json& input) {
 	return dumped.substr(0, 77) + "...";
 }
 
-Permission PromptPermission(const std::string& tool_name, const json& input,
-                            std::string* denial_reason = nullptr) {
-	if (AlwaysAllowed().count(tool_name)) return Permission::Allow;
-	if (!tools::RequiresPermission(tool_name)) return Permission::Allow;
-
-	// Ludicrous mode: all permissions auto-approved, no prompts.
-	if (g_ludicrous_mode.load()) {
-		std::cout << tui::Dim("  \xE2\x9A\xA1 ludicrous: auto-approved " + tool_name) << "\n";
-		return Permission::Allow;
-	}
-
-	// Telegram remote-control hook: fires for ALL turns (local or
-	// Telegram-origin) when /remote-control is active. Checked
-	// before the g_non_interactive_tools gate so a local turn that
-	// triggers Bash still asks the Telegram user for approval.
-	if (g_telegram_permission_hook) {
-		const std::string extra = tools::Preview(tool_name, input);
-		const std::string preview = extra.empty()
-			? (tool_name + " " + ShortInputSummary(input))
-			: extra;
-		if (!extra.empty()) std::cout << tui::Dim(extra) << "\n";
-		else std::cout << tui::Meta("  -> " + tool_name + " " + ShortInputSummary(input)) << "\n";
-
-		const bool has_tty = isatty(fileno(stdin)) && isatty(fileno(stdout));
-		// For Telegram-origin turns (g_non_interactive_tools == true)
-		// we must NOT call tui::SelectOption — the main-thread REPL
-		// is also reading stdin. Route straight through the Telegram
-		// hook regardless of whether a TTY is attached.
-		if (!has_tty || g_non_interactive_tools) {
-			std::cout << tui::Bold("allow " + tool_name + "? ")
-					  << tui::Dim("[awaiting Telegram response]") << "\n" << std::flush;
-			const Permission p = g_telegram_permission_hook(tool_name, preview, nullptr);
-			const char* lbl = (p == Permission::Allow) ? "yes" : "no";
-			std::cout << tui::Dim(std::string("  -> ") + lbl) << "\n";
-			return p;
-		}
-
-		// Race: show the local menu in a thread while the Telegram
-		// hook waits for a button tap. A shared atomic lets the
-		// winner signal the loser to stop blocking.
-		std::atomic<bool> local_answered { false };
-		std::atomic<bool> tg_answered    { false };
-		Permission         result         { Permission::Deny };
-		std::mutex         race_mu;
-		std::condition_variable race_cv;
-
-		auto tg_hook = g_telegram_permission_hook; // capture while still set
-		std::thread tg_thread([&]() {
-			const Permission p = tg_hook(tool_name, preview, &local_answered);
-			std::unique_lock<std::mutex> lk(race_mu);
-			if (!local_answered.load()) {
-				result = p;
-				tg_answered.store(true);
-			}
-			race_cv.notify_one();
-		});
-
-		const std::vector<std::string> choices = {
-			"Yes",
-			"Yes, allow all " + tool_name + " this session  (shift+tab)",
-			"No",
-		};
-		std::cout << tui::Dim("[also awaiting Telegram — or answer locally]") << "\n" << std::flush;
-		if (g_active_esc_guard) g_active_esc_guard->pause();
-		repl::BlockStdin();
-		tui::PauseFlushTimer();
-		tui::SuspendScrollRegion();
-		const int race_pre_lines =
-			(extra.empty()
-				? 1
-				: static_cast<int>(std::count(extra.begin(), extra.end(), '\n')) + 1)
-			+ 1; // the "[also awaiting Telegram]" line
-		const int picked = tui::SelectOption(choices, "allow " + tool_name + "?",
-											 &tg_answered, race_pre_lines);
-		tui::RestoreScrollRegion();
-		tui::ResumeFlushTimer();
-		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
-		repl::UnblockStdin();
-		repl::RequestClearEditBuffer();
-		if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
-		if (g_active_esc_guard) g_active_esc_guard->resume();
-		tui::PositionCursorForChat();
-
-		{
-			std::unique_lock<std::mutex> lk(race_mu);
-			if (!tg_answered.load()) {
-				if (picked == -2) {
-					// Tab/amend: cancel turn and restore input to edit buffer.
-					g_cancel_retype = 1;
-					g_interrupted   = 1;
-					if (denial_reason)
-						*denial_reason = "user chose to amend the prompt";
-					result = Permission::Deny;
-				} else if (picked == 1) {
-					AlwaysAllowed().insert(tool_name);
-					result = Permission::Allow;
-				} else if (picked == 0) {
-					result = Permission::Allow;
-				} else {
-					if (denial_reason)
-						*denial_reason = "user declined permission for " + tool_name;
-					result = Permission::Deny;
-				}
-				local_answered.store(true);
-			}
-		}
-		race_cv.notify_one();
-
-		tg_thread.join();
-
-		const char* lbl = (result == Permission::Allow) ? "yes" : "no";
-		std::cout << tui::Dim(std::string("  -> ") + lbl) << "\n";
-		return result;
-	}
-
-	if (g_non_interactive_tools) {
-		if (g_non_interactive_allow_destructive) return Permission::Allow;
-		if (denial_reason) {
-			*denial_reason =
-				"destructive tool " + tool_name + " is blocked in non-interactive "
-				"mode. Set \"fAllowDestructiveTools\": true in config.json "
-				"(or telegram.fAllowDestructiveTools for the bridge) to allow it.";
-		}
-		return Permission::Deny;
-	}
-
-	// One-shot runs with no usable stdin (piped, closed, redirected)
-	// cannot show a y/a/n dialog. Either auto-approve from config /
-	// -y, or fail loudly with a clear reason.
-	if (!isatty(fileno(stdin))) {
-		if (g_allow_destructive_tools) {
-			AlwaysAllowed().insert(tool_name);
-			return Permission::Allow;
-		}
-		const std::string msg =
-			"cannot prompt for " + tool_name + " permission: stdin is not a "
-			"terminal. Re-run with -y/--yes to auto-approve destructive tools "
-			"for this invocation, set \"fAllowDestructiveTools\": true in "
-			"config.json, or use -i/--interactive from a real terminal.";
-		std::cerr << tui::Meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
-				  << tui::Dim("  " + msg) << "\n";
-		if (denial_reason) *denial_reason = msg;
-		return Permission::Deny;
-	}
-
-	// Print the Preview + question text into the scroll region so
-	// the history shows what was asked.
-	const std::string extra = tools::Preview(tool_name, input);
-	int pre_lines = 0;
-	if (!extra.empty()) {
-		std::cout << tui::Dim(extra) << "\n";
-		pre_lines = static_cast<int>(std::count(extra.begin(), extra.end(), '\n')) + 1;
-	} else {
-		// Fallback for tools without a rich preview: show a compact
-		// one-liner with the tool name and a summary of its input.
-		const std::string action_line = "  \xE2\x86\x92 " + tool_name
-		                              + "  " + ShortInputSummary(input);
-		std::cout << tui::Meta(action_line) << "\n";
-		pre_lines = 1;
-	}
-
-	// Derive a file basename and directory scope for the option labels.
-	// e.g. path="src/tools.cpp" → basename="tools.cpp", dir_scope="src/"
-	const std::string file_path = input.value("path", std::string{});
-	const auto slash = file_path.rfind('/');
-	const std::string basename  = (slash == std::string::npos)
-	                            ? file_path : file_path.substr(slash + 1);
-	const auto prev_slash = (slash == std::string::npos || slash == 0)
-	                      ? std::string::npos : file_path.rfind('/', slash - 1);
-	const std::string dir_scope = (!file_path.empty() && slash != std::string::npos)
-	    ? file_path.substr(prev_slash == std::string::npos ? 0 : prev_slash + 1,
-	                       slash - (prev_slash == std::string::npos ? 0 : prev_slash) )
-	    : std::string{};
-
-	// Natural-language question matching Claude Code's style.
-	const std::string question = basename.empty()
-	    ? "Do you want to proceed with " + tool_name + "?"
-	    : "Do you want to make this edit to " + basename + "?";
-
-	// Option 2: scope to directory when available, otherwise session-wide.
-	const std::string allow_session_label = dir_scope.empty()
-	    ? "Yes, allow all " + tool_name + " this session  (shift+tab)"
-	    : "Yes, allow all " + tool_name + " in " + dir_scope + " this session  (shift+tab)";
-
-	const std::vector<std::string> choices = {
-		"Yes",
-		allow_session_label,
-		"No",
-	};
-	if (g_active_esc_guard) g_active_esc_guard->pause();
-	// Block the main readline loop from reading stdin before pausing
-	// the flush timer, so SelectOption() has exclusive tty input access
-	// regardless of whether the flush timer is still running.
-	repl::BlockStdin();
-	tui::PauseFlushTimer();
-	tui::SuspendScrollRegion();
-	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
-	tui::RestoreScrollRegion();
-	tui::ResumeFlushTimer();
-	// Flush stale input bytes, then unblock stdin and resume guard.
-	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
-	repl::UnblockStdin();
-	// Clear libedit's internal buffer: Haiku's libedit reads stdin
-	// directly, so the approval keystroke may be in its edit buffer.
-	repl::RequestClearEditBuffer();
-	// Second flush for any byte that arrived in the window between
-	// SelectOption's TCSAFLUSH and the tcflush above.
-	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
-	if (g_active_esc_guard) g_active_esc_guard->resume();
-	tui::PositionCursorForChat();
-
-	if (g_interrupted && picked >= static_cast<int>(choices.size()) - 1) {
-		if (denial_reason) *denial_reason = "interrupted — permission denied for " + tool_name;
-		return Permission::Deny;
-	}
-	if (picked == -2) {
-		// Tab pressed — "amend": cancel the turn and restore the user's
-		// original input to the edit buffer so they can retype/edit it.
-		g_cancel_retype = 1;
-		g_interrupted   = 1;
-		if (denial_reason) *denial_reason = "user chose to amend the prompt";
-		return Permission::Deny;
-	}
-	if (picked == 1) {
-		AlwaysAllowed().insert(tool_name);
-		return Permission::Allow;
-	}
-	if (picked == 0) return Permission::Allow;
-	if (denial_reason) {
-		*denial_reason = "user declined permission for " + tool_name;
-	}
-	return Permission::Deny;
-}
-
-} // namespace
-
 InterruptGuard::InterruptGuard() {
 	g_interrupted = 0;
 	struct sigaction sa {};
@@ -682,7 +447,8 @@ InterruptGuard::~InterruptGuard() {
 
 SendResult SendConversation(config::Auth auth, const std::string& model,
                             int max_tokens, const json& messages,
-                            const std::string& custom_system, bool include_tools) {
+                            const std::string& custom_system, bool include_tools,
+                            OutputSink* sink_in) {
 	constexpr int kMaxRetries = 3;
 	constexpr int kBaseDelay  = 1000; // ms; doubles on each retry
 
@@ -697,6 +463,15 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	// may contain non-UTF-8 sequences. nlohmann::json::dump() throws
 	// type_error.316 on any invalid byte.
 	const std::string safe_system = config::SanitizeUtf8(custom_system);
+
+	// Create the terminal sink once for this conversation.
+	// SendWithTools passes its own sink; standalone calls get a fresh one.
+	std::unique_ptr<TerminalSink> owned_sink;
+	if (!sink_in) {
+		owned_sink = std::make_unique<TerminalSink>();
+		sink_in    = owned_sink.get();
+	}
+	OutputSink& sink = *sink_in;
 
 	for (int attempt = 1; /* break/return inside */; ++attempt) {
 	// Reset per-request state on the reused handle so stale headers
@@ -782,14 +557,10 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	headers = curl_slist_append(headers, "accept: text/event-stream");
 
 	StreamState state;
-	tui::Spinner spinner("thinking");
-	spinner.SetLiveInputTokens(&state.input_tokens);
-	state.spinner = &spinner;
-	state.renderer.SetSpinner(&spinner);
-	// The "claude> " label is printed by the renderer the moment the
-	// first streamed character arrives — after the spinner has cleared
-	// its own line — so the spinner never overwrites it.
-	state.renderer.SetResponsePrefix(tui::ClaudePrompt());
+	state.sink = &sink;
+	// Wire the live token counter to the sink's spinner.
+	if (auto* ts = dynamic_cast<TerminalSink*>(&sink))
+		ts->SetLiveInputTokens(&state.input_tokens);
 
 	curl_easy_setopt(curl, CURLOPT_URL, kApiUrl);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -823,15 +594,17 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 			inner_esc_guard = std::make_unique<EscInterruptGuard>();
 		}
 		res = curl_easy_perform(curl);
-		spinner.Stop();
+		// Stop the spinner (lives in TerminalSink) now that the HTTP
+		// transfer is done.
+		if (auto* ts = dynamic_cast<TerminalSink*>(&sink)) ts->Flush();
 	}
 	long http_status = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
 	curl_slist_free_all(headers);
 
 	if (g_interrupted) {
-		state.renderer.Flush();
-		std::cout << "\n" << tui::Meta("[interrupted]") << "\n";
+		std::cout << "\n";
+		sink.OnMeta("[interrupted]");
 		return {1, state.text, state.input_tokens.load(), state.output_tokens.load(),
 				state.content_blocks, state.stop_reason,
 				state.cache_creation_input_tokens.load(),
@@ -839,9 +612,6 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	}
 
 	if (res != CURLE_OK) {
-		// Curl-level transient errors (timeout, connection reset,
-		// partial transfer) are retryable. Abort-by-callback is
-		// intentional and should NOT be retried.
 		const bool curl_retryable =
 			res == CURLE_OPERATION_TIMEDOUT ||
 			res == CURLE_COULDNT_CONNECT ||
@@ -851,24 +621,22 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 			res == CURLE_SEND_ERROR;
 		if (curl_retryable && !g_interrupted && attempt < kMaxRetries) {
 			const int delay = kBaseDelay << (attempt - 1);
-			std::cerr << tui::Dim("[retry " + std::to_string(attempt)
-								  + "/" + std::to_string(kMaxRetries)
-								  + " in " + std::to_string(delay) + "ms: "
-								  + curl_easy_strerror(res) + "]")
-					  << "\n";
+			sink.OnDiag("[retry " + std::to_string(attempt)
+			            + "/" + std::to_string(kMaxRetries)
+			            + " in " + std::to_string(delay) + "ms: "
+			            + curl_easy_strerror(res) + "]");
 			config::LogLine("retry attempt=" + std::to_string(attempt)
 					 + " curl=" + std::to_string(res));
 			for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
 				std::this_thread::sleep_for(std::chrono::milliseconds(
 					std::min(100, delay - slept)));
-			continue; // retry
+			continue;
 		}
-		std::cerr << "\nerror: request failed: " << curl_easy_strerror(res) << "\n";
+		sink.OnError(std::string("request failed: ") + curl_easy_strerror(res));
 		return {1, {}, 0, 0, {}, {}};
 	}
 
 	if (http_status < 200 || http_status >= 300) {
-		// Parse Anthropic's error envelope for a user-friendly message.
 		std::string api_msg;
 		try {
 			const json err = json::parse(state.raw_buffer);
@@ -879,121 +647,100 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 			}
 		} catch (const json::exception&) {}
 
-		// 401 with an OAuth token means the access token has expired
-		// mid-session (common in long-running Telegram bridge sessions).
-		// Attempt a silent token refresh and retry once before giving up.
 		if (http_status == 401
 			&& auth.kind == config::AuthKind::OAuth
 			&& !g_interrupted
 			&& attempt < kMaxRetries) {
-			std::cerr << tui::Dim("[HTTP 401 — refreshing OAuth token and retrying]") << "\n";
+			sink.OnDiag("[HTTP 401 — refreshing OAuth token and retrying]");
 			config::LogLine("HTTP 401 — attempting token refresh (attempt="
 					 + std::to_string(attempt) + ")");
 			const config::Auth refreshed = config::ResolveAuth();
 			if (refreshed.kind == config::AuthKind::OAuth) {
 				auth = refreshed;
-				continue; // retry with the new token; no delay needed
+				continue;
 			}
-			// Refresh failed (no stored tokens or refresh rejected) —
-			// fall through to the hard-error path below.
-			std::cerr << tui::Dim("[token refresh failed — cannot recover]") << "\n";
+			sink.OnDiag("[token refresh failed — cannot recover]");
 			config::LogLine("token refresh failed after 401");
 		}
 
-		// 429 (rate limit) and 5xx (server errors) are transient —
-		// retry with exponential backoff before giving up.
 		const bool http_retryable =
 			(http_status == 429 || http_status >= 500) && !g_interrupted;
 		if (http_retryable && attempt < kMaxRetries) {
 			const int delay = kBaseDelay << (attempt - 1);
-			std::cerr << tui::Dim("[retry " + std::to_string(attempt)
-								  + "/" + std::to_string(kMaxRetries)
-								  + " in " + std::to_string(delay) + "ms: HTTP "
-								  + std::to_string(http_status) + "]")
-					  << "\n";
+			sink.OnDiag("[retry " + std::to_string(attempt)
+			            + "/" + std::to_string(kMaxRetries)
+			            + " in " + std::to_string(delay) + "ms: HTTP "
+			            + std::to_string(http_status) + "]");
 			config::LogLine("retry attempt=" + std::to_string(attempt)
 					 + " http=" + std::to_string(http_status));
 			for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
 				std::this_thread::sleep_for(std::chrono::milliseconds(
 					std::min(100, delay - slept)));
-			continue; // retry
+			continue;
 		}
 
-		std::cerr << "\n" << tui::ErrorLabel() << " ";
+		std::string err_msg;
 		switch (http_status) {
 			case 401:
-				std::cerr << "unauthorized (HTTP 401) — token refresh failed. "
-							 "Run `claude logout` then `claude login` to re-authenticate.";
+				err_msg = "unauthorized (HTTP 401) — token refresh failed. "
+				          "Run `claude logout` then `claude login` to re-authenticate.";
 				break;
 			case 403:
-				std::cerr << "forbidden (HTTP 403) — this client or account is not "
-							 "permitted to use the endpoint.";
+				err_msg = "forbidden (HTTP 403) — this client or account is not "
+				          "permitted to use the endpoint.";
 				break;
 			case 429:
-				if (api_msg == "Error") {
-					std::cerr << "gated (HTTP 429) — Anthropic's OAuth-client check "
-								 "rejected the request shape; see project notes.";
-				} else {
-					std::cerr << "rate limited (HTTP 429)";
-					if (!api_msg.empty()) std::cerr << ": " << api_msg;
-				}
+				err_msg = (api_msg == "Error")
+				    ? "gated (HTTP 429) — Anthropic's OAuth-client check rejected "
+				      "the request shape; see project notes."
+				    : "rate limited (HTTP 429)" + (api_msg.empty() ? "" : ": " + api_msg);
 				break;
 			case 500: case 502: case 503: case 504:
-				std::cerr << "server error (HTTP " << http_status << ")";
-				if (!api_msg.empty()) std::cerr << ": " << api_msg;
+				err_msg = "server error (HTTP " + std::to_string(http_status) + ")"
+				        + (api_msg.empty() ? "" : ": " + api_msg);
 				break;
 			default:
-				std::cerr << "HTTP " << http_status;
-				if (!api_msg.empty()) std::cerr << ": " << api_msg;
+				err_msg = "HTTP " + std::to_string(http_status)
+				        + (api_msg.empty() ? "" : ": " + api_msg);
 				break;
 		}
-		std::cerr << "\n";
+		sink.OnError(err_msg);
 		config::LogLine("error http=" + std::to_string(http_status)
 				 + (api_msg.empty() ? "" : " msg=" + api_msg));
 		return {1, {}, 0, 0, {}, {}};
 	}
 
 	if (state.stream_error) {
-		// Overloaded errors arrive as SSE error events after HTTP 200, so the
-		// HTTP-level retry path above never fires.  Treat them the same way:
-		// retry with exponential backoff, then give a friendly final message.
 		const bool stream_retryable =
 			(state.stream_error_type == "overloaded_error"
 			 || state.stream_error_type == "api_error")
 			&& !g_interrupted && attempt < kMaxRetries;
 		if (stream_retryable) {
 			const int delay = kBaseDelay << (attempt - 1);
-			std::cerr << tui::Dim("[retry " + std::to_string(attempt)
-								  + "/" + std::to_string(kMaxRetries)
-								  + " in " + std::to_string(delay) + "ms: "
-								  + state.stream_error_type + "]")
-					  << "\n";
+			sink.OnDiag("[retry " + std::to_string(attempt)
+			            + "/" + std::to_string(kMaxRetries)
+			            + " in " + std::to_string(delay) + "ms: "
+			            + state.stream_error_type + "]");
 			config::LogLine("retry attempt=" + std::to_string(attempt)
 					 + " stream_error=" + state.stream_error_type);
 			for (int slept = 0; slept < delay && !g_interrupted; slept += 100)
 				std::this_thread::sleep_for(std::chrono::milliseconds(
 					std::min(100, delay - slept)));
-			continue; // retry
+			continue;
 		}
 
-		// Non-retryable or retries exhausted — flush any partial text
-		// that arrived before the error event, then surface the error.
-		// Without this, any text in fLineBuffer would be silently
-		// dropped and the "claude> " label would never appear on turns
-		// where some text arrived before the server sent an error event.
-		state.renderer.Flush();
 		if (!state.text.empty()) std::cout << "\n";
-		std::cerr << "\n" << tui::ErrorLabel() << " ";
+		std::string stream_err_msg;
 		if (state.stream_error_type == "overloaded_error") {
-			std::cerr << "Anthropic's servers are overloaded — please try again in a moment.";
+			stream_err_msg = "Anthropic's servers are overloaded — please try again in a moment.";
 		} else {
-			std::cerr << "stream error";
+			stream_err_msg = "stream error";
 			if (!state.stream_error_type.empty())
-				std::cerr << " (" << state.stream_error_type << ")";
+				stream_err_msg += " (" + state.stream_error_type + ")";
 			if (!state.stream_error_message.empty())
-				std::cerr << ": " << state.stream_error_message;
+				stream_err_msg += ": " + state.stream_error_message;
 		}
-		std::cerr << "\n";
+		sink.OnError(stream_err_msg);
 		config::LogLine("stream_error type=" + state.stream_error_type
 				 + (state.stream_error_message.empty()
 					? "" : " msg=" + state.stream_error_message));
@@ -1004,37 +751,34 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	}
 
 	if (state.content_blocks.empty()) {
-		// Empty is fine if the turn ended cleanly — but attribute
-		// the cause. The most common reason in practice is a
-		// max_tokens cap so tight that the first tool_use block
-		// never got a content_block_stop event.
 		if (state.stop_reason == "max_tokens") {
-			// Flush any text that arrived before the cap was hit.
-			state.renderer.Flush();
 			if (!state.text.empty()) std::cout << "\n";
 			return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
 					state.content_blocks, state.stop_reason,
 					state.cache_creation_input_tokens.load(),
 					state.cache_read_input_tokens.load()};
 		}
-		std::cerr << "\nerror: no content received in stream\n";
-		std::cerr << "response body: " << state.raw_buffer << "\n";
+		sink.OnError("no content received in stream\nresponse body: " + state.raw_buffer);
 		return {1, {}, 0, 0, {}, {}};
 	}
 
-	state.renderer.Flush();
 	std::cout << "\n";
 	return {0, state.text, state.input_tokens.load(), state.output_tokens.load(),
 			state.content_blocks, state.stop_reason,
 			state.cache_creation_input_tokens.load(),
 			state.cache_read_input_tokens.load()};
 
-	} // end retry loop — only reached via continue; all exits are return
+	} // end retry loop
 }
 
 SendResult SendWithTools(const config::Auth& auth, const std::string& model,
                          int max_tokens, json& messages,
                          const std::string& custom_system) {
+	// Create the TerminalSink that owns the spinner and markdown renderer
+	// for the full multi-turn tool loop.
+	TerminalSink term_sink;
+	OutputSink&  sink = term_sink;
+
 	SendResult aggregate;
 	aggregate.exit_code = 0;
 
@@ -1051,25 +795,24 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 	// while tools are executing (Bash, WebFetch, etc.).
 	EscInterruptGuard esc_guard;
 	g_active_esc_guard = &esc_guard;
-	// Clear the global pointer when SendWithTools returns so nobody
-	// holds a dangling reference to esc_guard after it is destroyed.
 	struct EscGuardScope {
 		~EscGuardScope() { g_active_esc_guard = nullptr; }
 	} esc_guard_scope;
 
 	while (true) {
 		if (g_interrupted) {
-			std::cout << tui::Meta("[interrupted]") << "\n";
+			sink.OnMeta("[interrupted]");
 			aggregate.exit_code = 1;
 			return aggregate;
 		}
 
 		SendResult result = SendConversation(auth, model, max_tokens, messages,
-											  custom_system, /*include_tools=*/true);
-		aggregate.input_tokens                 += result.input_tokens;
-		aggregate.output_tokens                += result.output_tokens;
-		aggregate.cache_creation_input_tokens  += result.cache_creation_input_tokens;
-		aggregate.cache_read_input_tokens      += result.cache_read_input_tokens;
+		                                     custom_system, /*include_tools=*/true,
+		                                     &sink);
+		aggregate.input_tokens                += result.input_tokens;
+		aggregate.output_tokens               += result.output_tokens;
+		aggregate.cache_creation_input_tokens += result.cache_creation_input_tokens;
+		aggregate.cache_read_input_tokens     += result.cache_read_input_tokens;
 		aggregate.assistant_text = result.assistant_text;
 		aggregate.stop_reason    = result.stop_reason;
 
@@ -1078,59 +821,38 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			return aggregate;
 		}
 
-		// If the response was cut off at the max_tokens cap, any
-		// tool_use block in the round is almost certainly incomplete
-		// (partial JSON input) and never got executed. Drop those
-		// orphan blocks from the history so a REPL continuation
-		// doesn't send an assistant turn with tool_use_ids that have
-		// no matching tool_result — the API rejects that with 400.
 		const bool truncated = (result.stop_reason == "max_tokens");
 		if (truncated) {
 			std::vector<json> safe_blocks;
 			for (const auto& block : result.content_blocks) {
-				if (block.value("type", "") != "tool_use") {
+				if (block.value("type", "") != "tool_use")
 					safe_blocks.push_back(block);
-				}
 			}
-			if (safe_blocks.empty()) {
-				// Nothing salvageable — don't push an empty assistant turn.
-			} else {
+			if (!safe_blocks.empty())
 				messages.push_back({{"role", "assistant"}, {"content", safe_blocks}});
-			}
 		} else {
 			messages.push_back({{"role", "assistant"}, {"content", result.content_blocks}});
 		}
 
 		if (result.stop_reason != "tool_use") {
-			// Surface non-normal terminations loudly instead of
-			// exiting silently.
 			if (result.stop_reason == "max_tokens") {
 				const int used = result.output_tokens;
-				std::cerr << "\n" << tui::ErrorLabel()
-						  << " response truncated at the max_tokens cap"
-						  << " (output=" << used << " / max=" << max_tokens << ")."
-						  << "\n  Re-run with -t N (or set \"max_tokens\" in config.json)"
-							 " to raise the cap."
-						  << (truncated ? "\n  The in-flight tool call was"
-										  " dropped from history; the file/command"
-										  " it would have produced was NOT executed."
-										: "")
-						  << "\n";
+				sink.OnError("response truncated at the max_tokens cap"
+				    " (output=" + std::to_string(used) + " / max=" + std::to_string(max_tokens) + ")."
+				    "\n  Re-run with -t N (or set \"max_tokens\" in config.json) to raise the cap."
+				    + (truncated ? "\n  The in-flight tool call was dropped from history; "
+				                   "the file/command it would have produced was NOT executed." : ""));
 				config::LogLine("truncated stop_reason=max_tokens output=" + std::to_string(used));
 			} else if (result.stop_reason == "refusal") {
-				std::cerr << "\n" << tui::ErrorLabel()
-						  << " the model declined to answer (stop_reason=refusal).\n";
+				sink.OnError("the model declined to answer (stop_reason=refusal).");
 				config::LogLine("stop_reason=refusal");
 			} else if (result.stop_reason == "pause_turn") {
-				std::cerr << "\n" << tui::ErrorLabel()
-						  << " the model paused its turn (stop_reason=pause_turn);"
-							 " re-send to continue.\n";
+				sink.OnError("the model paused its turn (stop_reason=pause_turn); re-send to continue.");
 				config::LogLine("stop_reason=pause_turn");
 			} else if (result.stop_reason != "end_turn"
-					   && result.stop_reason != "stop_sequence"
-					   && !result.stop_reason.empty()) {
-				std::cerr << "\n" << tui::ErrorLabel()
-						  << " unexpected stop_reason=" << result.stop_reason << "\n";
+			           && result.stop_reason != "stop_sequence"
+			           && !result.stop_reason.empty()) {
+				sink.OnError("unexpected stop_reason=" + result.stop_reason);
 				config::LogLine("stop_reason=" + result.stop_reason);
 			}
 			return aggregate;
@@ -1139,22 +861,17 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 		json tool_results = json::array();
 		for (const auto& block : result.content_blocks) {
 			if (block.value("type", "") != "tool_use") continue;
-			const std::string tname = block.value("name", std::string{});
-			const std::string tid   = block.value("id",   std::string{});
+			const std::string tname  = block.value("name",  std::string{});
+			const std::string tid    = block.value("id",    std::string{});
 			const json        tinput = block.value("input", json::object());
 
 			const std::string tool_notice = "[tool: " + tname + " " + ShortInputSummary(tinput) + "]";
-			std::cout << tui::Meta(tool_notice) << "\n";
+			sink.OnMeta(tool_notice);
 			config::LogLine("tool " + tname + " input=" + ShortInputSummary(tinput));
-			// Notify Telegram: tool about to run. Include the rich
-			// preview (diff, file header, etc.) when available so the
-			// remote user sees what they are about to approve.
+
 			if (g_tool_status_hook) {
 				const std::string preview = tools::Preview(tname, tinput);
-				const std::string notice  = preview.empty()
-					? tool_notice
-					: tool_notice + "\n" + preview;
-				g_tool_status_hook(notice);
+				g_tool_status_hook(preview.empty() ? tool_notice : tool_notice + "\n" + preview);
 			}
 
 			tools::ToolResult tres;
@@ -1162,34 +879,32 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			if (hooks::Fire(hooks::Event::PreToolUse, pre_payload, tname) == hooks::Outcome::Block) {
 				tres.content  = "hook blocked " + tname;
 				tres.is_error = true;
-				const std::string blocked_notice = "[tool: " + tname + " -> blocked by hook]";
-				std::cout << tui::Meta(blocked_notice) << "\n";
-				if (g_tool_status_hook) g_tool_status_hook(blocked_notice);
+				const std::string n = "[tool: " + tname + " -> blocked by hook]";
+				sink.OnMeta(n);
+				if (g_tool_status_hook) g_tool_status_hook(n);
 			} else if (std::string denial;
-					   PromptPermission(tname, tinput, &denial) == Permission::Deny) {
+			           sink.AskPermission(tname, tinput, &denial) == Permission::Deny) {
 				tres.content  = denial.empty()
-								? "user denied permission to run " + tname
-								: denial;
+				              ? "user denied permission to run " + tname
+				              : denial;
 				tres.is_error = true;
-				const std::string denied_notice = "[tool: " + tname + " -> denied]";
-				std::cout << tui::Meta(denied_notice) << "\n";
-				if (g_tool_status_hook) g_tool_status_hook(denied_notice);
+				const std::string n = "[tool: " + tname + " -> denied]";
+				sink.OnMeta(n);
+				if (g_tool_status_hook) g_tool_status_hook(n);
 			} else if (tname == "Task") {
-				// Spawn a no-tools sub-agent: fresh messages array,
-				// single round-trip via SendConversation. Streams to
-				// the terminal like a normal turn.
 				const std::string sub_prompt = tinput.value("prompt", std::string{});
 				if (sub_prompt.empty()) {
 					tres.content  = "error: Task requires a `prompt` argument";
 					tres.is_error = true;
 				} else {
 					const std::string sub_label = tinput.value("description", std::string{"sub-agent"});
-					std::cout << tui::Meta("  -> " + sub_label + ":") << "\n"
-							  << tui::ClaudePrompt();
+					sink.OnMeta("  -> " + sub_label + ":");
+					std::cout << tui::ClaudePrompt();
 					json sub_messages = json::array({{{"role", "user"}, {"content", sub_prompt}}});
 					const auto sub = SendConversation(auth, model, max_tokens,
-													   sub_messages, custom_system,
-													   /*include_tools=*/false);
+					                                  sub_messages, custom_system,
+					                                  /*include_tools=*/false,
+					                                  &sink);
 					std::cout << "\n";
 					if (sub.exit_code != 0) {
 						tres.content  = "error: sub-agent failed";
@@ -1201,59 +916,39 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 						aggregate.output_tokens += sub.output_tokens;
 					}
 				}
-				const std::string task_result_notice = tres.is_error
+				const std::string task_note = tres.is_error
 					? "[tool: Task -> error]"
 					: "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]";
-				std::cout << tui::Meta(task_result_notice) << "\n";
-				if (g_tool_status_hook) g_tool_status_hook(task_result_notice);
-				const json post_payload = {
-					{"tool_input",  tinput},
-					{"tool_result", tres.content},
-					{"is_error",    tres.is_error},
-				};
-				hooks::Fire(hooks::Event::PostToolUse, post_payload, tname);
+				sink.OnMeta(task_note);
+				if (g_tool_status_hook) g_tool_status_hook(task_note);
+				hooks::Fire(hooks::Event::PostToolUse,
+				            json{{"tool_input", tinput}, {"tool_result", tres.content},
+				                 {"is_error", tres.is_error}}, tname);
 			} else {
-				// Keep a spinner spinning for the duration of the
-				// tool run so the user sees continuous feedback.
+				sink.OnToolStatus("\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6");
 				if (g_stream_progress) {
 					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
-					g_stream_progress->tool_phase = "\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6"; // 🔧 running ToolName…
+					g_stream_progress->tool_phase = "\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6";
 				}
-				{
-					tui::Spinner tool_spinner("running " + tname);
-					tres = tools::Run(tname, tinput);
-					tool_spinner.Stop();
-				}
+				tres = tools::Run(tname, tinput);
+				sink.OnToolStatus("");   // done
 				if (g_stream_progress) {
 					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
 					g_stream_progress->tool_phase.clear();
 				}
-				const std::string rsize = std::to_string(tres.content.size());
 				const std::string result_notice = tres.is_error
 					? "[tool: " + tname + " -> error]"
-					: "[tool: " + tname + " -> " + rsize + " bytes]";
-				std::cout << tui::Meta(result_notice) << "\n";
+					: "[tool: " + tname + " -> " + std::to_string(tres.content.size()) + " bytes]";
+				sink.OnMeta(result_notice);
 				if (g_tool_status_hook) g_tool_status_hook(result_notice);
-				const json post_payload = {
-					{"tool_input",  tinput},
-					{"tool_result", tres.content},
-					{"is_error",    tres.is_error},
-				};
-				hooks::Fire(hooks::Event::PostToolUse, post_payload, tname);
+				hooks::Fire(hooks::Event::PostToolUse,
+				            json{{"tool_input", tinput}, {"tool_result", tres.content},
+				                 {"is_error", tres.is_error}}, tname);
 			}
 
-			// Auto-seed BFS cache: if Claude just Read a file without
-			// a claude:summary attribute, write a heuristic summary
-			// derived from the content already in memory.
-			if (tname == "Read" && !tres.is_error) {
-				config::AutoWriteSummaryIfMissing(
-					tinput.value("path", std::string{}),
-					tres.content);
-			}
+			if (tname == "Read" && !tres.is_error)
+				config::AutoWriteSummaryIfMissing(tinput.value("path", std::string{}), tres.content);
 
-			// Track WriteAttr calls that touch claude:summary so the
-			// LocalWorker can refresh the in-process snapshot after
-			// the turn without a full filesystem walk.
 #ifdef __HAIKU__
 			if (tname == "WriteAttr" && !tres.is_error) {
 				const std::string attr_name = tinput.value("name", std::string{});
@@ -1265,16 +960,13 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			}
 #endif
 
-			// For BFS-native tools, measure actual bytes saved by
-			// stat-ing the target file(s) and subtracting the tool's
-			// own output size.
 			long savedBytes = 0;
 			if (tname == "ReadAttr") {
 				const std::string path = tinput.value("path", std::string{});
 				struct stat st;
 				if (!path.empty() && ::stat(path.c_str(), &st) == 0) {
 					const long s = static_cast<long>(st.st_size)
-								 - static_cast<long>(tres.content.size());
+					             - static_cast<long>(tres.content.size());
 					if (s > 0) savedBytes = s;
 				}
 			} else if (tname == "Query") {
@@ -1291,9 +983,6 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			}
 			stats::RecordTool(tname, static_cast<int>(tres.content.size()), savedBytes);
 
-			// Sanitize tool output before handing it to nlohmann::json.
-			// Binary tool output will throw json::type_error.316 if
-			// passed raw.
 			tres.content = config::SanitizeUtf8(tres.content);
 
 			tool_results.push_back({
@@ -1304,10 +993,7 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			});
 		}
 
-		if (tool_results.empty()) {
-			// stop_reason said tool_use but no tool_use blocks — bail to avoid a loop.
-			return aggregate;
-		}
+		if (tool_results.empty()) return aggregate;
 		messages.push_back({{"role", "user"}, {"content", tool_results}});
 	}
 }
