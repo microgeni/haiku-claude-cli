@@ -42,15 +42,9 @@ namespace api {
 static thread_local std::vector<std::string> tl_written_summary_paths;
 
 // Definitions for the globals declared in api.h.
-StreamProgress* g_stream_progress = nullptr;
-std::function<void(const std::string&)> g_tool_status_hook;
-std::function<Permission(const std::string&, const std::string&,
-                          std::atomic<bool>*)> g_telegram_permission_hook;
-bool g_non_interactive_tools             = false;
-bool g_non_interactive_allow_destructive = false;
+StreamProgress* g_stream_progress        = nullptr; // local-mirror only
 bool g_allow_destructive_tools           = false;
 std::atomic<bool> g_ludicrous_mode       { false };
-std::atomic<bool> g_telegram_updater_paused { false };
 std::map<std::string, std::string> g_last_rate_headers;
 
 std::unordered_set<std::string>& AlwaysAllowed() {
@@ -313,11 +307,6 @@ void ProcessSseEvent(const std::string& event, StreamState* state) {
 				state->current_text += chunk;
 				state->text += chunk;
 				state->saw_text = true;
-				if (g_stream_progress) {
-					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
-					g_stream_progress->text += chunk;
-					g_stream_progress->version.fetch_add(1, std::memory_order_relaxed);
-				}
 			} else if (dtype == "input_json_delta") {
 				state->current_tool_input_raw += delta.value("partial_json", "");
 			}
@@ -773,11 +762,16 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 
 SendResult SendWithTools(const config::Auth& auth, const std::string& model,
                          int max_tokens, json& messages,
-                         const std::string& custom_system) {
-	// Create the TerminalSink that owns the spinner and markdown renderer
-	// for the full multi-turn tool loop.
-	TerminalSink term_sink;
-	OutputSink&  sink = term_sink;
+                         const std::string& custom_system,
+                         OutputSink* sink_in) {
+	// Use the injected sink (e.g. TelegramSink from ProcessUpdate) or
+	// create a fresh TerminalSink for the local REPL path.
+	std::unique_ptr<TerminalSink> owned_sink;
+	if (!sink_in) {
+		owned_sink = std::make_unique<TerminalSink>();
+		sink_in    = owned_sink.get();
+	}
+	OutputSink& sink = *sink_in;
 
 	SendResult aggregate;
 	aggregate.exit_code = 0;
@@ -869,28 +863,19 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			sink.OnMeta(tool_notice);
 			config::LogLine("tool " + tname + " input=" + ShortInputSummary(tinput));
 
-			if (g_tool_status_hook) {
-				const std::string preview = tools::Preview(tname, tinput);
-				g_tool_status_hook(preview.empty() ? tool_notice : tool_notice + "\n" + preview);
-			}
-
 			tools::ToolResult tres;
 			const json pre_payload = { {"tool_input", tinput} };
 			if (hooks::Fire(hooks::Event::PreToolUse, pre_payload, tname) == hooks::Outcome::Block) {
 				tres.content  = "hook blocked " + tname;
 				tres.is_error = true;
-				const std::string n = "[tool: " + tname + " -> blocked by hook]";
-				sink.OnMeta(n);
-				if (g_tool_status_hook) g_tool_status_hook(n);
+				sink.OnMeta("[tool: " + tname + " -> blocked by hook]");
 			} else if (std::string denial;
 			           sink.AskPermission(tname, tinput, &denial) == Permission::Deny) {
 				tres.content  = denial.empty()
 				              ? "user denied permission to run " + tname
 				              : denial;
 				tres.is_error = true;
-				const std::string n = "[tool: " + tname + " -> denied]";
-				sink.OnMeta(n);
-				if (g_tool_status_hook) g_tool_status_hook(n);
+				sink.OnMeta("[tool: " + tname + " -> denied]");
 			} else if (tname == "Task") {
 				const std::string sub_prompt = tinput.value("prompt", std::string{});
 				if (sub_prompt.empty()) {
@@ -916,31 +901,19 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 						aggregate.output_tokens += sub.output_tokens;
 					}
 				}
-				const std::string task_note = tres.is_error
+				sink.OnMeta(tres.is_error
 					? "[tool: Task -> error]"
-					: "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]";
-				sink.OnMeta(task_note);
-				if (g_tool_status_hook) g_tool_status_hook(task_note);
+					: "[tool: Task -> " + std::to_string(tres.content.size()) + " bytes]");
 				hooks::Fire(hooks::Event::PostToolUse,
 				            json{{"tool_input", tinput}, {"tool_result", tres.content},
 				                 {"is_error", tres.is_error}}, tname);
 			} else {
 				sink.OnToolStatus("\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6");
-				if (g_stream_progress) {
-					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
-					g_stream_progress->tool_phase = "\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6";
-				}
 				tres = tools::Run(tname, tinput);
 				sink.OnToolStatus("");   // done
-				if (g_stream_progress) {
-					std::lock_guard<std::mutex> lk(g_stream_progress->mu);
-					g_stream_progress->tool_phase.clear();
-				}
-				const std::string result_notice = tres.is_error
+				sink.OnMeta(tres.is_error
 					? "[tool: " + tname + " -> error]"
-					: "[tool: " + tname + " -> " + std::to_string(tres.content.size()) + " bytes]";
-				sink.OnMeta(result_notice);
-				if (g_tool_status_hook) g_tool_status_hook(result_notice);
+					: "[tool: " + tname + " -> " + std::to_string(tres.content.size()) + " bytes]");
 				hooks::Fire(hooks::Event::PostToolUse,
 				            json{{"tool_input", tinput}, {"tool_result", tres.content},
 				                 {"is_error", tres.is_error}}, tname);

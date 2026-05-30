@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,10 +18,11 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "output_sink.h"
+#include "structured_sink.h"
 
-// Forward declaration so the StartThinkingUpdater signature can
-// reference api::StreamProgress without pulling in all of api.h
-// (which would create a circular include with api.h → telegram.h).
+// Forward declarations kept for MirrorPrompt / StartThinkingUpdater
+// which still use StreamProgress for local mirroring of REPL turns.
 namespace api { struct StreamProgress; }
 
 // Tiny Telegram Bot API client over libcurl. Enough for the v1.1
@@ -134,6 +136,100 @@ private:
 	int64_t     fNextOffset = 0;
 };
 
+// TelegramSink — implements both OutputSink (Step 2 interface, so it can
+// be passed to api::SendWithTools unchanged) and sink::StructuredSink (the
+// Step 3 lean-Telegram model). The OutputSink methods are a thin adapter
+// layer that delegates to the StructuredSink methods; they will be removed
+// when api::SendWithTools is upgraded to take StructuredSink* directly
+// (Step 4).
+//
+// One instance per user turn. Stack-allocated inside ProcessUpdate() for
+// the lifetime of the SendWithTools call.
+//
+// Lean rules enforced structurally (empty method bodies, not flags):
+//   OnMeta / OnDiag → suppressed (no chat message sent)
+//   SetStatus       → sendChatAction("typing"), ephemeral, no history
+//   ToolFinished    → collapsed "🔧 bash ✓" line, detail hidden
+//   OnError         → edits the current message in place (or sends new)
+class TelegramSink : public OutputSink, public sink::StructuredSink {
+public:
+	// `client` must outlive this object (owned by RemoteControl).
+	// `chatId` is the chat to send replies to.
+	// `allowDestructive` controls whether AskPermission auto-approves.
+	// `allowedSet` is the session-scoped always-allow tool set.
+	// `permQueue` / `permMu` / `permCv` are the shared queues that
+	// PollLoop pushes perm:* callback taps into.
+	struct PermQueue {
+		std::deque<std::string>  callbacks; // callback_data values
+		std::mutex               mu;
+		std::condition_variable  cv;
+	};
+
+	TelegramSink(Client& client, int64_t chatId, bool allowDestructive,
+	             std::unordered_set<std::string>& allowedSet,
+	             PermQueue& permQueue);
+	~TelegramSink() override = default;
+
+	TelegramSink(const TelegramSink&)            = delete;
+	TelegramSink& operator=(const TelegramSink&) = delete;
+
+	// ── sink::StructuredSink ──────────────────────────────────────────────
+	void BeginMessage(const std::string& role) override;
+	void AppendText(const std::string& chunk)  override;
+	void EndMessage()                          override;
+	void ToolStarted(const std::string& name,
+	                 const std::string& summary) override;
+	void ToolFinished(const std::string& name,
+	                  bool ok,
+	                  const std::string& detail) override;
+	int  AskChoice(const std::string& prompt,
+	               const std::vector<std::string>& options) override;
+	sink::Permission AskPermission(const std::string& tool,
+	                               const std::string& preview) override;
+	void SetStatus(sink::StatusKind kind) override;
+	void OnError(const std::string& message) override; // StructuredSink version
+
+	// ── OutputSink (adapter, removed in Step 4) ───────────────────────────
+	void OnText(const std::string& chunk) override;
+	void OnMeta(const std::string&)       override {} // suppressed by design
+	void OnDiag(const std::string&)       override {} // suppressed by design
+	void OnToolStatus(const std::string& phase) override;
+	api::Permission AskPermission(const std::string& tool,
+	                              const nlohmann::json& input,
+	                              std::string* denial_reason) override;
+
+private:
+	static constexpr int64_t kEditThrottleMs = 500; // max ~2 edits/sec
+
+	Client&                          fClient;
+	int64_t                          fChatId;
+	bool                             fAllowDestructive;
+	std::unordered_set<std::string>& fAllowedSet;
+	PermQueue&                       fPermQueue;
+
+	// Streaming state for the current assistant message.
+	std::string fBuffer;           // accumulated text
+	int64_t     fCurrentMsgId{0}; // Telegram message_id being live-edited
+	int64_t     fLastEditMs{0};   // epoch-ms of last editMessageText call
+	bool        fInMessage{false};
+
+	// Collapsed tool cards appended to the current message.
+	struct ToolCard {
+		std::string name;
+		std::string summary;
+		bool        started{false};
+		bool        finished{false};
+		bool        ok{false};
+	};
+	std::vector<ToolCard> fToolCards;
+
+	// Internal helpers.
+	int64_t        SentPlaceholder(const std::string& text = "\xE2\x80\xA6"); // "…"
+	bool           EditCurrent(bool final = false);
+	std::string    BuildDisplayText() const;
+	static int64_t NowMs();
+};
+
 // Self-contained background Telegram poller spawned on demand by
 // the /remote-control slash command inside the REPL. Runs in its
 // own thread, polls Telegram for incoming messages from allowed
@@ -236,30 +332,27 @@ private:
 	std::unordered_set<int64_t>  fAllowed;
 	int64_t                      fPrimaryUserId = 0;
 	int64_t                      fPrimaryThinkingMsgId = 0;
-	// Chat ID that the persistent permission/status hooks target.
-	// Set to the sender's chat_id at the start of each Telegram-
-	// origin turn; reset to fPrimaryUserId when that turn ends.
+	// Chat ID of the turn currently running. Set by ProcessUpdate,
+	// reset to fPrimaryUserId when that turn ends. Used by MirrorPrompt
+	// to route local-turn mirrors correctly.
 	std::atomic<int64_t>         fActiveChatId { 0 };
+	// Spinner for local turns mirrored to Telegram.
 	std::atomic<bool>            fUpdaterRunning { false };
 	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
+	// Session-scoped always-allow set. Shared between TelegramSink
+	// instances (one per turn) so "allow always" persists across turns.
+	std::unordered_set<std::string> fAllowedTools;
 	std::function<config::Auth()> fAuthGetter;
 	std::string                  fCustomSystem;
 	std::string                  fCfgModel;
 	int                          fCfgMaxTokens;
-	// Optional provider for the local REPL's shared message history.
-	// Set via SetSharedHistory(); null means each Telegram user has
-	// independent context (the original silo behaviour).
 	std::function<nlohmann::json()> fSharedHistory;
-	// Optional write-back: called after each successful Telegram turn
-	// to append the user+assistant pair to the local REPL messages[].
-	// Set via SetSharedHistoryAppender().
 	std::function<void(nlohmann::json, nlohmann::json)> fSharedHistoryAppend;
 	std::map<int64_t, nlohmann::json> fUserMessages;
 	std::atomic<bool>            fRunning { false };
 	std::thread                  fPoller;
-	// Turn-token: serialises local and Telegram-origin turns
-	// without holding a mutex across SendWithTools.
+	// Turn-token: serialises local and Telegram-origin turns.
 	std::mutex                   fTurnMu;
 	std::condition_variable      fTurnCv;
 	bool                         fTurnInProgress = false;
@@ -269,10 +362,9 @@ private:
 	std::condition_variable      fWorkCv;
 	std::atomic<bool>            fWorkerRunning { false };
 	std::thread                  fWorker;
-	// Shared queue for perm:* callback taps.
-	std::deque<Update>           fPermQueue;
-	std::mutex                   fPermMu;
-	std::condition_variable      fPermCv;
+	// Shared permission callback queue. PollLoop pushes perm:* taps
+	// here; TelegramSink::AskPermission drains it.
+	TelegramSink::PermQueue      fPermQueue;
 };
 
 } // namespace telegram

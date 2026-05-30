@@ -21,6 +21,7 @@ set -euo pipefail
 
 BIN="./build/claude"
 SRC="src/telegram.cpp"
+HDR="src/telegram.h"
 
 PASS=0
 FAIL=0
@@ -163,22 +164,22 @@ RELEASE=$(grep -c 'ReleaseTurn'  "$SRC" || true)
 [ "$RELEASE" -ge 2 ] || fail "expected >= 2 ReleaseTurn references, found $RELEASE"
 pass
 
-# ── T17: thinking updater uses pointer, not value ─────────────────────────────
-step "T17: StartThinkingUpdater takes api::StreamProgress* (pointer, not value)"
-# The header/source should show a pointer dereference or pointer parameter.
-grep -q 'g_stream_progress' "$SRC" \
-    || fail 'g_stream_progress not referenced in telegram.cpp'
-# Verify the updater checks g_stream_progress (not a copied value).
-grep -q 'api::g_stream_progress' "$SRC" \
-    || fail 'api::g_stream_progress not used in telegram.cpp'
+# ── T17: TelegramSink class exists and implements StructuredSink ─────────────
+step "T17: TelegramSink implements StructuredSink (step 3 architecture)"
+grep -q 'class TelegramSink' "$HDR" \
+    || fail 'TelegramSink class not found in telegram.h'
+grep -q 'StructuredSink' "$HDR" \
+    || fail 'TelegramSink does not inherit StructuredSink'
+grep -q 'BeginMessage\|AppendText\|EndMessage' "$SRC" \
+    || fail 'TelegramSink streaming lifecycle methods not found in telegram.cpp'
 pass
 
-# ── T18: g_telegram_updater_paused guards permission-prompt period ────────────
-step "T18: g_telegram_updater_paused suppresses live edits during perm prompts"
-grep -q 'g_telegram_updater_paused' "$SRC" \
-    || fail 'g_telegram_updater_paused not found in telegram.cpp'
-PAUSED_USES=$(grep -c 'g_telegram_updater_paused' "$SRC" || true)
-[ "$PAUSED_USES" -ge 3 ] || fail "expected >= 3 uses of g_telegram_updater_paused, found $PAUSED_USES"
+# ── T18: TelegramSink::AskPermission uses inline keyboard (not g_hook) ───────
+step "T18: TelegramSink::AskPermission uses inline keyboard buttons"
+grep -q 'perm:yes\|perm:no\|perm:always' "$SRC" \
+    || fail 'TelegramSink permission buttons (perm:yes/no/always) not found'
+grep -q 'fPermQueue' "$SRC" \
+    || fail 'TelegramSink does not drain fPermQueue for permission responses'
 pass
 
 # ── T19: MirrorToPrimary guards against double-join (StopThinkingUpdater first)
@@ -307,14 +308,9 @@ pass
 
 # ── T32: assistant reply is appended to msgs silo in ProcessUpdate ────────────
 step "T32: ProcessUpdate appends the assistant reply to the per-user message silo"
-# After the fix, ProcessUpdate must push the assistant message onto msgs
-# (the per-user Telegram silo) after SendWithTools succeeds.  We verify
-# that 'assistant_msg' is pushed onto msgs in the success path.
 grep -q 'assistant_msg' src/telegram.cpp \
     || fail 'assistant_msg not found in telegram.cpp — assistant reply not appended'
-# Verify the push_back appears in ProcessUpdate's success path (after the
-# "error: Claude did not return a response" early-return block).
-LINE_ERR=$(grep -n 'Claude did not return a response' src/telegram.cpp | tail -1 | cut -d: -f1)
+LINE_ERR=$(grep -n 'exit_code != 0\|assistant_text.empty' src/telegram.cpp | tail -1 | cut -d: -f1)
 LINE_PUSH=$(grep -n 'msgs.push_back.*assistant_msg\|assistant_msg.*msgs' src/telegram.cpp | head -1 | cut -d: -f1)
 [ -n "$LINE_ERR"  ] || fail 'error guard not found in telegram.cpp'
 [ -n "$LINE_PUSH" ] || fail 'msgs.push_back(assistant_msg) not found in telegram.cpp'

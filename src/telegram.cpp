@@ -19,6 +19,267 @@ namespace telegram {
 
 using json = nlohmann::json;
 
+// ── TelegramSink ────────────────────────────────────────────────────────────
+
+int64_t TelegramSink::NowMs() {
+	using namespace std::chrono;
+	return duration_cast<milliseconds>(
+		steady_clock::now().time_since_epoch()).count();
+}
+
+TelegramSink::TelegramSink(Client& client, int64_t chatId,
+                            bool allowDestructive,
+                            std::unordered_set<std::string>& allowedSet,
+                            PermQueue& permQueue)
+	: fClient(client)
+	, fChatId(chatId)
+	, fAllowDestructive(allowDestructive)
+	, fAllowedSet(allowedSet)
+	, fPermQueue(permQueue)
+{
+}
+
+int64_t TelegramSink::SentPlaceholder(const std::string& text) {
+	return fClient.SendMessageWithId(fChatId, text);
+}
+
+// Build the full display text: assistant text followed by any
+// collapsed tool cards.
+std::string TelegramSink::BuildDisplayText() const {
+	std::string out = fBuffer;
+	for (const auto& card : fToolCards) {
+		if (!card.started) continue;
+		if (!out.empty() && out.back() != '\n') out += '\n';
+		if (!card.finished) {
+			// Tool still running.
+			out += "\xF0\x9F\x94\xA7 " + card.name  // 🔧
+			    + ": " + card.summary + "\xE2\x80\xA6"; // …
+		} else {
+			out += (card.ok ? "\xE2\x9C\x85" : "\xE2\x9C\x8B") // ✅ / ✋
+			    + std::string(" ") + card.name + " "
+			    + (card.ok ? "\xE2\x9C\x93" : "\xE2\x9C\x97"); // ✓ / ✗
+		}
+	}
+	return out;
+}
+
+bool TelegramSink::EditCurrent(bool final) {
+	if (fCurrentMsgId == 0) return false;
+	const int64_t now = NowMs();
+	if (!final && (now - fLastEditMs) < kEditThrottleMs) return true; // throttled
+	const std::string text = BuildDisplayText();
+	const std::string display = (!final && fInMessage)
+		? text + " \xE2\x96\x8C"   // append streaming cursor ▌
+		: text;
+	const bool ok = fClient.EditMessageText(fChatId, fCurrentMsgId, display);
+	if (ok) fLastEditMs = now;
+	return ok;
+}
+
+// ── StructuredSink methods ───────────────────────────────────────────────────
+
+void TelegramSink::BeginMessage(const std::string& /*role*/) {
+	fBuffer.clear();
+	fToolCards.clear();
+	fInMessage = true;
+	fCurrentMsgId = SentPlaceholder("\xE2\x8F\xB3 thinking\xE2\x80\xA6"); // ⏳ thinking…
+	fLastEditMs   = NowMs();
+}
+
+void TelegramSink::AppendText(const std::string& chunk) {
+	if (!fInMessage) return;
+	fBuffer += chunk;
+	EditCurrent(/*final=*/false);
+}
+
+void TelegramSink::EndMessage() {
+	if (!fInMessage) return;
+	fInMessage = false;
+	EditCurrent(/*final=*/true);
+	fCurrentMsgId = 0;
+}
+
+void TelegramSink::ToolStarted(const std::string& name,
+                                const std::string& summary) {
+	ToolCard card;
+	card.name    = name;
+	card.summary = summary;
+	card.started = true;
+	fToolCards.push_back(std::move(card));
+	EditCurrent(/*final=*/false); // show "🔧 bash: …" immediately
+}
+
+void TelegramSink::ToolFinished(const std::string& name,
+                                 bool ok,
+                                 const std::string& detail) {
+	for (auto& card : fToolCards) {
+		if (card.name == name && card.started && !card.finished) {
+			card.finished = true;
+			card.ok       = ok;
+			(void)detail; // stored implicitly; not displayed by default
+			break;
+		}
+	}
+	EditCurrent(/*final=*/false); // update ✅ / ✋
+}
+
+int TelegramSink::AskChoice(const std::string& prompt,
+                             const std::vector<std::string>& options) {
+	if (options.empty()) return -1;
+
+	// Build an inline keyboard — one button per option.
+	std::vector<std::vector<Button>> kb;
+	for (size_t i = 0; i < options.size(); ++i) {
+		Button b;
+		b.text          = std::to_string(i + 1) + ". " + options[i];
+		b.callback_data = "choice:" + std::to_string(i);
+		kb.push_back({ std::move(b) });
+	}
+	const int64_t msg_id = fClient.SendMessageWithId(fChatId, prompt, kb);
+	if (msg_id == 0) return -1;
+
+	// Block waiting for a callback tap.
+	std::unique_lock<std::mutex> lk(fPermQueue.mu);
+	fPermQueue.cv.wait_for(lk, std::chrono::seconds(120),
+		[&]{ return !fPermQueue.callbacks.empty(); });
+	if (fPermQueue.callbacks.empty()) return -1;
+	const std::string cb = fPermQueue.callbacks.front();
+	fPermQueue.callbacks.pop_front();
+	lk.unlock();
+
+	if (cb.rfind("choice:", 0) == 0) {
+		try { return std::stoi(cb.substr(7)); } catch (...) {}
+	}
+	return -1;
+}
+
+sink::Permission TelegramSink::AskPermission(const std::string& tool,
+                                              const std::string& preview) {
+	// Already session-approved.
+	if (fAllowedSet.count(tool)) return sink::Permission::kAllow;
+
+	// Non-interactive mode with blanket allow.
+	if (fAllowDestructive) return sink::Permission::kAllow;
+
+	// Send an inline-keyboard permission prompt.
+	const std::string question =
+		"\xF0\x9F\x94\x90 Allow " + tool + "?\n\n" + preview; // 🔐
+	const std::vector<std::vector<Button>> kb = {
+		{{ "✅ Yes, once",            "perm:yes"    }},
+		{{ "🔓 Yes, always this session", "perm:always" }},
+		{{ "🚫 No, deny",             "perm:no"     }},
+	};
+	const int64_t msg_id = fClient.SendMessageWithId(fChatId, question, kb);
+
+	// Block waiting for a perm:* callback tap.
+	std::unique_lock<std::mutex> lk(fPermQueue.mu);
+	fPermQueue.cv.wait_for(lk, std::chrono::seconds(120),
+		[&]{ return !fPermQueue.callbacks.empty() || g_interrupted != 0; });
+
+	if (fPermQueue.callbacks.empty() || g_interrupted) {
+		if (msg_id)
+			fClient.EditMessageText(fChatId, msg_id,
+				"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xF0\x9F\x9A\xAB timed out / cancelled");
+		return sink::Permission::kDeny;
+	}
+	const std::string cb = fPermQueue.callbacks.front();
+	fPermQueue.callbacks.pop_front();
+	lk.unlock();
+
+	if (cb == "perm:always") {
+		fAllowedSet.insert(tool);
+		if (msg_id)
+			fClient.EditMessageText(fChatId, msg_id,
+				"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xE2\x9C\x85 always allowed this session");
+		return sink::Permission::kAllowAlways;
+	}
+	if (cb == "perm:yes") {
+		if (msg_id)
+			fClient.EditMessageText(fChatId, msg_id,
+				"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xE2\x9C\x85 allowed once");
+		return sink::Permission::kAllow;
+	}
+	// perm:no or anything else.
+	if (msg_id)
+		fClient.EditMessageText(fChatId, msg_id,
+			"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xF0\x9F\x9A\xAB denied");
+	return sink::Permission::kDeny;
+}
+
+void TelegramSink::SetStatus(sink::StatusKind kind) {
+	// Sends a transient "typing…" action — never a persistent message.
+	if (kind == sink::StatusKind::kIdle) return;
+	fClient.SendChatAction(fChatId, "typing");
+}
+
+void TelegramSink::OnError(const std::string& message) {
+	const std::string text = "\xE2\x9D\x8C Error: " + message; // ❌
+	if (fCurrentMsgId != 0) {
+		fClient.EditMessageText(fChatId, fCurrentMsgId, text);
+		fCurrentMsgId = 0;
+		fInMessage    = false;
+	} else {
+		fClient.SendMessage(fChatId, text);
+	}
+}
+
+// ── OutputSink adapter methods (removed when SendWithTools takes StructuredSink*) ──
+
+void TelegramSink::OnText(const std::string& chunk) {
+	AppendText(chunk);
+}
+
+void TelegramSink::OnToolStatus(const std::string& phase) {
+	if (phase.empty()) {
+		// Tool finished — find the last unfinished card and mark it done.
+		for (auto it = fToolCards.rbegin(); it != fToolCards.rend(); ++it) {
+			if (it->started && !it->finished) {
+				it->finished = true;
+				it->ok       = true;
+				break;
+			}
+		}
+		EditCurrent(/*final=*/false);
+	} else {
+		// Tool started. Extract name from "🔧 running Name…" format.
+		// OnToolStatus phase strings come from SendWithTools as
+		// "\xF0\x9F\x94\xA7 running <name>\xE2\x80\xA6" — extract the name.
+		const std::string prefix = " running ";
+		std::string name = phase;
+		const auto p = phase.find(prefix);
+		if (p != std::string::npos) {
+			name = phase.substr(p + prefix.size());
+			// Strip trailing …
+			while (!name.empty() && (unsigned char)name.back() > 127) name.pop_back();
+		}
+		ToolStarted(name, "running");
+	}
+}
+
+api::Permission TelegramSink::AskPermission(const std::string& tool,
+                                             const nlohmann::json& input,
+                                             std::string* denial_reason) {
+	// Build a brief preview from the tool input.
+	std::string preview;
+	if (input.contains("command") && input["command"].is_string())
+		preview = input["command"].get<std::string>();
+	else
+		preview = input.dump(-1, ' ', false,
+		    nlohmann::json::error_handler_t::replace).substr(0, 200);
+
+	const sink::Permission p = AskPermission(tool, preview);
+	switch (p) {
+		case sink::Permission::kAllow:
+		case sink::Permission::kAllowAlways:
+			return api::Permission::Allow;
+		case sink::Permission::kDeny:
+			if (denial_reason)
+				*denial_reason = "user denied permission via Telegram";
+			return api::Permission::Deny;
+	}
+	return api::Permission::Deny;
+}
+
 namespace {
 
 size_t append_cb(void* ptr, size_t size, size_t nmemb, void* userp) {
@@ -374,102 +635,23 @@ bool RemoteControl::Start() {
 	for (const auto& id : fAllowed) {
 		if (fPrimaryUserId == 0 || id < fPrimaryUserId) fPrimaryUserId = id;
 	}
-	// Default the active perm chat to the primary user so that a
-	// locally-initiated turn can send permission prompts to Telegram
-	// before any Telegram message has arrived.
 	fActiveChatId = fPrimaryUserId;
-	// Clear the always-allowed tool set so approvals from a previous
-	// session don't silently carry over.
-	api::AlwaysAllowed().clear();
+	// Clear the session-scoped always-allow set so approvals from a
+	// previous session don't silently carry over.
+	fAllowedTools.clear();
 	fRunning.store(true);
 	fWorkerRunning.store(true);
 	fWorker = std::thread(&RemoteControl::WorkLoop, this);
 	fPoller = std::thread(&RemoteControl::PollLoop, this);
-
-	// Install global hooks once for the lifetime of this
-	// RemoteControl session. Both local REPL turns and Telegram-
-	// origin turns will share these hooks; fActiveChatId is
-	// updated by ProcessUpdate() before each Telegram-origin
-	// SendWithTools call, and reset to fPrimaryUserId for local
-	// turns so permission prompts always reach the right chat.
-	api::g_telegram_permission_hook = [this](const std::string& tool_name,
-	                                          const std::string& preview,
-	                                          std::atomic<bool>* local_answered) -> api::Permission {
-		const int64_t chat = fActiveChatId.load();
-		if (chat == 0) return api::Permission::Deny;
-		const std::string question =
-			"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
-		const std::vector<std::vector<Button>> kb = {
-			{{ "1. Yes, allow once",          "perm:yes"    }},
-			{{ "2. Always allow this session", "perm:always" }},
-			{{ "3. No, deny",                 "perm:no"     }},
-		};
-		api::g_telegram_updater_paused.store(true);
-		const int64_t perm_msg_id = fClient.SendMessageWithId(chat, question, kb);
-		while (!g_interrupted) {
-			if (local_answered && local_answered->load()) {
-				api::g_telegram_updater_paused.store(false);
-				return api::Permission::Deny; // result ignored by the race winner path
-			}
-			std::unique_lock<std::mutex> lk(fPermMu);
-			fPermCv.wait_for(lk, std::chrono::seconds(2),
-				[&]{ return !fPermQueue.empty() || g_interrupted
-					|| (local_answered && local_answered->load()); });
-			if (local_answered && local_answered->load()) {
-				api::g_telegram_updater_paused.store(false);
-				return api::Permission::Deny;
-			}
-			while (!fPermQueue.empty()) {
-				const Update upd = fPermQueue.front();
-				fPermQueue.pop_front();
-				lk.unlock();
-				api::g_telegram_updater_paused.store(false);
-				fClient.AnswerCallback(upd.callback_query_id);
-				if (upd.text == "perm:always") {
-					api::AlwaysAllowed().insert(tool_name);
-					fClient.EditMessageText(chat, perm_msg_id,
-						"\xF0\x9F\x94\x90 allow " + tool_name
-						+ "? \xE2\x86\x92 \xE2\x9C\x85 always allowed this session", {});
-					return api::Permission::Allow;
-				}
-				if (upd.text == "perm:yes") {
-					fClient.EditMessageText(chat, perm_msg_id,
-						"\xF0\x9F\x94\x90 allow " + tool_name
-						+ "? \xE2\x86\x92 \xE2\x9C\x85 allowed once", {});
-					return api::Permission::Allow;
-				}
-				if (upd.text == "perm:no") {
-					fClient.EditMessageText(chat, perm_msg_id,
-						"\xF0\x9F\x94\x90 allow " + tool_name
-						+ "? \xE2\x86\x92 \xF0\x9F\x9A\xAB denied", {});
-					return api::Permission::Deny;
-				}
-				lk.lock();
-			}
-		}
-		api::g_telegram_updater_paused.store(false);
-		return api::Permission::Deny;
-	};
-
-	api::g_tool_status_hook = [this](const std::string& notice) {
-		const int64_t chat = fActiveChatId.load();
-		if (chat != 0 && !g_muted.load())
-			fClient.SendMessage(chat, notice);
-	};
-
 	return true;
 }
 
 void RemoteControl::Stop() {
 	if (!fRunning.exchange(false)) return;
-	api::g_telegram_permission_hook = nullptr;
-	api::g_tool_status_hook         = nullptr;
 	// Wake any thread blocked in AcquireTurn() so it sees
 	// fRunning == false and unblocks cleanly.
 	fTurnCv.notify_all();
 	if (fPoller.joinable()) fPoller.join();
-	// Stop the worker thread so it doesn't dangle after the
-	// poller exits.
 	fWorkerRunning.store(false);
 	fWorkCv.notify_one();
 	if (fWorker.joinable()) fWorker.join();
@@ -580,7 +762,6 @@ void RemoteControl::StartThinkingUpdater(api::StreamProgress* progress) {
 		while (fUpdaterRunning.load()) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 			if (!fUpdaterRunning.load()) break;
-			if (api::g_telegram_updater_paused.load()) continue;
 			const int64_t ph = fPrimaryThinkingMsgId;
 			if (ph == 0) break;
 			if (progress) {
@@ -621,14 +802,17 @@ void RemoteControl::PollLoop() {
 				config::LogLine("remote-control reject user=" + std::to_string(u.user_id));
 				continue;
 			}
-			// Route perm:* button taps to the permission queue so
-			// the hook's wait loop sees them.
-			if (u.is_callback && u.text.rfind("perm:", 0) == 0) {
+			// Route perm:* and choice:* button taps to the permission
+			// queue so TelegramSink::AskPermission / AskChoice can drain it.
+			if (u.is_callback && (u.text.rfind("perm:", 0) == 0
+			                      || u.text.rfind("choice:", 0) == 0)) {
+				// Answer the callback query to dismiss the loading spinner.
+				fClient.AnswerCallback(u.callback_query_id);
 				{
-					std::lock_guard<std::mutex> lk(fPermMu);
-					fPermQueue.push_back(u);
+					std::lock_guard<std::mutex> lk(fPermQueue.mu);
+					fPermQueue.callbacks.push_back(u.text);
 				}
-				fPermCv.notify_one();
+				fPermQueue.cv.notify_one();
 				continue;
 			}
 			{
@@ -804,21 +988,17 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	const std::string who = u.username.empty()
 		? std::to_string(u.user_id) : u.username;
 
-	// The poller thread runs while libedit has the cursor parked on
-	// the fixed input row. Save cursor, blank the input row so the
-	// "> " prompt doesn't sit there while we process the remote turn,
-	// then move to the scroll-region bottom for chat output.
-	// The RAII guard restores the cursor and repaints the prompt on
-	// every exit path so libedit's input row is always visible again.
-	std::cout << "\x1b""7";          // save cursor
-	tui::ClearInputRow();            // hide libedit's "> " prompt
+	// Save cursor, blank the input row, move to scroll-region bottom.
+	// RAII guard restores on every exit path so libedit stays clean.
+	std::cout << "\x1b""7";
+	tui::ClearInputRow();
 	tui::PositionCursorForChat();
 	const std::string user_prompt = tui::UserPrompt();
 	struct CursorGuard {
 		const std::string& prompt;
 		~CursorGuard() {
-			tui::RepaintInputRow(prompt);  // restore "> " on the input row
-			std::cout << "\x1b""8" << std::flush; // restore saved cursor pos
+			tui::RepaintInputRow(prompt);
+			std::cout << "\x1b""8" << std::flush;
 		}
 	} _guard{user_prompt};
 
@@ -827,27 +1007,20 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 			 + " text=" + u.text);
 
 	if (u.text == "/mute") {
-		if (!g_muted.exchange(true)) {
-			fClient.SendMessage(u.chat_id,
-				"Remote muted. No replies until /unmute.");
-		}
+		if (!g_muted.exchange(true))
+			fClient.SendMessage(u.chat_id, "Remote muted. No replies until /unmute.");
 		return;
 	}
 	if (u.text == "/unmute") {
-		if (g_muted.exchange(false)) {
-			fClient.SendMessage(u.chat_id,
-				"Remote unmuted. Replies will be sent again.");
-		}
+		if (g_muted.exchange(false))
+			fClient.SendMessage(u.chat_id, "Remote unmuted. Replies will be sent again.");
 		return;
 	}
-	// /new is a Telegram-friendly alias for /clear.
 	if (u.text == "/new") {
 		fUserMessages.erase(u.user_id);
 		TgSend(u.chat_id, "(history cleared)");
 		return;
 	}
-	// All other slash commands go through commands::Dispatch.
-	// /exit, /quit, and /remote-control are not meaningful here.
 	if (!u.text.empty() && u.text.front() == '/') {
 		const std::string cmd_word = u.text.substr(0, u.text.find(' '));
 		if (cmd_word == "/exit" || cmd_word == "/quit"
@@ -862,27 +1035,20 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 
 		json& messages_ref = fUserMessages[u.user_id];
 		if (!messages_ref.is_array()) messages_ref = json::array();
-		// Throwaway locals for the LoopCtx fields that Dispatch may
-		// update (/model, /compact, etc.) — RemoteControl doesn't
-		// track session totals per user.
-		int    rc_turn   = 0;
-		int    rc_in     = 0;
-		int    rc_out    = 0;
+		int    rc_turn = 0, rc_in = 0, rc_out = 0;
 		bool   rc_notify = false;
 		double rc_thresh = 60.0;
 		std::vector<std::string> rc_urls;
-		json   rc_prices = json::object();
+		json rc_prices = json::object();
 		commands::LoopCtx ctx{fAuthGetter(), fCfgMaxTokens, fCustomSystem, rc_prices,
 		                      fCfgModel, rc_turn, rc_in, rc_out,
-		                      messages_ref, rc_urls, rc_notify, rc_thresh,
-		                      {}};
+		                      messages_ref, rc_urls, rc_notify, rc_thresh, {}};
 		std::string passthrough;
 		const commands::SlashAction action = commands::Dispatch(dispatched, ctx, passthrough);
-
 		std::cout.rdbuf(old_buf);
 		const std::string output = capture.str();
 
-		// Strip ANSI escape sequences before sending to Telegram.
+		// Strip ANSI before sending to Telegram.
 		std::string plain;
 		plain.reserve(output.size());
 		for (size_t i = 0; i < output.size(); ) {
@@ -893,9 +1059,7 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 						&& output[i] != 'H' && output[i] != 'A'
 						&& output[i] != 'B' && output[i] != 'J') ++i;
 				if (i < output.size()) ++i;
-			} else {
-				plain += output[i++];
-			}
+			} else { plain += output[i++]; }
 		}
 		while (!plain.empty() && (plain.front() == '\n' || plain.front() == ' '))
 			plain.erase(plain.begin());
@@ -904,177 +1068,79 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 
 		if (action == commands::SlashAction::Passthrough) {
 			u.text = passthrough;
-			// Fall through to normal prompt handling below.
+			// Fall through to normal Claude turn below.
 		} else {
 			if (!plain.empty()) TgSend(u.chat_id, plain);
 			return;
 		}
 	}
 
+	// ── Claude turn via TelegramSink ──────────────────────────────────────
 	json& msgs = fUserMessages[u.user_id];
 	if (!msgs.is_array()) msgs = json::array();
 
 	fActiveChatId.store(u.chat_id);
 
-	// Post a placeholder and start a streaming-edit updater thread.
-	const int64_t placeholder_id = [&]() -> int64_t {
-		if (g_muted.load()) return 0;
-		return fClient.SendMessageWithId(u.chat_id, "\xE2\x80\xA6"); // …
-	}();
-
-	api::StreamProgress progress;
-	api::g_stream_progress = &progress;
-	std::atomic<bool> updater_running { true };
-	int               last_version = 0;
-	int               dot_phase    = 0;
-	std::thread updater([&]() {
-		while (updater_running.load()) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-			if (!updater_running.load()) break;
-			if (api::g_telegram_updater_paused.load()) continue;
-			if (placeholder_id == 0) continue;
-
-			// While a tool is actively running, show its name.
-			std::string tool_ph;
-			{
-				std::lock_guard<std::mutex> lk(progress.mu);
-				tool_ph = progress.tool_phase;
-			}
-			if (!tool_ph.empty()) {
-				fClient.EditMessageText(u.chat_id, placeholder_id, tool_ph);
-				continue;
-			}
-
-			const int v = progress.version.load(std::memory_order_relaxed);
-			if (v == last_version) {
-				static const char* kDots[] = {
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA6",
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA4",
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4",
-				};
-				fClient.EditMessageText(u.chat_id, placeholder_id,
-										kDots[dot_phase % 4]);
-				++dot_phase;
-			} else {
-				last_version = v;
-				std::string snap;
-				{ std::lock_guard<std::mutex> lk(progress.mu); snap = progress.text; }
-				if (!snap.empty())
-					fClient.EditMessageText(u.chat_id, placeholder_id,
-											snap + " \xE2\x96\x8C"); // ▌
-			}
-		}
-	});
-
 	const json snapshot = msgs;
 	msgs.push_back({{"role", "user"}, {"content", u.text}});
 
-	// Build the call array passed to SendWithTools. When a shared-
-	// history provider is registered (the common interactive case),
-	// prepend a snapshot of the local REPL's messages so Claude sees
-	// the full conversation from both sides. The snapshot is taken
-	// here, under the turn lock, so it is always consistent with the
-	// most recently completed local turn. The Telegram user's own
-	// thread (fUserMessages) is appended after the shared prefix so
-	// their prior remote exchanges are preserved too.
-	//
-	// When no provider is set (standalone bridge or explicitly
-	// disabled), fall back to the original per-user silo behaviour.
+	// Build the messages array: shared local history (if any) + this
+	// user's per-chat thread.
 	json call_msgs;
 	if (fSharedHistory) {
-		call_msgs = fSharedHistory(); // snapshot of local messages[]
-		// Append this user's Telegram-side thread on top.
+		call_msgs = fSharedHistory();
 		for (const auto& m : msgs) call_msgs.push_back(m);
 	} else {
 		call_msgs = msgs;
 	}
 
-	api::g_non_interactive_tools             = true;
-	api::g_non_interactive_allow_destructive = fAllowDestructive;
-
-	// Piggyback on the REPL session's auth — the interactive loop
-	// already calls ResolveAuth() before every turn, so fAuthGetter
-	// returns a token that is always live and never needs refreshing
-	// here. If for some reason it comes back None (e.g. standalone
-	// bridge mode with a dead API key), bail with a clear error.
 	const config::Auth auth = fAuthGetter();
 	if (auth.kind == config::AuthKind::None) {
-		updater_running.store(false);
-		if (updater.joinable()) updater.join();
-		api::g_stream_progress = nullptr;
-		msgs = snapshot;
 		const std::string err =
-			"(error: authentication expired \xE2\x80\x94 run `claude logout && claude login` on the server)";
-		if (!g_muted.load()) {
-			if (placeholder_id)
-				fClient.EditMessageText(u.chat_id, placeholder_id, err);
-			else
-				fClient.SendMessage(u.chat_id, err);
-		}
-		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
+			"(error: authentication expired \xE2\x80\x94 "
+			"run `claude logout && claude login` on the server)";
+		if (!g_muted.load()) fClient.SendMessage(u.chat_id, err);
+		msgs = snapshot;
+		config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
+				 + " -> auth expired");
 		fActiveChatId.store(fPrimaryUserId);
 		return;
 	}
 
+	// Stack-allocate TelegramSink for the lifetime of this one turn.
+	// No globals needed — the sink carries all state internally.
+	TelegramSink tg_sink(fClient, u.chat_id, fAllowDestructive,
+	                     fAllowedTools, fPermQueue);
+
+	if (!g_muted.load())
+		tg_sink.BeginMessage("assistant");
+
 	std::cout << tui::ClaudePrompt();
 	const std::string effective_system = config::ComposeSystem(fCustomSystem);
 	const auto result = api::SendWithTools(auth, fCfgModel, fCfgMaxTokens,
-										    call_msgs, effective_system);
+	                                       call_msgs, effective_system,
+	                                       g_muted.load() ? nullptr : &tg_sink);
 	std::cout << "\n";
-	api::g_non_interactive_tools = false;
-	// Restore active chat to primary so any local-turn permission
-	// prompts (after this Telegram turn) go to the right place.
 	fActiveChatId.store(fPrimaryUserId);
 
-	updater_running.store(false);
-	if (updater.joinable()) updater.join();
-	api::g_stream_progress = nullptr;
+	if (!g_muted.load())
+		tg_sink.EndMessage();
 
 	if (result.exit_code != 0 || result.assistant_text.empty()) {
 		msgs = snapshot;
-		const std::string err = "(error: Claude did not return a response)";
-		if (placeholder_id)
-			fClient.EditMessageText(u.chat_id, placeholder_id, err);
-		else if (!g_muted.load())
-			fClient.SendMessage(u.chat_id, err);
-		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
+		config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
+				 + " -> error");
 		return;
 	}
 
-	// Numbered options → inline keyboard buttons.
-	std::vector<std::vector<Button>> keyboard;
-	const auto options = models::ExtractNumberedOptions(result.assistant_text);
-	for (const auto& opt : options) {
-		Button b;
-		b.text          = opt.first + ". " + opt.second;
-		b.callback_data = opt.first;
-		keyboard.push_back({ std::move(b) });
-	}
-
-	if (!g_muted.load()) {
-		if (placeholder_id) {
-			if (!fClient.EditMessageText(u.chat_id, placeholder_id,
-											result.assistant_text, keyboard)) {
-				fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
-			}
-		} else {
-			fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
-		}
-	}
-
-	// Append the assistant reply to this user's Telegram message
-	// silo so their subsequent turns have full context.
-	const json assistant_msg = {{"role", "assistant"}, {"content", result.assistant_text}};
+	// Append to this user's Telegram thread for context on next turn.
+	const json assistant_msg = {{"role", "assistant"},
+	                             {"content", result.assistant_text}};
 	msgs.push_back(assistant_msg);
 
-	// Write the user+assistant pair back into the local REPL's
-	// shared messages[] so the exchange appears in the local scroll
-	// history and is saved to history.json. The user message was
-	// already pushed onto msgs above (before SendWithTools); we
-	// retrieve it as the last-but-one element of msgs.
+	// Write-back to local REPL history.
 	if (fSharedHistoryAppend) {
-		const json user_msg = msgs[msgs.size() - 2]; // the user turn we pushed
+		const json user_msg = msgs[msgs.size() - 2];
 		fSharedHistoryAppend(user_msg, assistant_msg);
 	}
 
