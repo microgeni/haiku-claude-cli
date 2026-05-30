@@ -97,73 +97,16 @@ void SciOutput::Configure()
 
 void SciOutput::_ConfigureBaseStyles()
 {
-	// Read-only, no line numbers, word-wrap.
+	// Minimal safe configuration — only view behaviour, no style calls.
+	// Style calls (SCI_STYLESETFORE etc.) are deferred until we confirm
+	// which ones are safe on this Scintilla version.
 	_Sci(kSetReadOnly, 1);
 	_Sci(kSetMarginWidthN, 0, 0);
 	_Sci(kSetMarginWidthN, 1, 0);
-	_Sci(kSetWrapMode, 2);          // SC_WRAP_WORD
+	_Sci(kSetWrapMode, 2);
 	_Sci(kSetScrollWidthTracking, 1);
 	_Sci(kSetEndAtLastLine, 1);
-
-	// Set background on every style individually — avoids SCI_STYLECLEARALL
-	// which propagates the font name from STYLE_DEFAULT and crashes when
-	// Scintilla's internal font record is uninitialised.
-	const long bg = rgb(0x1C, 0x1C, 0x1E);
-	const long fg = rgb(0xDC, 0xDC, 0xDC);
-	for (int s = 0; s < 64; ++s) {
-		_Sci(kStyleSetBack, static_cast<unsigned long>(s), bg);
-		_Sci(kStyleSetFore, static_cast<unsigned long>(s), fg);
-	}
-
-	// Caret and selection.
-	_Sci(kSetCaretFore, rgb(0xFF, 0xFF, 0xFF));
 	_Sci(kSetCaretLineVisible, 0);
-	_Sci(kSetSelBack, 1, rgb(0x44, 0x44, 0x66));
-
-	// ── Named styles ─────────────────────────────────────────────────────────
-
-	// Style 1: user label — sky blue bold.
-	_Sci(kStyleSetFore, kStyleUserLabel,  rgb(0x56, 0xB4, 0xE9));
-	_Sci(kStyleSetBold, kStyleUserLabel,  1);
-
-	// Style 2: model label — warm orange bold.
-	_Sci(kStyleSetFore, kStyleModelLabel, rgb(0xCC, 0x79, 0x5A));
-	_Sci(kStyleSetBold, kStyleModelLabel, 1);
-
-	// Style 3: tool/dim lines — grey.
-	_Sci(kStyleSetFore, kStyleToolLine,   rgb(0x82, 0x82, 0x8C));
-
-	// Style 4: error — red.
-	_Sci(kStyleSetFore, kStyleError,      rgb(0xE6, 0x4B, 0x4B));
-
-	// Style 5: inline code — warm colour.
-	_Sci(kStyleSetFore, kStyleCode,       rgb(0xC8, 0xC8, 0xA0));
-
-	// Style 6: H1 — golden bold.
-	_Sci(kStyleSetFore, kStyleH1,         rgb(0xFF, 0xC8, 0x64));
-	_Sci(kStyleSetBold, kStyleH1,         1);
-
-	// Style 7: H2 — sky blue bold.
-	_Sci(kStyleSetFore, kStyleH2,         rgb(0xB4, 0xDC, 0xFF));
-	_Sci(kStyleSetBold, kStyleH2,         1);
-
-	// Style 8: H3 — soft green bold.
-	_Sci(kStyleSetFore, kStyleH3,         rgb(0xC8, 0xFF, 0xC8));
-	_Sci(kStyleSetBold, kStyleH3,         1);
-
-	// Style 9: link — blue.
-	_Sci(kStyleSetFore, kStyleLink,       rgb(0x56, 0xB4, 0xE9));
-
-	// Style 10: blockquote — muted italic.
-	_Sci(kStyleSetFore,   kStyleBlockquote, rgb(0x96, 0x96, 0x96));
-	_Sci(kStyleSetItalic, kStyleBlockquote, 1);
-
-	// Style 11: dim (bullets, list numbers).
-	_Sci(kStyleSetFore, kStyleDim,        rgb(0x78, 0x78, 0x78));
-
-	// Style 12: code language tag — italic muted.
-	_Sci(kStyleSetFore,   kStyleCodeLang, rgb(0x78, 0x78, 0x8C));
-	_Sci(kStyleSetItalic, kStyleCodeLang, 1);
 }
 
 // ---------------------------------------------------------------------------
