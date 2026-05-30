@@ -905,7 +905,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// Compute screen point: top-left of the input scroll view.
 		BPoint pt = fInputScroll->Frame().LeftTop();
 		ConvertToScreen(&pt);
-		fInput->fPopupOpen = false; // Go() is blocking; reset before call
+
 		fCommandPopup->Show(prefix ? prefix : "/", pt);
 		break;
 	}
@@ -917,7 +917,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_POPUP_PREV:
 	case gui::MSG_POPUP_CONF:
 	case gui::MSG_POPUP_HIDE:
-		fInput->fPopupOpen = false;
+
 		break;
 
 	case gui::MSG_COMPLETE_CMD: {
@@ -928,7 +928,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			fInput->Select(len, len);
 			fInput->MakeFocus(true);
 		}
-		fInput->fPopupOpen = false;
+
 		break;
 	}
 

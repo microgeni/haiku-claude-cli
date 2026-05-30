@@ -62,7 +62,6 @@ public:
 	void	Show(const std::string& prefix, BPoint screenPt);
 
 	bool	IsPopupVisible() const { return fVisible; }
-	void	SetVisible(bool v) { fVisible = v; }
 
 private:
 	BHandler* fTarget  = nullptr;
@@ -117,9 +116,6 @@ private:
 	bool                     fEnabled    = true;
 	bool                     fFocused    = false;
 	bool                     fDropTarget = false;
-
-public:
-	bool                     fPopupOpen  = false; // tracks popup visibility
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
