@@ -107,7 +107,9 @@ int CountLines(const std::string& s)
 // ===========================================================================
 
 InputView::InputView(const char* name)
-	: BTextView(name, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
+	: BTextView(BRect(0, 0, 200, 60), name,
+	            BRect(4, 4, 196, 56),
+	            B_FOLLOW_ALL, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
 {
 	SetWordWrap(true);
 	SetStylable(false);
@@ -124,6 +126,8 @@ void InputView::AttachedToWindow()
 	BFont f(be_plain_font);
 	f.SetSize(f.Size() + 1.0f);
 	SetFontAndColor(&f);
+	// Set text rect now that we have a real frame.
+	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -547,7 +551,6 @@ void ChatWindow::_BuildLayout()
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
 	fInputScroll = new BScrollView("inputscroll", fInput,
-	                               B_FOLLOW_LEFT_RIGHT | B_FOLLOW_BOTTOM,
 	                               0, false, true, B_FANCY_BORDER);
 	fInputScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 54));
 	fInputScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 180));
