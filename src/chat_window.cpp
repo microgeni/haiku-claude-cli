@@ -39,6 +39,7 @@
 
 #include <ListView.h>
 #include <Path.h>
+#include <Screen.h>
 #include <StringItem.h>
 #include "api.h"
 #include "code_styler.h"
@@ -226,7 +227,16 @@ void CommandPopup::_Populate(const std::string& prefix,
 
 	// Resize and reposition before populating so views have valid bounds.
 	ResizeTo(width, totalH);
-	MoveTo(screenPos.x, screenPos.y - totalH);
+
+	// Clamp position to screen bounds so popup never appears off-screen.
+	BScreen screen(this);
+	BRect screenRect = screen.Frame();
+	float x = screenPos.x;
+	float y = screenPos.y - totalH;
+	if (x + width > screenRect.right)  x = screenRect.right - width;
+	if (x < screenRect.left)           x = screenRect.left;
+	if (y < screenRect.top)            y = screenPos.y; // flip below if no room above
+	MoveTo(x, y);
 
 	fList->MakeEmpty();
 	for (const auto& m : fMatches)
