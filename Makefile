@@ -107,7 +107,6 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/tui.cpp          \
     $(SRCDIR)/code_styler.cpp  \
     $(SRCDIR)/md_renderer.cpp  \
-    $(SRCDIR)/sci_output.cpp   \
     $(SRCDIR)/gui_stubs.cpp    \
     $(SRCDIR)/gui_sink.cpp     \
     $(SRCDIR)/session_store.cpp \
@@ -124,7 +123,7 @@ YAMLCPP_LIBS   := $(shell $(PKG_CONFIG) --libs   yaml-cpp 2>/dev/null || echo -l
 # Same compile flags as the CLI + libbe headers + yaml-cpp.
 GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS)
 GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
-                -pthread -lbe -lnetwork -lscintilla -llexilla
+                -pthread -lbe -lnetwork
 
 $(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	$(CXX) $(GUI_CXXFLAGS) -MMD -MP -MF $(@:.o=.d) -c -o $@ $<

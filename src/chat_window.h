@@ -25,7 +25,6 @@
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
-#include "sci_output.h"
 #include "session_store.h"
 
 // Additional MSG_ codes beyond those in gui_sink.h.
@@ -288,7 +287,8 @@ private:
 	void _InsertFileContent(const std::string& path); // drag-drop helper
 
 	// ── Widgets ─────────────────────────────────────────────────────────────
-	SciOutput*     fOutput        = nullptr;  // chat scrollback (BScintillaView)
+	BTextView*     fOutput        = nullptr;
+	BScrollView*   fScroll        = nullptr;
 	BButton*       fJumpBtn       = nullptr;  // floating "↓" overlay button
 	TokenBar*      fTokenBar      = nullptr;
 	SpinnerView*   fSpinner       = nullptr;
@@ -326,13 +326,17 @@ private:
 	bool           fInWebFetch    = false;
 	std::string    fWebFetchBuf;
 
-	// ── Styling / rendering ──────────────────────────────────────────────────
-	styling::Theme       fTheme;    // loaded once, passed to SciOutput
-	styling::LanguageSet fLangSet;  // loaded once, passed to SciOutput
+	// ── Styling ─────────────────────────────────────────────────────────────
+	styling::Theme       fTheme;
+	styling::LanguageSet fLangSet;
+	styling::CodeStyler* fStyler      = nullptr;
 	md::MdRenderer*      fMdRenderer  = nullptr;
 
+	// Code views kept for cleanup.
+	std::vector<BView*>  fCodeViews;
+
 	// ── Session persistence ──────────────────────────────────────────────────
-	std::string    fSessionPath;
+	std::string    fSessionPath;   // path of the current saved session file
 	SessionPanel*  fSessionPanel  = nullptr;
 	BButton*       fSessionBtn    = nullptr;
 

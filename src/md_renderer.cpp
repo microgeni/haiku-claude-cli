@@ -4,46 +4,23 @@
 #include <cstdlib>
 #include <string>
 
-#include "sci_output.h"
-
 namespace md {
 
 // ---------------------------------------------------------------------------
-// Colour constants (BTextView path)
+// Colour constants (dark theme palette matching gui styling)
 // ---------------------------------------------------------------------------
 namespace {
 
 const rgb_color kColorText       = { 220, 220, 220, 255 };
 const rgb_color kColorDim        = { 140, 140, 140, 255 };
-const rgb_color kColorCode       = { 200, 200, 160, 255 };
-const rgb_color kColorH1         = { 255, 200, 100, 255 };
-const rgb_color kColorH2         = { 180, 220, 255, 255 };
-const rgb_color kColorH3         = { 200, 255, 200, 255 };
+const rgb_color kColorCode       = { 200, 200, 160, 255 }; // warm mono
+const rgb_color kColorCodeBg     = {  50,  50,  45, 255 }; // subtle bg
+const rgb_color kColorH1         = { 255, 200, 100, 255 }; // golden
+const rgb_color kColorH2         = { 180, 220, 255, 255 }; // sky blue
+const rgb_color kColorH3         = { 200, 255, 200, 255 }; // soft green
 const rgb_color kColorBlockquote = { 150, 150, 150, 255 };
-const rgb_color kColorLink       = {  86, 180, 233, 255 };
+const rgb_color kColorLink       = {  86, 180, 233, 255 }; // same as user label
 const rgb_color kColorHRule      = { 100, 100, 100, 255 };
-
-// Map a Run to a SciOutput style index.
-int RunToSciStyle(const Run& r)
-{
-	if (r.hasSciStyle) return r.sciStyle;
-	if (r.monospace)   return SciOutput::kStyleCode;
-	if (r.hasColor) {
-		// Match colours to known SciOutput styles.
-		auto eq = [](rgb_color a, rgb_color b) {
-			return a.red == b.red && a.green == b.green && a.blue == b.blue;
-		};
-		if (eq(r.color, kColorH1))         return SciOutput::kStyleH1;
-		if (eq(r.color, kColorH2))         return SciOutput::kStyleH2;
-		if (eq(r.color, kColorH3))         return SciOutput::kStyleH3;
-		if (eq(r.color, kColorLink))       return SciOutput::kStyleLink;
-		if (eq(r.color, kColorBlockquote)) return SciOutput::kStyleBlockquote;
-		if (eq(r.color, kColorDim))        return SciOutput::kStyleDim;
-		if (eq(r.color, kColorHRule))      return SciOutput::kStyleDim;
-	}
-	if (r.italic) return SciOutput::kStyleBlockquote;
-	return SciOutput::kStyleDefault;
-}
 
 } // namespace
 
@@ -53,11 +30,6 @@ int RunToSciStyle(const Run& r)
 
 MdRenderer::MdRenderer(BTextView* view)
 	: fView(view)
-{
-}
-
-MdRenderer::MdRenderer(SciOutput* output)
-	: fSciOutput(output)
 {
 }
 
@@ -94,26 +66,20 @@ void MdRenderer::AppendRun(const Run& r)
 {
 	if (r.text.empty()) return;
 
-	// ── SciOutput backend ────────────────────────────────────────────────────
-	if (fSciOutput) {
-		fSciOutput->AppendText(r.text, RunToSciStyle(r));
-		return;
-	}
-
-	// ── BTextView backend ────────────────────────────────────────────────────
-	if (!fView) return;
-
+	// Build font.
 	BFont font(r.monospace ? be_fixed_font : be_plain_font);
-	if (r.sizeScale != 1.0f)
+	if (r.sizeScale != 1.0f) {
 		font.SetSize(font.Size() * r.sizeScale);
+	}
 	uint16 face = B_REGULAR_FACE;
-	if (r.bold)      face |= B_BOLD_FACE;
-	if (r.italic)    face |= B_ITALIC_FACE;
+	if (r.bold)   face |= B_BOLD_FACE;
+	if (r.italic) face |= B_ITALIC_FACE;
 	if (r.underline) face |= B_UNDERSCORE_FACE;
 	if (face != B_REGULAR_FACE) font.SetFace(face);
 
+	// Build colour.
 	rgb_color color = kColorText;
-	if (r.hasColor)   color = r.color;
+	if (r.hasColor) color = r.color;
 	else if (r.monospace) color = kColorCode;
 
 	text_run_array* tra = static_cast<text_run_array*>(
@@ -122,19 +88,23 @@ void MdRenderer::AppendRun(const Run& r)
 		fView->Insert(r.text.c_str(), static_cast<int32>(r.text.size()));
 		return;
 	}
-	tra->count          = 1;
+	tra->count       = 1;
 	tra->runs[0].offset = 0;
 	tra->runs[0].font   = font;
 	tra->runs[0].color  = color;
-	const int32 start   = fView->TextLength();
+
+	const int32 start = fView->TextLength();
 	fView->Insert(start, r.text.c_str(), static_cast<int32>(r.text.size()), tra);
 	free(tra);
+
+	// Optional code background via view colour behind the text.
+	// BTextView doesn't support per-run background. We skip it for now;
+	// the warm foreground colour is enough to distinguish inline code.
 }
 
 void MdRenderer::ScrollToEnd()
 {
-	if (fSciOutput) { fSciOutput->ScrollToEnd(); return; }
-	if (fView)      fView->ScrollToOffset(fView->TextLength());
+	fView->ScrollToOffset(fView->TextLength());
 }
 
 // ---------------------------------------------------------------------------
@@ -143,11 +113,10 @@ void MdRenderer::ScrollToEnd()
 
 void MdRenderer::AppendHRule()
 {
-	// Width estimate: 60 chars for SciOutput (variable-width unknown),
-	// or derive from BTextView bounds.
-	int nchars = 60;
-	if (fView) nchars = std::max(10, static_cast<int>(fView->Bounds().Width() / 8.0f));
-
+	// A row of U+2500 BOX DRAWINGS LIGHT HORIZONTAL characters.
+	// Width ≈ view width in chars (approximate at 8px/char).
+	const float viewW = fView->Bounds().Width();
+	const int   nchars = std::max(10, static_cast<int>(viewW / 8.0f));
 	std::string rule;
 	rule.reserve(static_cast<size_t>(nchars) * 3 + 1);
 	for (int i = 0; i < nchars; ++i) rule += "\xE2\x94\x80"; // U+2500 ─
@@ -157,8 +126,6 @@ void MdRenderer::AppendHRule()
 	r.text     = rule;
 	r.hasColor = true;
 	r.color    = kColorHRule;
-	r.sciStyle    = SciOutput::kStyleDim;
-	r.hasSciStyle = true;
 	AppendRun(r);
 }
 

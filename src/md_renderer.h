@@ -7,13 +7,10 @@
 
 #include <TextView.h>
 
-// Forward declaration — avoids pulling BScintillaView into every consumer.
-class SciOutput;
-
-// MdRenderer — inline markdown renderer for BTextView or SciOutput.
+// MdRenderer — inline markdown renderer for BTextView.
 //
 // Parses a stream of text chunks (as they arrive from the model) and
-// emits styled runs to the output surface. Handles:
+// emits styled runs to a BTextView. Handles:
 //
 //   # / ## / ### headings   — larger bold font
 //   **bold** / __bold__     — bold
@@ -26,44 +23,41 @@ class SciOutput;
 //   --- / *** / ___ hrule   — ────────────── separator line
 //   Paragraphs              — blank line → extra newline
 //
-// Fenced code blocks are handled by ChatWindow::_FlushCodeBlock;
-// MdRenderer never sees them directly.
+// Fenced code blocks (triple backtick) are handled by ChatWindow's
+// _ProcessChunk / _FlushCodeBlock; MdRenderer never sees them.
 //
-// Line-oriented: complete lines rendered on '\n'; partial lines buffered.
+// The renderer is line-oriented: complete lines are rendered when a
+// '\n' arrives. Partial lines are buffered in fLineBuf.
 
 namespace md {
 
-// Style descriptor for a single text run.
+// Style descriptor for a single text run sent to BTextView.
 struct Run {
 	std::string text;
-	// BTextView path font modifiers.
-	bool      bold       = false;
-	bool      italic     = false;
-	bool      monospace  = false;
-	float     sizeScale  = 1.0f;
-	rgb_color color      = { 0, 0, 0, 0 };
-	bool      hasColor   = false;
-	bool      underline  = false;
-	// SciOutput style override (SciOutput::kStyle* constants).
-	// When hasSciStyle is true this overrides auto-derivation.
-	int  sciStyle    = 0;
-	bool hasSciStyle = false;
+	// Font modifiers (combined via BFont::SetFace).
+	bool bold      = false;
+	bool italic    = false;
+	bool monospace = false;  // use be_fixed_font
+	float sizeScale = 1.0f; // multiplier on be_plain_font pointSize
+	// Colour (0 = inherit from view default).
+	rgb_color color = { 0, 0, 0, 0 };
+	bool hasColor   = false;
+	// Underline (for links).
+	bool underline  = false;
 };
 
 class MdRenderer {
 public:
-	// BTextView backend — existing behaviour.
 	explicit MdRenderer(BTextView* view);
 
-	// SciOutput backend — routes all output through SciOutput::AppendText.
-	explicit MdRenderer(SciOutput* output);
-
-	// Feed a text chunk (may span multiple lines).
+	// Feed a chunk of text (may contain newlines; may be partial line).
+	// Renders complete lines immediately; buffers the last partial line.
 	void Write(const std::string& chunk);
 
-	// Flush any buffered partial line.
+	// Flush any buffered partial line (call at end of turn).
 	void Flush();
 
+	// URLs harvested from [text](url) markdown links.
 	const std::vector<std::string>& Urls() const { return fUrls; }
 	void ClearUrls() { fUrls.clear(); }
 
@@ -72,19 +66,26 @@ public:
 	void ScrollToEnd();
 
 private:
+	// Render one complete line.
 	void RenderLine(const std::string& line);
+
+	// Render inline spans within `text` (bold/italic/code/links).
+	// `baseRun` carries the heading/blockquote context.
 	void RenderInline(const std::string& text, const Run& base);
+
+	// Append a simple horizontal rule.
 	void AppendHRule();
 
-	BTextView* fView      = nullptr;   // BTextView backend (null when SciOutput)
-	SciOutput* fSciOutput = nullptr;   // SciOutput backend (null when BTextView)
-
-	std::string              fLineBuf;
+	BTextView*           fView;
+	std::string          fLineBuf;   // partial line accumulator
 	std::vector<std::string> fUrls;
-	bool                     fLastWasBlank = false;
+
+	// Track blank-line state for paragraph spacing.
+	bool fLastWasBlank = false;
 };
 
-// Strip HTML tags from a string (for WebFetch output).
+// Strip HTML tags and decode common entities from a string.
+// Used to make WebFetch output readable in plain BTextView.
 std::string StripHtml(const std::string& html);
 
 } // namespace md
