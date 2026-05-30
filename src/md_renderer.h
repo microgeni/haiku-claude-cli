@@ -61,12 +61,13 @@ public:
 	const std::vector<std::string>& Urls() const { return fUrls; }
 	void ClearUrls() { fUrls.clear(); }
 
+	// Public so ChatWindow can append styled runs directly (e.g. code blocks).
+	void AppendRun(const Run& r);
+	void ScrollToEnd();
+
 private:
 	// Render one complete line.
 	void RenderLine(const std::string& line);
-
-	// Append a Run to fView, advancing the insert position.
-	void AppendRun(const Run& r);
 
 	// Render inline spans within `text` (bold/italic/code/links).
 	// `baseRun` carries the heading/blockquote context.
@@ -74,9 +75,6 @@ private:
 
 	// Append a simple horizontal rule.
 	void AppendHRule();
-
-	// Scroll fView to its end.
-	void ScrollToEnd();
 
 	BTextView*           fView;
 	std::string          fLineBuf;   // partial line accumulator

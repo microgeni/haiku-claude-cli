@@ -32,6 +32,7 @@
 #include <OS.h>
 #include <ScrollBar.h>
 #include <SeparatorView.h>
+#include <Slider.h>
 #include <SpaceLayoutItem.h>
 #include <StringItem.h>
 #include <TextView.h>
@@ -49,8 +50,6 @@
 #include "gui_sink.h"
 #include "md_renderer.h"
 #include "models.h"
-#include "scintilla_view.h"
-#include "session_store.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -58,6 +57,74 @@
 // stay dark regardless of the system theme (the output area is always dark).
 // ---------------------------------------------------------------------------
 namespace {
+
+// Slider for the notification delay. Snaps to 10-second steps and shows a
+// plain-English label ("Notify is disabled" / "Notify after 30s") that
+// updates live as the thumb moves.
+class NotifySlider : public BSlider {
+public:
+	NotifySlider(const char* name, const char* label, BMessage* message,
+	             int32 minValue, int32 maxValue)
+		: BSlider(name, label, message, minValue, maxValue, B_HORIZONTAL)
+	{
+	}
+
+	// Attach a left-aligned label that mirrors the slider value.
+	void SetValueLabel(BStringView* label)
+	{
+		fLabel = label;
+		_UpdateLabel();
+	}
+
+	// Round every value change to the nearest 10 seconds.
+	virtual void SetValue(int32 value) override
+	{
+		int32 snapped = ((value + 5) / 10) * 10;
+		BSlider::SetValue(snapped);
+		_UpdateLabel();
+	}
+
+	// Suppress the slider's built-in right-aligned value text; the
+	// dedicated left-aligned BStringView shows the value instead.
+	virtual const char* UpdateText() const override
+	{
+		return nullptr;
+	}
+
+	// Render a notify delay (in seconds) as a friendly phrase:
+	//   0   -> "Notify is disabled"
+	//   30  -> "Notify after 30s"
+	//   60  -> "Notify after 1 minute"
+	//   90  -> "Notify after 1 min 30s"
+	//   120 -> "Notify after 2 minutes"
+	static void FormatNotifyDelay(int32 seconds, char* out, size_t outSize)
+	{
+		if (seconds <= 0) {
+			std::snprintf(out, outSize, "Notify is disabled");
+			return;
+		}
+		const int mins = static_cast<int>(seconds) / 60;
+		const int secs = static_cast<int>(seconds) % 60;
+		if (mins == 0)
+			std::snprintf(out, outSize, "Notify after %ds", secs);
+		else if (secs == 0)
+			std::snprintf(out, outSize, "Notify after %d %s",
+			              mins, mins == 1 ? "minute" : "minutes");
+		else
+			std::snprintf(out, outSize, "Notify after %d min %ds", mins, secs);
+	}
+
+private:
+	void _UpdateLabel()
+	{
+		if (!fLabel) return;
+		char text[40];
+		FormatNotifyDelay(Value(), text, sizeof(text));
+		fLabel->SetText(text);
+	}
+
+	BStringView* fLabel = nullptr;
+};
 
 // Output area colours (always dark regardless of system theme).
 const rgb_color kColorChatBg      = {  24,  24,  28, 255 };
@@ -436,16 +503,18 @@ void TokenBar::SetTokens(int used, int maxCtx)
 // SettingsPanel
 // ===========================================================================
 
-SettingsPanel::SettingsPanel(const std::string& systemPrompt, int maxTokens)
+SettingsPanel::SettingsPanel(const std::string& systemPrompt, int maxTokens,
+                             int notifyMinSec)
 	: BView("settings", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
 {
 	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	_BuildLayout(systemPrompt, maxTokens);
+	_BuildLayout(systemPrompt, maxTokens, notifyMinSec);
 	// Start hidden.
 	Hide();
 }
 
-void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens)
+void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens,
+                                 int notifyMinSec)
 {
 	// System-prompt label + editor.
 	BStringView* sysLabel = new BStringView("syslbl", "System Prompt:");
@@ -459,10 +528,21 @@ void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens)
 	fMaxTokensCtl = new BTextControl("maxtokens", "Max tokens:",
 	                                  std::to_string(maxTokens).c_str(), nullptr);
 
-	// Notifications checkbox.
-	fNotifyChk = new BCheckBox("notify", "Notify on completed turns",
-	                            nullptr);
-	fNotifyChk->SetValue(B_CONTROL_ON); // enabled by default
+	// Notification delay slider: how long a turn must run before it
+	// fires a desktop notification. 0 = notifications disabled. A
+	// left-aligned label mirrors the value in plain English.
+	BStringView* notifyLabel = new BStringView("notifylbl", "");
+	notifyLabel->SetAlignment(B_ALIGN_LEFT);
+	NotifySlider* notifySlider = new NotifySlider("notifydelay", nullptr,
+	                                              nullptr, 0, 300);
+	fNotifyDelay = notifySlider;
+	fNotifyDelay->SetHashMarks(B_HASH_MARKS_BOTTOM);
+	fNotifyDelay->SetHashMarkCount(7);
+	fNotifyDelay->SetKeyIncrementValue(10);
+	if (notifyMinSec < 0)   notifyMinSec = 0;
+	if (notifyMinSec > 300) notifyMinSec = 300;
+	fNotifyDelay->SetValue(notifyMinSec);
+	notifySlider->SetValueLabel(notifyLabel);
 
 	// Close button.
 	BButton* closeBtn = new BButton("closesettings", "Close",
@@ -473,17 +553,24 @@ void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens)
 		.Add(sysLabel)
 		.Add(sysScroll, 1.0f)
 		.Add(fMaxTokensCtl)
-		.Add(fNotifyChk)
+		.Add(notifyLabel)
+		.Add(fNotifyDelay)
 		.Add(closeBtn)
 	.End();
 }
 
-void SettingsPanel::SetValues(const std::string& systemPrompt, int maxTokens)
+void SettingsPanel::SetValues(const std::string& systemPrompt, int maxTokens,
+                              int notifyMinSec)
 {
 	if (fSysPromptView)
 		fSysPromptView->SetText(systemPrompt.c_str());
 	if (fMaxTokensCtl)
 		fMaxTokensCtl->SetText(std::to_string(maxTokens).c_str());
+	if (fNotifyDelay) {
+		if (notifyMinSec < 0)   notifyMinSec = 0;
+		if (notifyMinSec > 300) notifyMinSec = 300;
+		fNotifyDelay->SetValue(notifyMinSec);
+	}
 }
 
 std::string SettingsPanel::SystemPrompt() const
@@ -504,8 +591,15 @@ int SettingsPanel::MaxTokens() const
 
 bool SettingsPanel::NotificationsEnabled() const
 {
-	if (!fNotifyChk) return true;
-	return fNotifyChk->Value() == B_CONTROL_ON;
+	// A delay of 0 means notifications are turned off entirely.
+	if (!fNotifyDelay) return true;
+	return fNotifyDelay->Value() > 0;
+}
+
+int SettingsPanel::NotifyMinSeconds() const
+{
+	if (!fNotifyDelay) return 5;
+	return static_cast<int>(fNotifyDelay->Value());
 }
 
 void SettingsPanel::Toggle()
@@ -651,7 +745,8 @@ const session::SessionInfo* SessionPanel::InfoAt(int32_t index) const
 // ===========================================================================
 
 ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
-                        int maxTokens, const std::string& systemPrompt)
+                        int maxTokens, const std::string& systemPrompt,
+                        int notifyMinSec)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE | B_AUTO_UPDATE_SIZE_LIMITS)
 	, fAuth(auth)
@@ -660,6 +755,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	, fSystemPrompt(systemPrompt)
 	, fMessages(nlohmann::json::array())
 {
+	fNotifyMinSec = (notifyMinSec < 0) ? 0 : notifyMinSec;
 	// Try to load the Genio theme and language set.
 	const std::string themePath = styling::FindDefaultTheme();
 	const std::string langsDir  = styling::FindLanguagesDir();
@@ -763,7 +859,7 @@ void ChatWindow::_BuildLayout()
 
 	// ── Session panel (left) + Settings panel (right) ─────────────────────────
 	fSessionPanel = new SessionPanel(this);
-	fSettings     = new SettingsPanel(fSystemPrompt, fMaxTokens);
+	fSettings     = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec);
 
 	// ── Layout ────────────────────────────────────────────────────────────────
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -900,6 +996,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			fSystemPrompt         = fSettings->SystemPrompt();
 			fMaxTokens            = fSettings->MaxTokens();
 			fNotificationsEnabled = fSettings->NotificationsEnabled();
+			fNotifyMinSec         = fSettings->NotifyMinSeconds();
 		}
 		fSettings->Toggle();
 		break;
@@ -1162,7 +1259,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		{
 			const bigtime_t elapsed = system_time() - fTurnStartTime;
 			const int       elapsedSec = static_cast<int>(elapsed / 1000000LL);
-			const bool      longTurn   = elapsedSec >= 5;
+			const bool      longTurn   = elapsedSec >= fNotifyMinSec;
 			const bool      hadTools   = fToolsUsed > 0;
 
 			if (fNotificationsEnabled && (longTurn || hadTools || !IsActive())) {
@@ -1179,7 +1276,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 					notif.SetTitle(t.c_str());
 				} else {
 					std::string t = "Response ready";
-					if (elapsedSec >= 5)
+					if (longTurn)
 						t += " (" + std::to_string(elapsedSec) + "s)";
 					notif.SetTitle(t.c_str());
 				}
@@ -1322,36 +1419,35 @@ void ChatWindow::_FlushCodeBlock()
 {
 	if (fCodeBuffer.empty()) return;
 
-	const int   lines  = std::max(1, CountLines(fCodeBuffer) + 1);
-	const int   height = std::min(400, std::max(60, lines * 16 + 8));
-	const float viewW  = fOutput->Bounds().Width() - 16.0f;
-	const float yPos   = fOutput->TextRect().bottom + 4.0f;
+	// Render the code block as styled text in the BTextView.
+	// Embedding BScintillaView as a child of BTextView is unreliable —
+	// Scintilla's internal state isn't ready until the view is fully
+	// attached to the screen, causing GPF crashes on SendMessage().
+	// Styled BTextView runs are simpler and crash-free.
 
-	BScintillaView* sci = new BScintillaView(
-		"code", B_WILL_DRAW | B_NAVIGABLE, false, true, B_FANCY_BORDER);
-	sci->MoveTo(8.0f, yPos);
-	sci->ResizeTo(viewW, static_cast<float>(height));
-	fOutput->AddChild(sci);
-	fCodeViews.push_back(sci);
-
-	auto send = [sci](unsigned int m, unsigned long w, long l) -> long {
-		return sci->SendMessage(m, w, l);
-	};
-
-	if (fStyler) {
-		fStyler->Apply(send, fCodeLang);
+	// Opening fence with language label.
+	if (fMdRenderer) {
+		if (!fCodeLang.empty()) {
+			md::Run langRun;
+			langRun.text     = fCodeLang + "\n";
+			langRun.hasColor = true;
+			langRun.color    = {120, 120, 140, 255};
+			langRun.italic   = true;
+			fMdRenderer->AppendRun(langRun);
+		}
+		md::Run codeRun;
+		codeRun.text      = fCodeBuffer;
+		codeRun.monospace = true;
+		codeRun.hasColor  = true;
+		codeRun.color     = {200, 200, 160, 255};
+		fMdRenderer->AppendRun(codeRun);
+		md::Run nl;
+		nl.text = "\n";
+		fMdRenderer->AppendRun(nl);
+		fMdRenderer->ScrollToEnd();
 	} else {
-		send(2051, 32, static_cast<long>(styling::CodeStyler::ParseColor("#DCDCDC")));
-		send(2052, 32, static_cast<long>(styling::CodeStyler::ParseColor("#1E1E1E")));
-		send(2050, 0, 0);
+		_AppendText(fCodeBuffer);
 	}
-	send(2056 + 1, 32, reinterpret_cast<long>("Noto Mono"));
-	sci->SetText(fCodeBuffer.c_str());
-	send(2171, 1, 0); // SCI_SETREADONLY
-
-	BRect tr = fOutput->TextRect();
-	tr.bottom += static_cast<float>(height) + 8.0f;
-	fOutput->SetTextRect(tr);
 
 	if (!fUserScrolled) _ScrollToBottom();
 	fCodeBuffer.clear();

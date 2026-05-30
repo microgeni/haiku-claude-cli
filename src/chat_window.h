@@ -7,12 +7,12 @@
 #include <vector>
 
 #include <Button.h>
-#include <CheckBox.h>
 #include <ListView.h>
 #include <MenuField.h>
 #include <Messenger.h>
 #include <PopUpMenu.h>
 #include <ScrollView.h>
+#include <Slider.h>
 #include <StringView.h>
 #include <TextControl.h>
 #include <TextView.h>
@@ -146,25 +146,29 @@ class SettingsPanel : public BView {
 public:
 	static constexpr float kPanelWidth = 280.0f;
 
-	SettingsPanel(const std::string& systemPrompt, int maxTokens);
+	SettingsPanel(const std::string& systemPrompt, int maxTokens,
+	              int notifyMinSec);
 
 	// Populate fields from current config.
-	void	SetValues(const std::string& systemPrompt, int maxTokens);
+	void	SetValues(const std::string& systemPrompt, int maxTokens,
+	                  int notifyMinSec);
 
 	// Read back edited values.
 	std::string	SystemPrompt() const;
 	int         MaxTokens() const;
 	bool        NotificationsEnabled() const;
+	int         NotifyMinSeconds() const;
 
 	bool	IsOpen() const { return fOpen; }
 	void	Toggle();
 
 private:
-	void	_BuildLayout(const std::string& systemPrompt, int maxTokens);
+	void	_BuildLayout(const std::string& systemPrompt, int maxTokens,
+	                     int notifyMinSec);
 
 	BTextView*    fSysPromptView  = nullptr;
 	BTextControl* fMaxTokensCtl   = nullptr;
-	BCheckBox*    fNotifyChk      = nullptr;
+	BSlider*      fNotifyDelay    = nullptr;
 	bool          fOpen           = false;
 };
 
@@ -244,7 +248,8 @@ private:
 class ChatWindow : public BWindow {
 public:
 	ChatWindow(const config::Auth& auth, const std::string& model,
-	           int maxTokens, const std::string& systemPrompt);
+	           int maxTokens, const std::string& systemPrompt,
+	           int notifyMinSec = 5);
 	~ChatWindow() override;
 
 	void MessageReceived(BMessage* msg) override;
@@ -348,6 +353,7 @@ private:
 	bigtime_t       fTurnStartTime        = 0;
 	int             fToolsUsed            = 0;
 	bool            fNotificationsEnabled = true; // per-window, toggled in settings
+	int             fNotifyMinSec         = 5;    // delay before a turn notifies
 
 	// ── Worker thread ────────────────────────────────────────────────────────
 	std::thread         fWorker;
