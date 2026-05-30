@@ -43,8 +43,10 @@ public:
 		const std::string model      = cfg.model;
 		const int         maxTokens  = cfg.max_tokens;
 		const std::string systemPmt  = cfg.system;
+		const int         notifyMin  = static_cast<int>(cfg.notify_min_duration_sec);
 
-		ChatWindow* win = new ChatWindow(auth, model, maxTokens, systemPmt);
+		ChatWindow* win = new ChatWindow(auth, model, maxTokens, systemPmt,
+		                                 notifyMin);
 		win->Show();
 	}
 };
