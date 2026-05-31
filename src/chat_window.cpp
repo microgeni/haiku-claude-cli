@@ -316,7 +316,15 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 {
 	if (numBytes == 1) {
 		if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
-			if (Window()) Window()->PostMessage(gui::MSG_SEND);
+			// Shift+Enter → insert a newline; plain Enter → send.
+			BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr;
+			int32 modifiers = 0;
+			if (cur) cur->FindInt32("modifiers", &modifiers);
+			if (modifiers & B_SHIFT_KEY) {
+				Insert("\n");
+			} else {
+				if (Window()) Window()->PostMessage(gui::MSG_SEND);
+			}
 			return;
 		}
 		if (bytes[0] == B_ESCAPE) {
