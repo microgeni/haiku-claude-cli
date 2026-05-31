@@ -19,7 +19,9 @@
 #include <string>
 
 #include <Alert.h>
+#include <AppFileInfo.h>
 #include <Application.h>
+#include <Bitmap.h>
 #include <CheckBox.h>
 #include <ControlLook.h>
 #include <File.h>
@@ -27,23 +29,26 @@
 #include <GroupLayout.h>
 #include <GroupView.h>
 #include <LayoutBuilder.h>
+#include <Menu.h>
+#include <MenuBar.h>
 #include <Message.h>
 #include <MessageRunner.h>
 #include <Notification.h>
 #include <OS.h>
+#include <Roster.h>
 #include <ScrollBar.h>
 #include <SeparatorView.h>
 #include <Slider.h>
 #include <SpaceLayoutItem.h>
-#include <StringItem.h>
 #include <TextView.h>
 #include <Window.h>
 
-#include <ListView.h>
+#include <FilePanel.h>
 #include <MenuItem.h>
 #include <Path.h>
 #include <PopUpMenu.h>
-#include <StringItem.h>
+
+#include <private/interface/AboutWindow.h>
 #include "api.h"
 #include "code_styler.h"
 #include "commands.h"
@@ -51,6 +56,7 @@
 #include "gui_sink.h"
 #include "md_renderer.h"
 #include "models.h"
+#include "session_store.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -169,13 +175,6 @@ void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
 	free(tra);
 }
 
-int CountLines(const std::string& s)
-{
-	int n = 0;
-	for (char c : s) if (c == '\n') ++n;
-	return n;
-}
-
 } // namespace
 
 
@@ -231,11 +230,11 @@ void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
 // ===========================================================================
 
 InputView::InputView(const char* name)
-	: BTextView(BRect(0, 0, 200, 60), name,
-	            BRect(4, 4, 196, 56),
+	: BTextView(BRect(0, 0, 200, 24), name,
+	            BRect(4, 4, 196, 20),
 	            B_FOLLOW_ALL, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
 {
-	SetWordWrap(true);
+	SetWordWrap(false);
 	SetStylable(false);
 }
 
@@ -252,6 +251,13 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
+	// Fix height to one line; the layout engine must not stretch us taller.
+	font_height fh;
+	f.GetHeight(&fh);
+	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
+	const float fixedH = lineH + 8.0f; // 4px padding top + bottom
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, fixedH));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, fixedH));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -310,12 +316,7 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 {
 	if (numBytes == 1) {
 		if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
-			if (modifiers() & B_SHIFT_KEY) {
-				BTextView::KeyDown(bytes, numBytes);
-				if (Window()) Window()->PostMessage(gui::MSG_JUMP_BOTTOM);
-			} else {
-				if (Window()) Window()->PostMessage(gui::MSG_SEND);
-			}
+			if (Window()) Window()->PostMessage(gui::MSG_SEND);
 			return;
 		}
 		if (bytes[0] == B_ESCAPE) {
@@ -350,20 +351,6 @@ void InputView::FrameResized(float w, float h)
 {
 	BTextView::FrameResized(w, h);
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-}
-
-float InputView::PreferredHeight() const
-{
-	BFont f;
-	GetFont(&f);
-	font_height fh;
-	f.GetHeight(&fh);
-	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	const std::string content(Text(), static_cast<size_t>(TextLength()));
-	const int   lines = std::max(kMinLines,
-	                             std::min(kMaxLines,
-	                                      ::CountLines(content) + 1));
-	return lineH * static_cast<float>(lines) + 8.0f;
 }
 
 void InputView::SetEnabled(bool enabled)
@@ -522,17 +509,19 @@ void TokenBar::SetTokens(int used, int maxCtx)
 // ===========================================================================
 
 SettingsPanel::SettingsPanel(const std::string& systemPrompt, int maxTokens,
-                             int notifyMinSec)
+                             int notifyMinSec, const std::string& workingDir,
+                             BMenuField* modelField)
 	: BView("settings", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
 {
 	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	_BuildLayout(systemPrompt, maxTokens, notifyMinSec);
+	_BuildLayout(systemPrompt, maxTokens, notifyMinSec, workingDir, modelField);
 	// Start hidden.
 	Hide();
 }
 
 void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens,
-                                 int notifyMinSec)
+                                 int notifyMinSec, const std::string& workingDir,
+                                 BMenuField* modelField)
 {
 	// System-prompt label + editor.
 	BStringView* sysLabel = new BStringView("syslbl", "System Prompt:");
@@ -562,23 +551,39 @@ void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens,
 	fNotifyDelay->SetValue(notifyMinSec);
 	notifySlider->SetValueLabel(notifyLabel);
 
+	// Working directory field + Browse button.
+	// The text control holds the path; the Browse button opens a
+	// BFilePanel so the user can pick a directory without typing.
+	fWorkingDirCtl = new BTextControl("workingdir", "Working directory:",
+	                                   workingDir.c_str(), nullptr);
+	fWorkingDirCtl->SetToolTip("Directory Claude uses as the root for "
+	                            "relative file paths and tool calls.");
+	BButton* browseBtn = new BButton("browseworkdir", "Browse" B_UTF8_ELLIPSIS,
+	                                  new BMessage(gui::MSG_BROWSE_WORKDIR));
+
 	// Close button.
 	BButton* closeBtn = new BButton("closesettings", "Close",
 	                                 new BMessage(gui::MSG_SETTINGS));
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
 		.SetInsets(B_USE_SMALL_INSETS)
+		.Add(modelField)
 		.Add(sysLabel)
 		.Add(sysScroll, 1.0f)
 		.Add(fMaxTokensCtl)
 		.Add(notifyLabel)
 		.Add(fNotifyDelay)
+		.Add(fWorkingDirCtl)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+			.AddGlue()
+			.Add(browseBtn)
+		.End()
 		.Add(closeBtn)
 	.End();
 }
 
 void SettingsPanel::SetValues(const std::string& systemPrompt, int maxTokens,
-                              int notifyMinSec)
+                              int notifyMinSec, const std::string& workingDir)
 {
 	if (fSysPromptView)
 		fSysPromptView->SetText(systemPrompt.c_str());
@@ -589,6 +594,8 @@ void SettingsPanel::SetValues(const std::string& systemPrompt, int maxTokens,
 		if (notifyMinSec > 300) notifyMinSec = 300;
 		fNotifyDelay->SetValue(notifyMinSec);
 	}
+	if (fWorkingDirCtl)
+		fWorkingDirCtl->SetText(workingDir.c_str());
 }
 
 std::string SettingsPanel::SystemPrompt() const
@@ -618,6 +625,13 @@ int SettingsPanel::NotifyMinSeconds() const
 {
 	if (!fNotifyDelay) return 5;
 	return static_cast<int>(fNotifyDelay->Value());
+}
+
+std::string SettingsPanel::WorkingDir() const
+{
+	if (!fWorkingDirCtl) return {};
+	const char* t = fWorkingDirCtl->Text();
+	return t ? std::string(t) : std::string();
 }
 
 void SettingsPanel::Toggle()
@@ -678,87 +692,6 @@ void SpinnerView::SetVisible(bool v)
 
 
 // ===========================================================================
-// SessionPanel
-// ===========================================================================
-
-SessionPanel::SessionPanel(BHandler* target)
-	: BView("sessions", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
-	, fTarget(target)
-{
-	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	_BuildLayout();
-	Hide(); // starts hidden
-}
-
-void SessionPanel::_BuildLayout()
-{
-	BStringView* label = new BStringView("seslbl", "Sessions");
-	BFont bold(be_bold_font);
-	bold.SetSize(be_plain_font->Size());
-	label->SetFont(&bold);
-
-	fList = new BListView("seslist", B_SINGLE_SELECTION_LIST);
-	fList->SetSelectionMessage(new BMessage(gui::MSG_SESSION_LOAD));
-	fList->SetTarget(fTarget);
-	fScroll = new BScrollView("sesscroll", fList,
-	                           0, false, true, B_FANCY_BORDER);
-
-	BButton* refreshBtn = new BButton("sesrefresh", "Refresh",
-	                                   new BMessage(gui::MSG_SESSIONS));
-	refreshBtn->SetTarget(fTarget);
-
-	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_SMALL_INSETS)
-		.Add(label)
-		.Add(fScroll, 1.0f)
-		.Add(refreshBtn)
-	.End();
-}
-
-void SessionPanel::Refresh()
-{
-	fSessions = session::List();
-
-	// Repopulate the list view.
-	fList->MakeEmpty();
-	for (const auto& info : fSessions) {
-		// Format: "Title\nmodel • N turns • date"
-		char dateBuf[32];
-		struct tm tm_buf;
-		localtime_r(&info.modified, &tm_buf);
-		std::strftime(dateBuf, sizeof(dateBuf), "%d %b %Y", &tm_buf);
-
-		std::string label = info.title.empty() ? "(untitled)" : info.title;
-		label += "\n";
-		label += info.model.empty() ? "?" : info.model;
-		label += " \xE2\x80\xA2 ";  // •
-		label += std::to_string(info.turns) + " turns \xE2\x80\xA2 ";
-		label += dateBuf;
-
-		fList->AddItem(new BStringItem(label.c_str()));
-	}
-}
-
-void SessionPanel::Toggle()
-{
-	fOpen = !fOpen;
-	if (fOpen) {
-		Refresh();
-		Show();
-	} else {
-		Hide();
-	}
-}
-
-const session::SessionInfo* SessionPanel::InfoAt(int32_t index) const
-{
-	if (index < 0 || index >= static_cast<int32_t>(fSessions.size()))
-		return nullptr;
-	return &fSessions[static_cast<size_t>(index)];
-}
-
-
-// ===========================================================================
 // ChatWindow
 // ===========================================================================
 
@@ -782,6 +715,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 		fStyler = new styling::CodeStyler(fTheme, fLangSet);
 	}
 
+	_BuildMenuBar();
 	_BuildLayout();
 
 	// Markdown renderer (needs fOutput to exist).
@@ -790,17 +724,12 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Create the slash-command popup.
 	fCommandPopup = new CommandPopup(this);
 
-	// Ensure BFS attribute indexes exist for fast session queries.
-	session::EnsureIndexes();
-
 	// Update title with model name.
 	_UpdateTitle();
 
 	// Register keyboard shortcuts.
-	AddShortcut('N', B_COMMAND_KEY, new BMessage(gui::MSG_NEW_CHAT));
 	AddShortcut('L', B_COMMAND_KEY, new BMessage(gui::MSG_CLEAR_OUTPUT));
 	AddShortcut(',', B_COMMAND_KEY, new BMessage(gui::MSG_SETTINGS));
-	AddShortcut('H', B_COMMAND_KEY, new BMessage(gui::MSG_SESSIONS));
 }
 
 ChatWindow::~ChatWindow()
@@ -810,6 +739,54 @@ ChatWindow::~ChatWindow()
 	if (fWorker.joinable()) fWorker.detach();
 	delete fSink;
 	delete fSpinnerTimer;
+}
+
+// ---------------------------------------------------------------------------
+// _BuildMenuBar — native BMenuBar with File, Edit, and Help menus.
+// ---------------------------------------------------------------------------
+
+void ChatWindow::_BuildMenuBar()
+{
+	fMenuBar = new BMenuBar("menubar");
+
+	// ── File ────────────────────────────────────────────────────────────────
+	BMenu* fileMenu = new BMenu("File");
+	fileMenu->AddItem(new BMenuItem("Settings\xE2\x80\xA6", // …
+		new BMessage(gui::MSG_SETTINGS), ','));
+	fileMenu->AddSeparatorItem();
+	fileMenu->AddItem(new BMenuItem("Quit",
+		new BMessage(B_QUIT_REQUESTED), 'Q'));
+	fMenuBar->AddItem(fileMenu);
+
+	// ── Edit ────────────────────────────────────────────────────────────────
+	BMenu* editMenu = new BMenu("Edit");
+	editMenu->AddItem(new BMenuItem("Clear Chat",
+		new BMessage(gui::MSG_CLEAR_OUTPUT), 'L'));
+	fMenuBar->AddItem(editMenu);
+
+	// ── Tools ───────────────────────────────────────────────────────────────
+	// Ludicrous mode: auto-approves every tool permission for the session.
+	// The menu item carries a checkmark that mirrors api::g_ludicrous_mode.
+	BMenu* toolsMenu = new BMenu("Tools");
+	fLudicrousItem = new BMenuItem(
+		"\xE2\x9A\xA1 Ludicrous Mode  \xE2\x80\x94  auto-approve all tools",
+		new BMessage(gui::MSG_LUDICROUS));
+	fLudicrousItem->SetMarked(api::g_ludicrous_mode.load());
+	toolsMenu->AddItem(fLudicrousItem);
+	fMenuBar->AddItem(toolsMenu);
+
+	// ── Help ────────────────────────────────────────────────────────────────
+	BMenu* helpMenu = new BMenu("Help");
+	helpMenu->AddItem(new BMenuItem("Documentation",
+		new BMessage(gui::MSG_HELP_DOCS)));
+	helpMenu->AddItem(new BMenuItem("Show Markdown Demo",
+		new BMessage(gui::MSG_DEMO_MARKDOWN)));
+	helpMenu->AddSeparatorItem();
+	helpMenu->AddItem(new BMenuItem("About Claude\xE2\x80\xA6", // …
+		new BMessage(gui::MSG_ABOUT)));
+	fMenuBar->AddItem(helpMenu);
+
+	AddChild(fMenuBar);
 }
 
 // ---------------------------------------------------------------------------
@@ -849,10 +826,6 @@ void ChatWindow::_BuildLayout()
 
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
-	fInputScroll = new BScrollView("inputscroll", fInput,
-	                               0, false, true, B_FANCY_BORDER);
-	fInputScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 54));
-	fInputScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 180));
 
 	// ── Buttons ──────────────────────────────────────────────────────────────
 	fSend = new BButton("send", "Send", new BMessage(gui::MSG_SEND));
@@ -867,22 +840,20 @@ void ChatWindow::_BuildLayout()
 	_PopulateModelMenu();
 
 	// ── Secondary toolbar buttons ─────────────────────────────────────────────
-	fNewBtn      = new BButton("newbtn",      "New",      new BMessage(gui::MSG_NEW_CHAT));
 	fClearBtn    = new BButton("clearbtn",    "Clear",    new BMessage(gui::MSG_CLEAR_OUTPUT));
 	fSettingsBtn = new BButton("settingsbtn", "\xE2\x9A\x99", // ⚙
 	                            new BMessage(gui::MSG_SETTINGS));
 	fSettingsBtn->SetToolTip("Settings (Cmd+,)");
-	fSessionBtn  = new BButton("sessionbtn",  "History",  new BMessage(gui::MSG_SESSIONS));
-	fSessionBtn->SetToolTip("Session history (Cmd+H)");
 
-	// ── Session panel (left) + Settings panel (right) ─────────────────────────
-	fSessionPanel = new SessionPanel(this);
-	fSettings     = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec);
+	// ── Settings panel (right) ────────────────────────────────────────────────
+	fSettings = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec,
+	                               fWorkingDir, fModelField);
 
 	// ── Layout ────────────────────────────────────────────────────────────────
+	// Input row: spinner | input (expands) | vertical button column
+	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.AddGroup(B_HORIZONTAL, 0)
-			.Add(fSessionPanel, 0.0f)
 			.Add(fScroll, 1.0f)
 			.Add(fSettings, 0.0f)
 		.End()
@@ -890,19 +861,14 @@ void ChatWindow::_BuildLayout()
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
 			.Add(fSpinner, 0.0f)
-			.Add(fInputScroll, 1.0f)
+			.Add(fInput, 1.0f)
 			.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
 				.Add(fSend)
 				.Add(fStop)
+				.Add(fClearBtn)
+				.Add(fSettingsBtn)
+				.AddGlue()
 			.End()
-		.End()
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.SetInsets(B_USE_SMALL_INSETS, 0, B_USE_SMALL_INSETS, B_USE_SMALL_INSETS)
-			.Add(fModelField, 1.0f)
-			.Add(fNewBtn)
-			.Add(fClearBtn)
-			.Add(fSessionBtn)
-			.Add(fSettingsBtn)
 		.End()
 	.End();
 
@@ -965,6 +931,8 @@ void ChatWindow::_RepositionOverlays()
 	fJumpBtn->MoveTo(sb.right - bw - 12.0f, sb.bottom - bh - 12.0f);
 }
 
+// Recompute the input scroll view's maximum height so it never takes more
+// than 30 % of the window height (with a hard floor of kMinLines).
 void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
@@ -996,9 +964,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_NEW_CHAT:
 		_NewChat();
-		break;
-
-	case gui::MSG_CLEAR_OUTPUT:
+		break;case gui::MSG_CLEAR_OUTPUT:
 		_ClearOutput();
 		break;
 
@@ -1015,29 +981,34 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			fMaxTokens            = fSettings->MaxTokens();
 			fNotificationsEnabled = fSettings->NotificationsEnabled();
 			fNotifyMinSec         = fSettings->NotifyMinSeconds();
+			fWorkingDir           = fSettings->WorkingDir();
 		}
 		fSettings->Toggle();
 		break;
 
-	case gui::MSG_SESSIONS:
-		fSessionPanel->Toggle();
-		break;
-
-	case gui::MSG_SESSION_LOAD: {
-		if (!fSessionPanel) break;
-		const int32_t idx = fSessionPanel->fList
-		    ? fSessionPanel->fList->CurrentSelection() : -1;
-		const session::SessionInfo* info = fSessionPanel->InfoAt(idx);
-		if (info) _LoadSession(info->path);
+	case gui::MSG_BROWSE_WORKDIR: {
+		// Open a directory-picker panel. The reply goes to this window
+		// as B_REFS_RECEIVED so we can extract the chosen path and push
+		// it back into the working-dir field.
+		BFilePanel* panel = new BFilePanel(B_OPEN_PANEL,
+		                                   new BMessenger(this),
+		                                   nullptr,
+		                                   B_DIRECTORY_NODE,
+		                                   false); // single selection
+		panel->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
+		panel->Show();
+		// panel deletes itself via BFilePanel's built-in quit handling.
 		break;
 	}
 
+	
+
 	case gui::MSG_POPUP_UPDATE: {
-		if (!fCommandPopup || !fInputScroll) break;
+		if (!fCommandPopup || !fInput) break;
 		const char* prefix = nullptr;
 		msg->FindString("prefix", &prefix);
-		// Compute screen point: top-left of the input scroll view.
-		BPoint pt = fInputScroll->Frame().LeftTop();
+		// Compute screen point: top-left of the input view.
+		BPoint pt = fInput->Frame().LeftTop();
 		ConvertToScreen(&pt);
 
 		fCommandPopup->Show(prefix ? prefix : "/", pt);
@@ -1067,9 +1038,31 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case B_SIMPLE_DATA:
-	case B_REFS_RECEIVED:
-		_RefsReceived(msg);
+	case B_REFS_RECEIVED: {
+		// If the message carries a directory ref from the working-dir
+		// BFilePanel, push it into the settings panel; otherwise treat it
+		// as a file-drop and forward to _RefsReceived.
+		bool handledByPanel = false;
+		if (fSettings) {
+			entry_ref ref;
+			if (msg->FindRef("refs", &ref) == B_OK) {
+				BEntry entry(&ref);
+				if (entry.IsDirectory()) {
+					BPath path(&ref);
+					if (path.InitCheck() == B_OK) {
+						fSettings->SetValues(fSettings->SystemPrompt(),
+						                     fSettings->MaxTokens(),
+						                     fSettings->NotifyMinSeconds(),
+						                     path.Path());
+						handledByPanel = true;
+					}
+				}
+			}
+		}
+		if (!handledByPanel)
+			_RefsReceived(msg);
 		break;
+	}
 
 	case gui::MSG_MODELS_READY: {
 		// Background fetch returned — rebuild the model menu with live data.
@@ -1273,8 +1266,6 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 		// Auto-save session to BFS after every completed turn.
 		_SaveSession();
-		if (fSessionPanel && fSessionPanel->IsOpen())
-			fSessionPanel->Refresh();
 
 		// Desktop notification — always fire for longer turns (>5 s) so
 		// the user knows the result is ready even while focused on the app
@@ -1328,6 +1319,64 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				notif.Send();
 			}
 		}
+		break;
+	}
+
+	case gui::MSG_ABOUT: {
+		// Build a native BAboutWindow with the app icon loaded from the
+		// running binary via BAppFileInfo — the same pattern used by
+		// MountEncrypted and other polished Haiku apps.
+		BAboutWindow* about = new BAboutWindow("Claude",
+		    "application/x-vnd.Microgeni-claude-gui");
+
+		// Pull the HVIF icon that was stamped onto the binary at link time.
+		app_info info;
+		if (be_roster->GetRunningAppInfo(be_app->Team(), &info) == B_OK) {
+			BFile appFile(&info.ref, B_READ_ONLY);
+			BAppFileInfo fileInfo(&appFile);
+			BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
+			if (fileInfo.GetIcon(icon, B_LARGE_ICON) == B_OK)
+				about->SetIcon(icon);
+			else
+				delete icon;
+		}
+
+		about->SetVersion(config::kVersion);
+		about->AddDescription(
+		    "A native Haiku GUI for the Anthropic Claude API.");
+
+		const char* authors[] = {
+			"Daniel Benjaminsson <info@microgeni.se>",
+			nullptr
+		};
+		about->AddAuthors(authors);
+		about->AddCopyright(2025, "Microgeni AB");
+
+		about->Show();
+		break;
+	}
+
+	case gui::MSG_HELP_DOCS: {
+		// Open the project README on GitHub in the default browser.
+		const std::string url = "https://github.com/reddyishere/haiku-claude-cli";
+		const std::string cmd = "open " + url + " &";
+		std::system(cmd.c_str());  // flawfinder: ignore
+		break;
+	}
+
+	case gui::MSG_DEMO_MARKDOWN:
+		_ShowMarkdownDemo();
+		break;
+
+	case gui::MSG_LUDICROUS: {
+		// Toggle ludicrous mode and update the menu checkmark to match.
+		const bool nowOn = !api::g_ludicrous_mode.load();
+		api::g_ludicrous_mode.store(nowOn);
+		if (fLudicrousItem) fLudicrousItem->SetMarked(nowOn);
+		const std::string notice = nowOn
+			? "\xE2\x9A\xA1 Ludicrous mode ON \xE2\x80\x94 all tool permissions auto-approved\n"
+			: "\xE2\x9A\xA1 Ludicrous mode OFF \xE2\x80\x94 permission prompts restored\n";
+		_AppendToolLine(notice);
 		break;
 	}
 
@@ -1529,7 +1578,8 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 	const config::Auth   auth         = fAuth;
 	const std::string    model        = fModel;
 	const int            maxTokens    = fMaxTokens;
-	const std::string    systemPrompt = config::ComposeSystem(fSystemPrompt);
+	const std::string    systemPrompt = config::ComposeSystem(fSystemPrompt,
+	                                                           fWorkingDir);
 	nlohmann::json       messages     = fMessages;
 	messages.push_back({{"role", "user"}, {"content", userText}});
 
@@ -1612,11 +1662,25 @@ void ChatWindow::_HandlePermRequest(BMessage* msg)
 		body += (pv.size() > 400) ? pv.substr(0, 400) + "\xE2\x80\xA6" : pv;
 	}
 
+	// Three-button alert:
+	//   button 0 (B_ESCAPE shortcut) — Deny
+	//   button 1                     — Allow once
+	//   button 2                     — Allow all (enable ludicrous mode)
 	BAlert* alert = new BAlert("Tool Permission", body.c_str(),
-	    "Deny", "Allow", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	    "Deny", "Allow", "\xE2\x9A\xA1 Allow All",
+	    B_WIDTH_AS_USUAL, B_WARNING_ALERT);
 	alert->SetShortcut(0, B_ESCAPE);
 	const int32 choice = alert->Go();
-	if (fSink) fSink->DeliverPermissionReply(choice == 1);
+
+	if (choice == 2) {
+		// Engage ludicrous mode — auto-approve this and all future tools.
+		api::g_ludicrous_mode.store(true);
+		if (fLudicrousItem) fLudicrousItem->SetMarked(true);
+		_AppendToolLine("\xE2\x9A\xA1 Ludicrous mode engaged \xE2\x80\x94 all tools auto-approved\n");
+		if (fSink) fSink->DeliverPermissionReply(true);
+	} else {
+		if (fSink) fSink->DeliverPermissionReply(choice == 1);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1725,6 +1789,136 @@ void ChatWindow::_RefsReceived(BMessage* msg)
 		if (entry.GetPath(&path) == B_OK)
 			_InsertFileContent(path.Path());
 	}
+}
+
+void ChatWindow::_ShowMarkdownDemo()
+{
+	// Emit a user "question" label so the demo looks like a real turn.
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+	_AppendText("Show me a markdown rendering demo\n");
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+
+	// ── Rich markdown sample ─────────────────────────────────────────────────
+	// Every feature supported by md::MdRenderer is exercised here so the
+	// developer can visually verify the renderer at a glance.
+	static const char kDemo[] =
+		// H1 heading
+		"# Markdown Rendering Demo\n"
+		"\n"
+		"Welcome to the **Claude GUI** markdown renderer. "
+		"This demo exercises every feature supported by `md::MdRenderer`.\n"
+		"\n"
+		// H2 heading
+		"## Inline Formatting\n"
+		"\n"
+		"You can write **bold text**, *italic text*, or `inline code` "
+		"within a paragraph. Links look like this: "
+		"[Haiku OS](https://www.haiku-os.org). "
+		"Combinations like **bold and *nested italic*** fall back gracefully.\n"
+		"\n"
+		// H3 heading
+		"### Emphasis Variants\n"
+		"\n"
+		"- __double-underscore bold__\n"
+		"- _single-underscore italic_\n"
+		"- `backtick code` in a list item\n"
+		"- Plain text for comparison\n"
+		"\n"
+		// Horizontal rule
+		"---\n"
+		"\n"
+		// H2
+		"## Lists\n"
+		"\n"
+		"**Unordered** (hyphen markers):\n"
+		"\n"
+		"- Haiku R1 beta 4\n"
+		"- Haiku R1 beta 5\n"
+		"- Haiku R1 (upcoming stable release)\n"
+		"\n"
+		"**Ordered** list:\n"
+		"\n"
+		"1. Clone the repository\n"
+		"2. Run `make` to build\n"
+		"3. Run `make test` to verify\n"
+		"4. Enjoy native Claude on Haiku!\n"
+		"\n"
+		"**Nested** unordered list (two-space indent):\n"
+		"\n"
+		"- Widgets\n"
+		"  - BTextView\n"
+		"  - BButton\n"
+		"  - BScrollView\n"
+		"- Layout\n"
+		"  - BGroupLayout\n"
+		"  - BLayoutBuilder\n"
+		"\n"
+		// Horizontal rule
+		"---\n"
+		"\n"
+		// H2
+		"## Blockquote\n"
+		"\n"
+		"> *\"The best way to predict the future is to invent it.\"*\n"
+		"> \xE2\x80\x94 Alan Kay\n"  // — Alan Kay
+		"\n"
+		// H2
+		"## Headings at Every Level\n"
+		"\n"
+		"# H1 \xE2\x80\x94 golden, large\n"    // em dash
+		"## H2 \xE2\x80\x94 sky-blue, medium\n"
+		"### H3 \xE2\x80\x94 soft-green, slight\n"
+		"\n"
+		// H2
+		"## Table\n"
+		"\n"
+		"| Language   | Paradigm     | Year |\n"
+		"| ---------- | ------------ | ---- |\n"
+		"| C++        | Multi-paradigm | 1985 |\n"
+		"| Python     | Imperative   | 1991 |\n"
+		"| Rust       | Systems      | 2010 |\n"
+		"| Haskell    | Functional   | 1990 |\n"
+		"\n"
+		// H2
+		"## Horizontal Rules\n"
+		"\n"
+		"Three variants all render as the same box-drawing separator:\n"
+		"\n"
+		"---\n"
+		"\n"
+		"***\n"
+		"\n"
+		"___\n"
+		"\n"
+		// H2
+		"## Code Block (via ChatWindow fence handler)\n"
+		"\n"
+		"Fenced code blocks (` ``` `) are handled upstream by `_ProcessChunk` "
+		"and `_FlushCodeBlock`, then rendered as monospace styled runs:\n"
+		"\n"
+		"```cpp\n"
+		"// Say hello from Haiku!\n"
+		"#include <stdio.h>\n"
+		"int main() {\n"
+		"    printf(\"Hello from Haiku!\\n\");\n"
+		"    return 0;\n"
+		"}\n"
+		"```\n"
+		"\n"
+		// Closing paragraph
+		"---\n"
+		"\n"
+		"That covers **all** features. "
+		"Use **Help \xE2\x86\x92 Show Markdown Demo** any time to re-run this. "  // →
+		"Happy hacking on Haiku! \xF0\x9F\x90\xBE\n";  // 🐾
+
+	if (fMdRenderer) {
+		fMdRenderer->Write(kDemo);
+		fMdRenderer->Flush();
+	} else {
+		_AppendText(kDemo);
+	}
+	_ScrollToBottom();
 }
 
 void ChatWindow::_InsertFileContent(const std::string& path)

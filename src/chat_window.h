@@ -8,7 +8,10 @@
 
 #include <Button.h>
 #include <ListView.h>
+#include <Menu.h>
+#include <MenuBar.h>
 #include <MenuField.h>
+#include <MenuItem.h>
 #include <Messenger.h>
 #include <PopUpMenu.h>
 #include <ScrollView.h>
@@ -25,7 +28,6 @@
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
-#include "session_store.h"
 
 // Additional MSG_ codes beyond those in gui_sink.h.
 namespace gui {
@@ -37,8 +39,7 @@ constexpr uint32_t MSG_SETTINGS     = 'STNG'; // toggle settings panel
 constexpr uint32_t MSG_TOKENS       = 'TOKN'; // int32 "input","output","max"
 constexpr uint32_t MSG_JUMP_BOTTOM  = 'JBOT'; // jump-to-bottom button
 constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
-constexpr uint32_t MSG_SESSIONS     = 'SESS'; // toggle session panel
-constexpr uint32_t MSG_SESSION_LOAD = 'SLOD'; // load a session (int32 "index")
+// MSG_SESSIONS / MSG_SESSION_LOAD reserved for future project.
 constexpr uint32_t MSG_COMPLETE_CMD = 'CCMD'; // slash command selected (string "cmd")
 constexpr uint32_t MSG_POPUP_UPDATE = 'PUPT'; // InputView → ChatWindow: update popup
 constexpr uint32_t MSG_POPUP_NEXT   = 'PNXT'; // InputView → ChatWindow: next item
@@ -46,6 +47,11 @@ constexpr uint32_t MSG_POPUP_PREV   = 'PPRV'; // InputView → ChatWindow: prev 
 constexpr uint32_t MSG_POPUP_CONF   = 'PCNF'; // InputView → ChatWindow: confirm
 constexpr uint32_t MSG_POPUP_HIDE   = 'PDIS'; // InputView → ChatWindow: hide
 constexpr uint32_t MSG_MODELS_READY = 'MDLS'; // background model fetch complete
+constexpr uint32_t MSG_ABOUT        = 'ABUT'; // Help > About Claude
+constexpr uint32_t MSG_HELP_DOCS    = 'HDOC'; // Help > Documentation
+constexpr uint32_t MSG_DEMO_MARKDOWN = 'DMMD'; // Help > Show Markdown Demo
+constexpr uint32_t MSG_LUDICROUS     = 'LUDC'; // Tools > Ludicrous Mode toggle
+constexpr uint32_t MSG_BROWSE_WORKDIR = 'BRWD'; // Settings: browse for working dir
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,15 +76,11 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InputView — multi-line BTextView that sends on Enter, inserts newline on
-// Shift+Enter. Auto-sizes vertically up to kMaxInputLines. Ctrl+Up/Down
+// InputView — single-row BTextView that sends on Enter. Up/Down arrow keys
 // navigate prompt history. Escape forwards MSG_CANCEL to the window.
 // ─────────────────────────────────────────────────────────────────────────────
 class InputView : public BTextView {
 public:
-	static const int kMinLines = 2;  // minimum visible lines
-	static const int kMaxLines = 10; // maximum before scrolling
-
 	explicit InputView(const char* name);
 
 	void	AttachedToWindow() override;
@@ -97,10 +99,6 @@ public:
 	// Load / save history from a file (one entry per line).
 	void	LoadHistory(const std::string& path);
 	void	SaveHistory(const std::string& path) const;
-
-	// Adjust height to fit content up to kMaxLines lines. Returns the new
-	// preferred height in pixels; caller must resize the container.
-	float	PreferredHeight() const;
 
 	// Enable / disable editing (analogous to BControl::SetEnabled).
 	void	SetEnabled(bool enabled);
@@ -146,36 +144,40 @@ private:
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SettingsPanel — slide-in panel docked on the right side of the window.
-// Contains system-prompt editor, max-tokens field, and a close button.
-// Hidden width = 0; shown width = kPanelWidth.
+// Contains the model picker, system-prompt editor, max-tokens field, and a
+// close button. Hidden width = 0; shown width = kPanelWidth.
 // ─────────────────────────────────────────────────────────────────────────────
 class SettingsPanel : public BView {
 public:
 	static constexpr float kPanelWidth = 280.0f;
 
 	SettingsPanel(const std::string& systemPrompt, int maxTokens,
-	              int notifyMinSec);
+	              int notifyMinSec, const std::string& workingDir = {},
+	              BMenuField* modelField = nullptr);
 
 	// Populate fields from current config.
 	void	SetValues(const std::string& systemPrompt, int maxTokens,
-	                  int notifyMinSec);
+	                  int notifyMinSec, const std::string& workingDir = {});
 
 	// Read back edited values.
 	std::string	SystemPrompt() const;
 	int         MaxTokens() const;
 	bool        NotificationsEnabled() const;
 	int         NotifyMinSeconds() const;
+	std::string WorkingDir() const;
 
 	bool	IsOpen() const { return fOpen; }
 	void	Toggle();
 
 private:
 	void	_BuildLayout(const std::string& systemPrompt, int maxTokens,
-	                     int notifyMinSec);
+	                     int notifyMinSec, const std::string& workingDir,
+	                     BMenuField* modelField);
 
 	BTextView*    fSysPromptView  = nullptr;
 	BTextControl* fMaxTokensCtl   = nullptr;
 	BSlider*      fNotifyDelay    = nullptr;
+	BTextControl* fWorkingDirCtl  = nullptr;
 	bool          fOpen           = false;
 };
 
@@ -198,40 +200,6 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SessionPanel — slide-in panel docked on the LEFT side of the window.
-// Lists saved sessions sorted by most-recent-first. Click a row to load it.
-// ─────────────────────────────────────────────────────────────────────────────
-class BListView;
-class BScrollView;
-
-class SessionPanel : public BView {
-public:
-	static constexpr float kPanelWidth = 240.0f;
-
-	explicit SessionPanel(BHandler* target);
-
-	// Reload session list from disk and repopulate the BListView.
-	void	Refresh();
-
-	bool	IsOpen() const { return fOpen; }
-	void	Toggle();
-
-	// Return the SessionInfo for row index, or nullptr if out of range.
-	const session::SessionInfo* InfoAt(int32_t index) const;
-
-	// Public so ChatWindow::MessageReceived can query the selection.
-	BListView*                      fList    = nullptr;
-
-private:
-	void	_BuildLayout();
-
-	BScrollView*                    fScroll  = nullptr;
-	BHandler*                       fTarget  = nullptr;
-	std::vector<session::SessionInfo> fSessions;
-	bool                            fOpen    = false;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ChatWindow — the main application window.
 //
 // Layout (simplified):
@@ -242,8 +210,10 @@ private:
 //   ├──────────────────────────────────┤              │
 //   │  [token bar 14px]                │              │
 //   ├──────────────────────────────────┘              │
-//   │  [spinner] [input BTextView]  [Send] [Stop]     │
-//   │  [model menu] [New] [Clear] [⚙ Settings]        │
+//   │  [spinner] [input BTextView]  [Send  ]          │
+//   │                               [Clear ]          │
+//   │                               [⚙ Stng]          │
+//   (the model picker now lives inside the Settings panel)
 //   └─────────────────────────────────────────────────┘
 //
 // Worker thread and message protocol:
@@ -267,6 +237,7 @@ public:
 private:
 	// ── Layout ──────────────────────────────────────────────────────────────
 	void _BuildLayout();
+	void _BuildMenuBar();       // native BMenuBar (File / Edit / Help)
 	void _PopulateModelMenu();
 	void _RepositionOverlays();  // floating jump-to-bottom button
 
@@ -292,20 +263,21 @@ private:
 	void _SaveSession();         // persist current conversation to BFS
 	void _LoadSession(const std::string& path); // restore a saved session
 	void _InsertFileContent(const std::string& path); // drag-drop helper
+	void _ShowMarkdownDemo();    // render a rich markdown example into the chat output
 
 	// ── Widgets ─────────────────────────────────────────────────────────────
+	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
+	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
 	BTextView*     fOutput        = nullptr;
 	BScrollView*   fScroll        = nullptr;
 	BButton*       fJumpBtn       = nullptr;  // floating "↓" overlay button
 	TokenBar*      fTokenBar      = nullptr;
 	SpinnerView*   fSpinner       = nullptr;
 	InputView*     fInput         = nullptr;
-	BScrollView*   fInputScroll   = nullptr;
 	BButton*       fSend          = nullptr;
 	BButton*       fStop          = nullptr;  // replaces Send while busy
 	BMenuField*    fModelField    = nullptr;
 	BPopUpMenu*    fModelMenu     = nullptr;
-	BButton*       fNewBtn        = nullptr;
 	BButton*       fClearBtn      = nullptr;
 	BButton*       fSettingsBtn   = nullptr;
 	SettingsPanel* fSettings      = nullptr;
@@ -315,6 +287,7 @@ private:
 	std::string    fModel;
 	int            fMaxTokens;
 	std::string    fSystemPrompt;
+	std::string    fWorkingDir;   // working directory shown to Claude; empty = getcwd()
 	nlohmann::json fMessages;
 	int            fTurnCount     = 0;
 	std::string    fConvTopic;    // first user message (used for window title)
@@ -344,8 +317,6 @@ private:
 
 	// ── Session persistence ──────────────────────────────────────────────────
 	std::string    fSessionPath;   // path of the current saved session file
-	SessionPanel*  fSessionPanel  = nullptr;
-	BButton*       fSessionBtn    = nullptr;
 
 	// ── Slash-command autocomplete ───────────────────────────────────────────
 	CommandPopup*  fCommandPopup  = nullptr;
