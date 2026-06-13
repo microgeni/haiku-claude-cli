@@ -83,7 +83,12 @@ PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all gui clean install install-gui package release lint security check
+# GUI HPKG — separate package (app:Claude) with its own staging dir.
+GUI_PKG_NAME  ?= claude_gui
+GUI_PKG_STAGE := $(BUILDDIR)/pkg-gui
+GUI_PKG_FILE  := $(BUILDDIR)/$(GUI_PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
+
+.PHONY: all gui clean install install-gui package package-gui release lint security check
 
 all: $(BIN)
 
@@ -270,6 +275,47 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@echo
 	@echo "Created: $(PKG_FILE)"
 	@ls -l "$(PKG_FILE)"
+
+# Build a Haiku HPKG for the GUI app. Requires Haiku's `package` tool and
+# a built GUI binary. Stages Claude into apps/, the style/language data
+# into data/claude-gui/, and docs, then writes the .hpkg.
+package-gui: $(GUI_PKG_FILE)
+
+$(GUI_PKG_FILE): $(GUI_BIN) .PackageInfoGui.in | $(BUILDDIR)
+	@command -v package >/dev/null 2>&1 || { \
+	    echo "error: 'package' command not found — HPKG build requires Haiku."; \
+	    exit 1; \
+	}
+	rm -rf "$(GUI_PKG_STAGE)"
+	mkdir -p "$(GUI_PKG_STAGE)/apps" \
+	         "$(GUI_PKG_STAGE)/data/claude-gui/styles" \
+	         "$(GUI_PKG_STAGE)/data/claude-gui/languages" \
+	         "$(GUI_PKG_STAGE)/documentation/packages/claude-gui"
+	cp "$(GUI_BIN)" "$(GUI_PKG_STAGE)/apps/Claude"
+	cp CHANGELOG.md "$(GUI_PKG_STAGE)/documentation/packages/claude-gui/CHANGELOG.md"
+	cp README.md    "$(GUI_PKG_STAGE)/documentation/packages/claude-gui/ReadMe.md"
+	@if [ -d assets/data/styles ]; then \
+	    cp assets/data/styles/*    "$(GUI_PKG_STAGE)/data/claude-gui/styles/"    2>/dev/null || true; \
+	fi
+	@if [ -d assets/data/languages ]; then \
+	    cp assets/data/languages/* "$(GUI_PKG_STAGE)/data/claude-gui/languages/" 2>/dev/null || true; \
+	fi
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON onto staged Claude"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(GUI_PKG_STAGE)/apps/Claude"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(GUI_APP_SIG) onto staged Claude"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(GUI_PKG_STAGE)/apps/Claude"; \
+	fi
+	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
+	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
+	    .PackageInfoGui.in > "$(GUI_PKG_STAGE)/.PackageInfo"
+	rm -f "$(GUI_PKG_FILE)"
+	package create -C "$(GUI_PKG_STAGE)" "$(GUI_PKG_FILE)"
+	@echo
+	@echo "Created: $(GUI_PKG_FILE)"
+	@ls -l "$(GUI_PKG_FILE)"
 
 -include $(DEPS)
 
