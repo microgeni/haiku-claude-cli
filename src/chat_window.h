@@ -57,6 +57,11 @@ constexpr uint32_t MSG_LUDICROUS     = 'LUDC'; // Tools > Ludicrous Mode toggle
 constexpr uint32_t MSG_BROWSE_WORKDIR = 'BRWD'; // Settings: browse for working dir
 constexpr uint32_t MSG_EXPORT         = 'EXPT'; // File > Export Transcript…
 constexpr uint32_t MSG_EXPORT_SAVE    = 'EXPS'; // B_SAVE_REQUESTED from export panel
+constexpr uint32_t MSG_FIND           = 'FIND'; // Cmd-F: toggle the find bar
+constexpr uint32_t MSG_FIND_NEXT      = 'FNXT'; // find bar: next match / Enter
+constexpr uint32_t MSG_FIND_PREV      = 'FPRV'; // find bar: previous match
+constexpr uint32_t MSG_FIND_CLOSE     = 'FCLO'; // find bar: close / Esc
+constexpr uint32_t MSG_FIND_LIVE      = 'FLIV'; // find bar: query text changed
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -292,6 +297,10 @@ private:
 	void _DismissWelcome();      // hide the startup splash once a turn begins
 	void _ExportTranscript(const std::string& path); // write fMessages as Markdown
 
+	// ── Find in conversation (Cmd-F) ──────────────────────────────────────────
+	void _ToggleFindBar();              // show/hide + focus the find field
+	void _FindNext(bool forward);       // select+scroll to next/prev match (wraps)
+
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
@@ -309,6 +318,12 @@ private:
 	BButton*       fClearBtn      = nullptr;
 	BButton*       fSettingsBtn   = nullptr;
 	SettingsPanel* fSettings      = nullptr;
+
+	// ── Find bar (Cmd-F) ──────────────────────────────────────────────────────
+	BView*         fFindBar       = nullptr;  // hidden container, between chat + input
+	BTextControl*  fFindField     = nullptr;  // query input
+	BStringView*   fFindStatus    = nullptr;  // "3 / 12" match counter
+	int32          fFindMatchStart = -1;      // offset of the current match
 
 	// ── Conversation state ───────────────────────────────────────────────────
 	config::Auth   fAuth;

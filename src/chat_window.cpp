@@ -926,6 +926,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Register keyboard shortcuts.
 	AddShortcut('L', B_COMMAND_KEY, new BMessage(gui::MSG_CLEAR_OUTPUT));
 	AddShortcut(',', B_COMMAND_KEY, new BMessage(gui::MSG_SETTINGS));
+	AddShortcut('F', B_COMMAND_KEY, new BMessage(gui::MSG_FIND));
 }
 
 ChatWindow::~ChatWindow()
@@ -1058,6 +1059,34 @@ void ChatWindow::_BuildLayout()
 	fSettings = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec,
 	                               fWorkingDir, fModelField);
 
+	// ── Find bar (hidden until Cmd-F) ─────────────────────────────────────────
+	// A thin horizontal strip: query field | ◀ | ▶ | counter | ✕.
+	fFindField = new BTextControl("findfield", nullptr, "",
+	                              new BMessage(gui::MSG_FIND_NEXT));
+	fFindField->SetModificationMessage(new BMessage(gui::MSG_FIND_LIVE));
+	fFindStatus = new BStringView("findstatus", "");
+	BButton* findPrev  = new BButton("findprev",  "\xE2\x97\x80", // ◀
+	                                  new BMessage(gui::MSG_FIND_PREV));
+	BButton* findNext  = new BButton("findnext",  "\xE2\x96\xB6", // ▶
+	                                  new BMessage(gui::MSG_FIND_NEXT));
+	BButton* findClose = new BButton("findclose", "\xE2\x9C\x95", // ✕
+	                                  new BMessage(gui::MSG_FIND_CLOSE));
+	findPrev->SetExplicitSize(BSize(32, B_SIZE_UNSET));
+	findNext->SetExplicitSize(BSize(32, B_SIZE_UNSET));
+	findClose->SetExplicitSize(BSize(32, B_SIZE_UNSET));
+
+	fFindBar = new BView("findbar", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
+	fFindBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	BLayoutBuilder::Group<>(fFindBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
+		.Add(new BStringView("findlabel", "Find:"), 0.0f)
+		.Add(fFindField, 1.0f)
+		.Add(findPrev, 0.0f)
+		.Add(findNext, 0.0f)
+		.Add(fFindStatus, 0.0f)
+		.Add(findClose, 0.0f)
+	.End();
+
 	// ── Layout ────────────────────────────────────────────────────────────────
 	// Input row: spinner | input (expands) | vertical button column
 	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
@@ -1070,6 +1099,7 @@ void ChatWindow::_BuildLayout()
 			.Add(fSettings, 0.0f)
 		.End()
 		.Add(fTokenBar, 0.0f)
+		.Add(fFindBar, 0.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
 			.Add(fSpinner, 0.0f)
@@ -1085,6 +1115,9 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	SetSizeLimits(420, 32767, 300, 32767);
+
+	// Find bar starts hidden; Cmd-F reveals it.
+	if (fFindBar) fFindBar->Hide();
 
 	// Give input focus on startup.
 	fInput->MakeFocus(true);
@@ -1212,6 +1245,32 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// panel deletes itself via BFilePanel's built-in quit handling.
 		break;
 	}
+
+	case gui::MSG_FIND:
+		_ToggleFindBar();
+		break;
+
+	case gui::MSG_FIND_NEXT:
+		_FindNext(true);
+		break;
+
+	case gui::MSG_FIND_LIVE:
+		// Query text changed — re-search from the top without advancing
+		// past the current match.
+		fFindMatchStart = -1;
+		_FindNext(true);
+		break;
+
+	case gui::MSG_FIND_PREV:
+		_FindNext(false);
+		break;
+
+	case gui::MSG_FIND_CLOSE:
+		if (fFindBar && !fFindBar->IsHidden()) {
+			fFindBar->Hide();
+			fInput->MakeFocus(true);
+		}
+		break;
 
 	case gui::MSG_EXPORT: {
 		// Nothing to export on an empty conversation.
@@ -2311,6 +2370,96 @@ void ChatWindow::_ExportTranscript(const std::string& path)
 	nodeInfo.SetType("text/markdown");
 
 	_AppendToolLine("\xE2\x9C\x93 transcript exported to " + path + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Find in conversation (Cmd-F)
+// ---------------------------------------------------------------------------
+
+void ChatWindow::_ToggleFindBar()
+{
+	if (!fFindBar) return;
+	if (fFindBar->IsHidden()) {
+		fFindBar->Show();
+		if (fFindField) {
+			// Pre-fill with the current selection, if any, then focus.
+			int32 selStart = 0, selEnd = 0;
+			fOutput->GetSelection(&selStart, &selEnd);
+			if (selEnd > selStart && (selEnd - selStart) < 128) {
+				std::string sel(fOutput->Text() + selStart, selEnd - selStart);
+				fFindField->SetText(sel.c_str());
+			}
+			fFindField->MakeFocus(true);
+			if (BTextView* tv = fFindField->TextView())
+				tv->SelectAll();
+		}
+		fFindMatchStart = -1;
+	} else {
+		fFindBar->Hide();
+		fInput->MakeFocus(true);
+	}
+}
+
+// Select and scroll to the next (forward) or previous match of the find
+// field's text, searching case-insensitively over the chat output. Wraps
+// around the ends. Updates the "n / total" counter.
+void ChatWindow::_FindNext(bool forward)
+{
+	if (!fFindField || !fOutput) return;
+	const char* raw = fFindField->Text();
+	const std::string needle = raw ? raw : "";
+	if (needle.empty()) {
+		if (fFindStatus) fFindStatus->SetText("");
+		return;
+	}
+
+	// Case-insensitive haystack/needle copies.
+	auto lower = [](std::string s) {
+		for (char& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
+		return s;
+	};
+	const std::string hay = lower(fOutput->Text());
+	const std::string ndl = lower(needle);
+
+	// Count all matches and find the current/next one in the chosen
+	// direction relative to fFindMatchStart.
+	std::vector<size_t> matches;
+	for (size_t p = hay.find(ndl); p != std::string::npos;
+	     p = hay.find(ndl, p + 1))
+		matches.push_back(p);
+
+	if (matches.empty()) {
+		if (fFindStatus) fFindStatus->SetText("not found");
+		fFindMatchStart = -1;
+		return;
+	}
+
+	// Pick the target index relative to the current match (wraps).
+	int target = 0;
+	if (fFindMatchStart < 0) {
+		target = forward ? 0 : static_cast<int>(matches.size()) - 1;
+	} else {
+		// Locate the current match's index.
+		int cur = 0;
+		for (size_t i = 0; i < matches.size(); ++i)
+			if (static_cast<int32>(matches[i]) == fFindMatchStart) { cur = static_cast<int>(i); break; }
+		const int n = static_cast<int>(matches.size());
+		target = forward ? (cur + 1) % n : (cur - 1 + n) % n;
+	}
+
+	const size_t start = matches[target];
+	const int32  s = static_cast<int32>(start);
+	const int32  e = static_cast<int32>(start + ndl.size());
+	fFindMatchStart = s;
+
+	fOutput->Select(s, e);
+	fOutput->ScrollToSelection();
+
+	if (fFindStatus) {
+		const std::string label = std::to_string(target + 1) + " / "
+		                        + std::to_string(matches.size());
+		fFindStatus->SetText(label.c_str());
+	}
 }
 
 void ChatWindow::_LoadSession(const std::string& path)
