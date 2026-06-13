@@ -45,6 +45,7 @@
 #include <Window.h>
 
 #include <FilePanel.h>
+#include <ListItem.h>
 #include <MenuItem.h>
 #include <NodeInfo.h>
 #include <Path.h>
@@ -208,6 +209,17 @@ private:
 	sem_id fDoneSem;
 	int    fResult   = -1;
 	bool   fFinished = false;
+};
+
+// SessionItem — a BStringItem that remembers the .session file path so
+// the sidebar can load or delete the file behind a selected row.
+class SessionItem : public BStringItem {
+public:
+	SessionItem(const std::string& label, const std::string& path)
+		: BStringItem(label.c_str()), fPath(path) {}
+	const std::string& Path() const { return fPath; }
+private:
+	std::string fPath;
 };
 
 // Slider for the notification delay. Snaps to 10-second steps and shows a
@@ -1011,6 +1023,12 @@ void ChatWindow::_BuildMenuBar()
 		new BMessage(gui::MSG_ZOOM_RESET), '0'));
 	fMenuBar->AddItem(editMenu);
 
+	// ── View ────────────────────────────────────────────────────────────────
+	BMenu* viewMenu = new BMenu("View");
+	viewMenu->AddItem(new BMenuItem("Sessions",
+		new BMessage(gui::MSG_TOGGLE_SESSIONS), 'B'));
+	fMenuBar->AddItem(viewMenu);
+
 	// ── Tools ───────────────────────────────────────────────────────────────
 	// Ludicrous mode: auto-approves every tool permission for the session.
 	// The menu item carries a checkmark that mirrors api::g_ludicrous_mode.
@@ -1070,6 +1088,33 @@ void ChatWindow::_BuildLayout()
 
 	// ── Token bar ────────────────────────────────────────────────────────────
 	fTokenBar = new TokenBar();
+
+	// ── Session sidebar (left dock, hidden until View ▸ Sessions) ─────────────
+	fSessionList = new BListView("sessionlist", B_SINGLE_SELECTION_LIST);
+	fSessionList->SetSelectionMessage(nullptr); // single-click just highlights
+	fSessionList->SetInvocationMessage(           // double-click loads
+		new BMessage(gui::MSG_SESSION_SELECT));
+	fSessionScroll = new BScrollView("sessionscroll", fSessionList,
+	                                 0, false, true, B_FANCY_BORDER);
+	BButton* sessNew = new BButton("sessnew", "New",
+	                               new BMessage(gui::MSG_SESSION_NEW));
+	BButton* sessOpen = new BButton("sessopen", "Open",
+	                                new BMessage(gui::MSG_SESSION_SELECT));
+	BButton* sessDel = new BButton("sessdel", "Delete",
+	                               new BMessage(gui::MSG_SESSION_DELETE));
+	fSessionPanel = new BView("sessionpanel", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
+	fSessionPanel->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	BLayoutBuilder::Group<>(fSessionPanel, B_VERTICAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_SMALL_INSETS)
+		.Add(new BStringView("sesshdr", "Sessions"), 0.0f)
+		.Add(fSessionScroll, 1.0f)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+			.Add(sessNew)
+			.Add(sessOpen)
+			.Add(sessDel)
+		.End()
+	.End();
+	fSessionPanel->SetExplicitMaxSize(BSize(220, B_SIZE_UNLIMITED));
 
 	// ── Spinner ──────────────────────────────────────────────────────────────
 	fSpinner = new SpinnerView();
@@ -1132,6 +1177,7 @@ void ChatWindow::_BuildLayout()
 	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.AddGroup(B_HORIZONTAL, 0)
+			.Add(fSessionPanel, 0.0f)
 			.AddGroup(B_VERTICAL, 0)
 				.Add(fWelcome, 0.0f)
 				.Add(fScroll, 1.0f)
@@ -1158,6 +1204,9 @@ void ChatWindow::_BuildLayout()
 
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
+
+	// Session sidebar starts hidden; View ▸ Sessions reveals it.
+	if (fSessionPanel) fSessionPanel->Hide();
 
 	// Give input focus on startup.
 	fInput->MakeFocus(true);
@@ -1300,6 +1349,23 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_ZOOM_RESET:
 		_Zoom(0);
+		break;
+
+	case gui::MSG_TOGGLE_SESSIONS:
+		_ToggleSessionList();
+		break;
+
+	case gui::MSG_SESSION_SELECT:
+		_LoadSelectedSession();
+		break;
+
+	case gui::MSG_SESSION_DELETE:
+		_DeleteSelectedSession();
+		break;
+
+	case gui::MSG_SESSION_NEW:
+		_NewChat();
+		_RefreshSessionList();
 		break;
 
 	case gui::MSG_FIND_NEXT:
@@ -1715,6 +1781,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 		// Auto-save session to BFS after every completed turn.
 		_SaveSession();
+
+		// Keep the sidebar current if it's open (title/turn count may
+		// have changed, or this may be a brand-new session file).
+		if (fSessionPanel && !fSessionPanel->IsHidden())
+			_RefreshSessionList();
 
 		// Desktop notification — always fire for longer turns (>5 s) so
 		// the user knows the result is ready even while focused on the app
@@ -2593,6 +2664,78 @@ void ChatWindow::_ApplyZoom()
 	fAppliedZoom = fZoomFactor;
 	fZoomedLen   = len;
 	fOutput->Invalidate();
+}
+
+// ---------------------------------------------------------------------------
+// Session sidebar
+// ---------------------------------------------------------------------------
+
+void ChatWindow::_ToggleSessionList()
+{
+	if (!fSessionPanel) return;
+	if (fSessionPanel->IsHidden()) {
+		_RefreshSessionList();
+		fSessionPanel->Show();
+	} else {
+		fSessionPanel->Hide();
+	}
+}
+
+// Repopulate the list from the BFS session store, newest first. Marks the
+// row matching the currently-open session (fSessionPath) as selected.
+void ChatWindow::_RefreshSessionList()
+{
+	if (!fSessionList) return;
+
+	// Clear existing items.
+	for (int32 i = fSessionList->CountItems() - 1; i >= 0; --i)
+		delete fSessionList->RemoveItem(i);
+
+	const std::vector<session::SessionInfo> sessions = session::List();
+	int32 selectIdx = -1;
+	for (size_t i = 0; i < sessions.size(); ++i) {
+		const session::SessionInfo& s = sessions[i];
+		std::string label = s.title.empty() ? "(untitled)" : s.title;
+		if (s.turns > 0) label += "  (" + std::to_string(s.turns) + ")";
+		fSessionList->AddItem(new SessionItem(label, s.path));
+		if (!fSessionPath.empty() && s.path == fSessionPath)
+			selectIdx = static_cast<int32>(i);
+	}
+	if (selectIdx >= 0) fSessionList->Select(selectIdx);
+}
+
+void ChatWindow::_LoadSelectedSession()
+{
+	if (!fSessionList) return;
+	const int32 sel = fSessionList->CurrentSelection();
+	if (sel < 0) return;
+	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(sel));
+	if (!item) return;
+	// _LoadSession replays the conversation and sets fSessionPath.
+	_LoadSession(item->Path());
+}
+
+void ChatWindow::_DeleteSelectedSession()
+{
+	if (!fSessionList) return;
+	const int32 sel = fSessionList->CurrentSelection();
+	if (sel < 0) return;
+	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(sel));
+	if (!item) return;
+
+	BAlert* confirm = new BAlert("Delete session",
+	    "Delete this saved session? This cannot be undone.",
+	    "Cancel", "Delete", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	confirm->SetShortcut(0, B_ESCAPE);
+	if (confirm->Go() != 1) return;   // 0 = Cancel
+
+	const std::string path = item->Path();
+	if (session::Delete(path)) {
+		// If we deleted the open session, detach so the next save makes
+		// a fresh file rather than recreating the deleted one.
+		if (fSessionPath == path) fSessionPath.clear();
+		_RefreshSessionList();
+	}
 }
 
 void ChatWindow::_LoadSession(const std::string& path)

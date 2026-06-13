@@ -58,6 +58,10 @@ std::string Save(const std::string& existingPath,   // "" = create new file
 // Returns an empty array on failure.
 nlohmann::json Load(const std::string& path);
 
+// Delete a .session file. Returns true on success (or if it was already
+// gone). Used by the GUI session sidebar.
+bool Delete(const std::string& path);
+
 // List all sessions in the sessions directory, sorted by modified
 // time descending (most recent first).
 std::vector<SessionInfo> List();

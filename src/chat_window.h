@@ -65,6 +65,10 @@ constexpr uint32_t MSG_FIND_LIVE      = 'FLIV'; // find bar: query text changed
 constexpr uint32_t MSG_ZOOM_IN        = 'ZMIN'; // Cmd-+ : larger chat font
 constexpr uint32_t MSG_ZOOM_OUT       = 'ZMOT'; // Cmd-- : smaller chat font
 constexpr uint32_t MSG_ZOOM_RESET     = 'ZMRS'; // Cmd-0 : reset chat font
+constexpr uint32_t MSG_TOGGLE_SESSIONS = 'TSES'; // View: toggle session sidebar
+constexpr uint32_t MSG_SESSION_SELECT  = 'SSEL'; // sidebar: load selected session
+constexpr uint32_t MSG_SESSION_DELETE  = 'SDEL'; // sidebar: delete selected session
+constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -308,6 +312,12 @@ private:
 	void _Zoom(int delta);              // delta: +1 in, -1 out, 0 reset
 	void _ApplyZoom();                  // rescale all output runs to fZoomFactor
 
+	// ── Session sidebar ────────────────────────────────────────────────────────
+	void _ToggleSessionList();          // show/hide the left session panel
+	void _RefreshSessionList();         // repopulate from session::List()
+	void _LoadSelectedSession();        // load the highlighted session
+	void _DeleteSelectedSession();      // delete the highlighted session (confirm)
+
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
@@ -336,6 +346,11 @@ private:
 	float          fZoomFactor    = 1.0f;     // desired output font multiplier
 	float          fAppliedZoom   = 1.0f;     // factor applied to text up to fZoomedLen
 	int32          fZoomedLen     = 0;        // output length already scaled to fAppliedZoom
+
+	// ── Session sidebar ────────────────────────────────────────────────────────
+	BView*         fSessionPanel  = nullptr;  // left dock container (hidden by default)
+	BListView*     fSessionList   = nullptr;  // titles of saved sessions
+	BScrollView*   fSessionScroll = nullptr;  // scroller around fSessionList
 
 	// ── Conversation state ───────────────────────────────────────────────────
 	config::Auth   fAuth;

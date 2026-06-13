@@ -327,4 +327,17 @@ void EnsureIndexes()
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Delete
+// ---------------------------------------------------------------------------
+
+bool Delete(const std::string& path)
+{
+	if (path.empty()) return false;
+	BEntry entry(path.c_str());
+	if (entry.InitCheck() != B_OK) return false;
+	if (!entry.Exists()) return true;   // already gone
+	return entry.Remove() == B_OK;
+}
+
 } // namespace session
