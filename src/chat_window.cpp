@@ -216,11 +216,139 @@ private:
 // the sidebar can load or delete the file behind a selected row.
 class SessionItem : public BStringItem {
 public:
-	SessionItem(const std::string& label, const std::string& path)
-		: BStringItem(label.c_str()), fPath(path) {}
-	const std::string& Path() const { return fPath; }
+	SessionItem(const std::string& label, const std::string& path,
+	            const std::string& title)
+		: BStringItem(label.c_str()), fPath(path), fTitle(title) {}
+	const std::string& Path()  const { return fPath; }
+	const std::string& Title() const { return fTitle; }
 private:
 	std::string fPath;
+	std::string fTitle;   // raw title (no "  (N)" turn-count suffix)
+};
+
+// RenameModal — a tiny modal prompt with a single text field, used to
+// rename a saved session. Blocks on a semaphore (same pattern as
+// ChoiceModal) and returns the entered text, or empty on cancel.
+class RenameModal : public BWindow {
+public:
+	RenameModal(const std::string& current)
+		: BWindow(BRect(0, 0, 320, 90), "Rename Session",
+		          B_MODAL_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
+		          B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
+		  fDoneSem(create_sem(0, "rename_modal"))
+	{
+		fField = new BTextControl("name", nullptr, current.c_str(),
+		                          new BMessage('RNok'));
+		fField->SetTarget(this);
+		BButton* ok     = new BButton("ok", "Rename", new BMessage('RNok'));
+		BButton* cancel = new BButton("cancel", "Cancel", new BMessage('RNcl'));
+		ok->MakeDefault(true);
+
+		BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
+			.SetInsets(B_USE_WINDOW_SPACING)
+			.Add(fField)
+			.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+				.AddGlue()
+				.Add(cancel)
+				.Add(ok)
+			.End()
+		.End();
+
+		AddShortcut(B_ESCAPE, 0, new BMessage('RNcl'));
+		CenterOnScreen();
+	}
+
+	~RenameModal() override { delete_sem(fDoneSem); }
+
+	void Show() override
+	{
+		BWindow::Show();
+		if (Lock()) {
+			fField->MakeFocus(true);
+			if (BTextView* tv = fField->TextView()) tv->SelectAll();
+			Unlock();
+		}
+	}
+
+	void MessageReceived(BMessage* msg) override
+	{
+		if (msg->what == 'RNok') {
+			if (const char* t = fField->Text()) fResult = t;
+			_Finish();
+			return;
+		}
+		if (msg->what == 'RNcl') { fResult.clear(); _Finish(); return; }
+		BWindow::MessageReceived(msg);
+	}
+
+	bool QuitRequested() override { _Finish(); return true; }
+
+	// Show modally and return the entered name (empty = cancelled).
+	std::string Go()
+	{
+		Show();
+		acquire_sem(fDoneSem);
+		const std::string r = fResult;
+		if (Lock()) Quit();
+		return r;
+	}
+
+private:
+	void _Finish()
+	{
+		if (!fFinished) { fFinished = true; release_sem(fDoneSem); }
+	}
+
+	BTextControl* fField    = nullptr;
+	sem_id        fDoneSem;
+	std::string   fResult;
+	bool          fFinished = false;
+};
+
+// SessionListView — BListView that pops a right-click context menu
+// (Rename / Open / Delete) on the row under the cursor. The menu items
+// post the existing sidebar messages to the window, so the handlers are
+// shared with the New/Open/Delete buttons.
+class SessionListView : public BListView {
+public:
+	SessionListView(const char* name, BHandler* target)
+		: BListView(name, B_MULTIPLE_SELECTION_LIST), fTarget(target) {}
+
+	void MouseDown(BPoint where) override
+	{
+		uint32 buttons = 0;
+		if (Window()) {
+			BMessage* msg = Window()->CurrentMessage();
+			if (msg) msg->FindInt32("buttons", reinterpret_cast<int32*>(&buttons));
+		}
+
+		if (buttons & B_SECONDARY_MOUSE_BUTTON) {
+			const int32 idx = IndexOf(where);
+			if (idx < 0) { BListView::MouseDown(where); return; }
+			// Right-clicking a row that isn't part of the current
+			// selection makes it the sole selection (Tracker-like).
+			if (!IsItemSelected(idx)) Select(idx);
+
+			BPopUpMenu* menu = new BPopUpMenu("ctx", false, false);
+			menu->AddItem(new BMenuItem("Rename\xE2\x80\xA6",
+				new BMessage(gui::MSG_SESSION_RENAME)));
+			menu->AddItem(new BMenuItem("Open",
+				new BMessage(gui::MSG_SESSION_SELECT)));
+			menu->AddSeparatorItem();
+			menu->AddItem(new BMenuItem("Delete",
+				new BMessage(gui::MSG_SESSION_DELETE)));
+			menu->SetTargetForItems(fTarget);
+
+			BPoint screenPt = where;
+			ConvertToScreen(&screenPt);
+			menu->Go(screenPt, true, true, true);
+			return;
+		}
+		BListView::MouseDown(where);
+	}
+
+private:
+	BHandler* fTarget = nullptr;
 };
 
 // Slider for the notification delay. Snaps to 10-second steps and shows a
@@ -1112,7 +1240,7 @@ void ChatWindow::_BuildLayout()
 	fTokenBar = new TokenBar();
 
 	// ── Session sidebar (left dock, hidden until View ▸ Sessions) ─────────────
-	fSessionList = new BListView("sessionlist", B_MULTIPLE_SELECTION_LIST);
+	fSessionList = new SessionListView("sessionlist", this);
 	fSessionList->SetSelectionMessage(nullptr); // single-click just highlights
 	fSessionList->SetInvocationMessage(           // double-click loads
 		new BMessage(gui::MSG_SESSION_SELECT));
@@ -1122,6 +1250,8 @@ void ChatWindow::_BuildLayout()
 	                               new BMessage(gui::MSG_SESSION_NEW));
 	BButton* sessOpen = new BButton("sessopen", "Open",
 	                                new BMessage(gui::MSG_SESSION_SELECT));
+	BButton* sessRen = new BButton("sessren", "Rename",
+	                               new BMessage(gui::MSG_SESSION_RENAME));
 	BButton* sessDel = new BButton("sessdel", "Delete",
 	                               new BMessage(gui::MSG_SESSION_DELETE));
 	fSessionPanel = new BView("sessionpanel", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
@@ -1133,6 +1263,9 @@ void ChatWindow::_BuildLayout()
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.Add(sessNew)
 			.Add(sessOpen)
+		.End()
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+			.Add(sessRen)
 			.Add(sessDel)
 		.End()
 	.End();
@@ -1383,6 +1516,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_SESSION_DELETE:
 		_DeleteSelectedSession();
+		break;
+
+	case gui::MSG_SESSION_RENAME:
+		_RenameSelectedSession();
 		break;
 
 	case gui::MSG_SESSION_NEW:
@@ -2741,7 +2878,8 @@ void ChatWindow::_RefreshSessionList()
 		const session::SessionInfo& s = sessions[i];
 		std::string label = s.title.empty() ? "(untitled)" : s.title;
 		if (s.turns > 0) label += "  (" + std::to_string(s.turns) + ")";
-		fSessionList->AddItem(new SessionItem(label, s.path));
+		fSessionList->AddItem(new SessionItem(label, s.path,
+			s.title.empty() ? "" : s.title));
 		if (!fSessionPath.empty() && s.path == fSessionPath)
 			selectIdx = static_cast<int32>(i);
 	}
@@ -2797,6 +2935,38 @@ void ChatWindow::_DeleteSelectedSession()
 		}
 	}
 	_RefreshSessionList();
+}
+
+void ChatWindow::_RenameSelectedSession()
+{
+	if (!fSessionList) return;
+	// Rename is a single-row action — require exactly one selection.
+	int32 selCount = 0, only = -1;
+	for (int32 i = 0; i < fSessionList->CountItems(); ++i)
+		if (fSessionList->IsItemSelected(i)) { ++selCount; only = i; }
+	if (selCount != 1) return;
+
+	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(only));
+	if (!item) return;
+
+	const std::string current = item->Title();
+	RenameModal* modal = new RenameModal(current);
+	const std::string entered = modal->Go();   // self-quits
+
+	// Trim whitespace; empty / unchanged → no-op.
+	std::string name = entered;
+	while (!name.empty() && (name.front() == ' ' || name.front() == '\t'))
+		name.erase(name.begin());
+	while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
+		name.pop_back();
+	if (name.empty() || name == current) return;
+
+	if (session::Rename(item->Path(), name)) {
+		// If we renamed the currently-open session, keep fConvTopic in
+		// sync so the next auto-save doesn't overwrite the new title.
+		if (item->Path() == fSessionPath) fConvTopic = name;
+		_RefreshSessionList();
+	}
 }
 
 // ---------------------------------------------------------------------------

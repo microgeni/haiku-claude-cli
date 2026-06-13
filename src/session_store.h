@@ -79,6 +79,11 @@ bool LoadSettings(const std::string& path, SessionSettings& out);
 // gone). Used by the GUI session sidebar.
 bool Delete(const std::string& path);
 
+// Rename a session: update its claude:title attribute (and the title
+// stored in the file-body envelope) without touching the conversation.
+// Cheap — does not rewrite the messages. Returns true on success.
+bool Rename(const std::string& path, const std::string& newTitle);
+
 // List all sessions in the sessions directory, sorted by modified
 // time descending (most recent first).
 std::vector<SessionInfo> List();

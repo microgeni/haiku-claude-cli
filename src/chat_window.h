@@ -69,6 +69,7 @@ constexpr uint32_t MSG_TOGGLE_SESSIONS = 'TSES'; // View: toggle session sidebar
 constexpr uint32_t MSG_SESSION_SELECT  = 'SSEL'; // sidebar: load selected session
 constexpr uint32_t MSG_SESSION_DELETE  = 'SDEL'; // sidebar: delete selected session
 constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
+constexpr uint32_t MSG_SESSION_RENAME  = 'SRNM'; // sidebar: rename selected session
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +325,7 @@ private:
 	void _RefreshSessionList();         // repopulate from session::List()
 	void _LoadSelectedSession();        // load the highlighted session
 	void _DeleteSelectedSession();      // delete the highlighted session (confirm)
+	void _RenameSelectedSession();      // rename the highlighted session (prompt)
 
 	// ── Global GUI preferences (persist across launches) ───────────────────────
 	void _LoadGuiPrefs();               // restore window frame / zoom / model

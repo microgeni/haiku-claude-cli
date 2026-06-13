@@ -374,4 +374,33 @@ bool Delete(const std::string& path)
 	return entry.Remove() == B_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Rename
+// ---------------------------------------------------------------------------
+
+bool Rename(const std::string& path, const std::string& newTitle)
+{
+#ifndef __HAIKU__
+	(void)path; (void)newTitle;
+	return false;
+#else
+	if (path.empty()) return false;
+	BNode node(path.c_str());
+	if (node.InitCheck() != B_OK) return false;
+
+	// The title is held in the claude:title BFS attribute (what List()
+	// reads). Truncate to the same 80-char cap used by Save().
+	const std::string shortTitle = newTitle.size() > 80
+	    ? newTitle.substr(0, 77) + "\xE2\x80\xA6"  // …
+	    : newTitle;
+	WriteStrAttr(node, kAttrTitle, shortTitle);
+
+	// Bump modified time so the renamed session keeps its place at the
+	// top of the newest-first list.
+	WriteInt64Attr(node, kAttrModified,
+	               static_cast<int64_t>(std::time(nullptr)));
+	return true;
+#endif
+}
+
 } // namespace session
