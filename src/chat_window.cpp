@@ -49,6 +49,7 @@
 #include <MenuItem.h>
 #include <NodeInfo.h>
 #include <Path.h>
+#include <SplitView.h>
 #include <PopUpMenu.h>
 
 #include <private/interface/AboutWindow.h>
@@ -1269,7 +1270,10 @@ void ChatWindow::_BuildLayout()
 			.Add(sessDel)
 		.End()
 	.End();
-	fSessionPanel->SetExplicitMaxSize(BSize(220, B_SIZE_UNLIMITED));
+	// The splitter controls the sidebar width now; keep only a sane
+	// minimum so it doesn't shrink below usability, and a generous max.
+	fSessionPanel->SetExplicitMinSize(BSize(140, B_SIZE_UNSET));
+	fSessionPanel->SetExplicitMaxSize(BSize(500, B_SIZE_UNLIMITED));
 
 	// ── Spinner ──────────────────────────────────────────────────────────────
 	fSpinner = new SpinnerView();
@@ -1328,15 +1332,29 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	// ── Layout ────────────────────────────────────────────────────────────────
+	// The session sidebar and the chat area sit in a horizontal BSplitView
+	// so the divider between them can be dragged (Genio-style). The chat
+	// column (welcome splash + scroll) is wrapped in its own view so the
+	// split has exactly two children.
+	BView* chatColumn = new BView("chatcolumn", B_SUPPORTS_LAYOUT);
+	BLayoutBuilder::Group<>(chatColumn, B_VERTICAL, 0)
+		.Add(fWelcome, 0.0f)
+		.Add(fScroll, 1.0f)
+	.End();
+
+	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
+	fSplit->SetName("mainsplit");
+	BLayoutBuilder::Split<>(fSplit)
+		.Add(fSessionPanel, 0.25f)   // sidebar — collapsible, smaller weight
+		.Add(chatColumn,    0.75f);  // chat — takes the rest
+	// Keep the sidebar from collapsing to nothing or eating the window.
+	fSplit->SetCollapsible(0, true);
+
 	// Input row: spinner | input (expands) | vertical button column
 	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.AddGroup(B_HORIZONTAL, 0)
-			.Add(fSessionPanel, 0.0f)
-			.AddGroup(B_VERTICAL, 0)
-				.Add(fWelcome, 0.0f)
-				.Add(fScroll, 1.0f)
-			.End()
+			.Add(fSplit, 1.0f)
 			.Add(fSettings, 0.0f)
 		.End()
 		.Add(fTokenBar, 0.0f)
@@ -2996,6 +3014,14 @@ void ChatWindow::_LoadGuiPrefs()
 		fAppliedZoom = zoom;   // new text arrives pre-scaled to this
 	}
 
+	// Restore the sidebar splitter weight relative to the chat (0.75).
+	float sidebarWeight = 0.0f;
+	if (fSplit && prefs.FindFloat("sidebar_weight", &sidebarWeight) == B_OK
+			&& sidebarWeight > 0.0f && sidebarWeight < 5.0f) {
+		fSplit->SetItemWeight((int32)0, sidebarWeight, false);
+		fSplit->SetItemWeight((int32)1, 1.0f, true);
+	}
+
 	// Last-used model — only when the caller didn't already pin one via
 	// a session or CLI flag (fModel still at the constructor default is
 	// hard to detect, so we just adopt the saved model and re-mark the
@@ -3020,6 +3046,8 @@ void ChatWindow::_SaveGuiPrefs()
 	prefs.AddRect("frame", Frame());
 	prefs.AddFloat("zoom", fZoomFactor);
 	prefs.AddString("model", fModel.c_str());
+	// Sidebar splitter weight (relative width of the session panel).
+	if (fSplit) prefs.AddFloat("sidebar_weight", fSplit->ItemWeight((int32)0));
 
 	BFile file(paths::GuiPrefsPath().c_str(),
 	           B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);

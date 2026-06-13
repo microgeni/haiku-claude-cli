@@ -31,6 +31,7 @@
 #include "md_renderer.h"
 
 class BFilePanel;
+class BSplitView;
 
 // Additional MSG_ codes beyond those in gui_sink.h.
 namespace gui {
@@ -364,6 +365,7 @@ private:
 	BView*         fSessionPanel  = nullptr;  // left dock container (hidden by default)
 	BListView*     fSessionList   = nullptr;  // titles of saved sessions
 	BScrollView*   fSessionScroll = nullptr;  // scroller around fSessionList
+	BSplitView*    fSplit         = nullptr;  // draggable divider: sidebar | chat
 
 	// ── Conversation state ───────────────────────────────────────────────────
 	config::Auth   fAuth;
