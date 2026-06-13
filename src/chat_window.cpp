@@ -430,6 +430,9 @@ const rgb_color kColorError       = { 230,  75,  75, 255 };
 const rgb_color kColorDiffAdd     = {  80, 200,  80, 255 }; // green  — added lines
 const rgb_color kColorDiffRemove  = { 220,  80,  80, 255 }; // red    — removed lines
 const rgb_color kColorDiffHeader  = { 140, 180, 220, 255 }; // steel-blue — diff header/meta
+// Cyan used for the input text, echoing the CLI's cyan "you>" prompt.
+// Chosen dark enough to stay legible on a light B_DOCUMENT_BACKGROUND.
+const rgb_color kColorInputCyan   = {   0, 150, 170, 255 };
 
 // Known Anthropic models listed in the model picker.
 const char* kKnownModels[] = {
@@ -531,14 +534,15 @@ InputView::InputView(const char* name)
 void InputView::AttachedToWindow()
 {
 	BTextView::AttachedToWindow();
-	// Use system document colours for the input area.
+	// Use system document background for the input area, but colour the
+	// typed text cyan to echo the CLI's cyan "you>" prompt.
 	SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
 	SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-	SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
+	SetHighColor(kColorInputCyan);
 	// A slightly larger font than the default for comfortable typing.
 	BFont f(be_plain_font);
 	f.SetSize(f.Size() + 1.0f);
-	SetFontAndColor(&f);
+	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
 	// Fix height to 5 lines; the layout engine must not stretch us taller.
