@@ -648,13 +648,27 @@ void TokenBar::Draw(BRect /*updateRect*/)
 	DrawString(lbl.c_str());
 
 	// Left-aligned per-session stats, mirroring the CLI status row:
-	// "turn N · ↑ 1.2k · ↓ 420".
-	const std::string stats =
+	// "turn N · ↑ 1.2k · ↓ 420 · $0.0123".
+	std::string stats =
 		"turn " + std::to_string(fTurn)
 		+ "  \xC2\xB7  \xE2\x86\x91 " + models::CompactTokens(fInput)
 		+ "  \xC2\xB7  \xE2\x86\x93 " + models::CompactTokens(fOutput);
+	if (fPriceIn > 0.0 || fPriceOut > 0.0) {
+		const double cost = (fInput  / 1'000'000.0) * fPriceIn
+		                  + (fOutput / 1'000'000.0) * fPriceOut;
+		char costBuf[32];
+		std::snprintf(costBuf, sizeof(costBuf), "  \xC2\xB7  $%.4f", cost);
+		stats += costBuf;
+	}
 	MovePenTo(r.left + 4.0f, r.bottom - 3.0f);
 	DrawString(stats.c_str());
+}
+
+void TokenBar::SetPrice(double inputPerM, double outputPerM)
+{
+	fPriceIn  = inputPerM;
+	fPriceOut = outputPerM;
+	Invalidate();
 }
 
 void TokenBar::SetStats(int turn, int sessionInput, int sessionOutput)
@@ -974,6 +988,10 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 
 	// Restore window frame, zoom, and last model from the prefs file.
 	_LoadGuiPrefs();
+
+	// Seed the token bar's cost estimate from the (possibly restored)
+	// model now that both the bar and final model are known.
+	_UpdateTokenBarPrice();
 }
 
 ChatWindow::~ChatWindow()
@@ -1539,6 +1557,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (msg->FindString("model", &model) == B_OK && model) {
 			fModel = model;
 			_UpdateTitle();
+			_UpdateTokenBarPrice();
 		}
 		break;
 	}
@@ -2416,6 +2435,18 @@ void ChatWindow::_UpdateTitle()
 	SetTitle("Claude");
 }
 
+// Look up the active model's per-million-token pricing and hand it to
+// the token bar so it can show a running cost estimate. Uses the
+// built-in fallback price table (config "prices" overrides aren't
+// plumbed into the GUI yet).
+void ChatWindow::_UpdateTokenBarPrice()
+{
+	if (!fTokenBar) return;
+	const models::PriceEntry price =
+		models::GetPrice(fModel, nlohmann::json());
+	fTokenBar->SetPrice(price.input, price.output);
+}
+
 void ChatWindow::_SaveSession()
 {
 	if (fMessages.empty()) return;
@@ -2848,6 +2879,8 @@ void ChatWindow::_LoadSession(const std::string& path)
 				if (it) it->SetMarked(it->Label() && fModel == it->Label());
 			}
 		}
+		// Refresh the cost estimate for the restored model.
+		_UpdateTokenBarPrice();
 	}
 
 	// Replay the conversation into the output view so the user can see it.

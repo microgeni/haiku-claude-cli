@@ -151,12 +151,18 @@ public:
 	// turn number plus cumulative upstream (↑) / downstream (↓) tokens.
 	void	SetStats(int turn, int sessionInput, int sessionOutput);
 
+	// Per-million-token pricing for the active model, so the bar can
+	// show a running cost estimate (mirrors the CLI's /cost).
+	void	SetPrice(double inputPerM, double outputPerM);
+
 private:
-	int  fUsed    = 0;
-	int  fMax     = 200000; // default until first real value arrives
-	int  fTurn    = 0;
-	int  fInput   = 0;
-	int  fOutput  = 0;
+	int    fUsed    = 0;
+	int    fMax     = 200000; // default until first real value arrives
+	int    fTurn    = 0;
+	int    fInput   = 0;
+	int    fOutput  = 0;
+	double fPriceIn  = 0.0;   // $ per 1M input tokens
+	double fPriceOut = 0.0;   // $ per 1M output tokens
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -297,6 +303,7 @@ private:
 	// ── Toolbar / UI state ───────────────────────────────────────────────────
 	void _SetBusy(bool busy);    // swap Send↔Stop, enable/disable input
 	void _UpdateTitle();         // set window title from model + state
+	void _UpdateTokenBarPrice(); // push the active model's pricing to the bar
 	void _SaveSession();         // persist current conversation to BFS
 	void _LoadSession(const std::string& path); // restore a saved session
 	void _InsertFileContent(const std::string& path); // drag-drop helper
