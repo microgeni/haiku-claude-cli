@@ -1112,7 +1112,7 @@ void ChatWindow::_BuildLayout()
 	fTokenBar = new TokenBar();
 
 	// ── Session sidebar (left dock, hidden until View ▸ Sessions) ─────────────
-	fSessionList = new BListView("sessionlist", B_SINGLE_SELECTION_LIST);
+	fSessionList = new BListView("sessionlist", B_MULTIPLE_SELECTION_LIST);
 	fSessionList->SetSelectionMessage(nullptr); // single-click just highlights
 	fSessionList->SetInvocationMessage(           // double-click loads
 		new BMessage(gui::MSG_SESSION_SELECT));
@@ -2751,9 +2751,16 @@ void ChatWindow::_RefreshSessionList()
 void ChatWindow::_LoadSelectedSession()
 {
 	if (!fSessionList) return;
-	const int32 sel = fSessionList->CurrentSelection();
-	if (sel < 0) return;
-	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(sel));
+	// Loading is a single-session action. If several rows are selected
+	// (multi-select for bulk delete), don't guess — require exactly one.
+	if (fSessionList->CountItems() == 0) return;
+	int32 selCount = 0;
+	int32 only     = -1;
+	for (int32 i = 0; i < fSessionList->CountItems(); ++i) {
+		if (fSessionList->IsItemSelected(i)) { ++selCount; only = i; }
+	}
+	if (selCount != 1) return;
+	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(only));
 	if (!item) return;
 	// _LoadSession replays the conversation and sets fSessionPath.
 	_LoadSession(item->Path());
@@ -2762,24 +2769,34 @@ void ChatWindow::_LoadSelectedSession()
 void ChatWindow::_DeleteSelectedSession()
 {
 	if (!fSessionList) return;
-	const int32 sel = fSessionList->CurrentSelection();
-	if (sel < 0) return;
-	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(sel));
-	if (!item) return;
 
-	BAlert* confirm = new BAlert("Delete session",
-	    "Delete this saved session? This cannot be undone.",
+	// Collect the paths of every selected row (multi-select).
+	std::vector<std::string> paths;
+	for (int32 i = 0; i < fSessionList->CountItems(); ++i) {
+		if (!fSessionList->IsItemSelected(i)) continue;
+		SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(i));
+		if (item) paths.push_back(item->Path());
+	}
+	if (paths.empty()) return;
+
+	// Confirm, with the count when more than one is selected.
+	std::string msg = (paths.size() == 1)
+		? "Delete this saved session? This cannot be undone."
+		: "Delete " + std::to_string(paths.size())
+		  + " saved sessions? This cannot be undone.";
+	BAlert* confirm = new BAlert("Delete sessions", msg.c_str(),
 	    "Cancel", "Delete", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
 	confirm->SetShortcut(0, B_ESCAPE);
 	if (confirm->Go() != 1) return;   // 0 = Cancel
 
-	const std::string path = item->Path();
-	if (session::Delete(path)) {
-		// If we deleted the open session, detach so the next save makes
-		// a fresh file rather than recreating the deleted one.
-		if (fSessionPath == path) fSessionPath.clear();
-		_RefreshSessionList();
+	for (const std::string& path : paths) {
+		if (session::Delete(path)) {
+			// If we deleted the open session, detach so the next save
+			// makes a fresh file rather than recreating the deleted one.
+			if (fSessionPath == path) fSessionPath.clear();
+		}
 	}
+	_RefreshSessionList();
 }
 
 // ---------------------------------------------------------------------------
