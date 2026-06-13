@@ -545,16 +545,16 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// Flexible height: a usable minimum (2 lines) and no maximum, so the
-	// input fills whatever vertical space its row is given. The chat
-	// scroll area carries the dominant layout weight, so growing the
-	// window mostly grows the chat while the input fills its own area.
+	// Fixed height (min == max): the input never grows or shrinks on
+	// window resize. Combined with the bottom row's zero layout weight,
+	// the whole input+buttons strip stays a fixed size and the chat
+	// scroll area absorbs all vertical change.
 	font_height fh;
 	f.GetHeight(&fh);
-	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	const float minH  = lineH * 2.0f + 8.0f;
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, minH));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+	const float lineH  = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
+	const float fixedH = lineH * 4.0f + 8.0f;
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, fixedH));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, fixedH));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -1370,10 +1370,10 @@ void ChatWindow::_BuildLayout()
 	// spinner is rendered inline in the chat transcript (after the
 	// "claude ▸" header), not as a separate widget here.
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
-		.Add(fSplit, 4.0f)
+		.Add(fSplit, 1.0f)
 		.Add(fTokenBar, 0.0f)
 		.Add(fFindBar, 0.0f)
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 1.0f)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
 			.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
 			.Add(fInput, 1.0f)
 			.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
