@@ -545,16 +545,16 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// Height: allow the input to shrink to ~2 lines (so a small window is
-	// possible) and grow up to ~6 lines, rather than being pinned at a
-	// fixed 5-line height that blocks reducing the window vertically.
+	// Fixed height (min == max) so the input never grows or shrinks when
+	// the window is resized — the chat scroll area (layout weight 1)
+	// absorbs all vertical change instead. 4 lines keeps the bottom area
+	// compact enough that the window can still shrink vertically.
 	font_height fh;
 	f.GetHeight(&fh);
-	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	const float minH  = lineH * 2.0f + 8.0f;
-	const float maxH  = lineH * 6.0f + 8.0f;
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, minH));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, maxH));
+	const float lineH  = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
+	const float fixedH = lineH * 4.0f + 8.0f;
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, fixedH));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, fixedH));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -1463,6 +1463,12 @@ void ChatWindow::FrameResized(float w, float h)
 		BRect b = fOutput->Bounds();
 		fOutput->SetTextRect(b.InsetByCopy(4.0f, 4.0f));
 	}
+	// A resize can leave the input unfocused, which shows the dim
+	// placeholder and makes an empty prompt look "grayed out". If the
+	// input was the focus before the resize, re-assert it so it keeps the
+	// dark+cyan active appearance (don't steal focus otherwise).
+	if (fInput && fInput->IsFocus())
+		fInput->Invalidate();
 }
 
 // ---------------------------------------------------------------------------
