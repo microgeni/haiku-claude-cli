@@ -30,6 +30,8 @@
 #include "gui_sink.h"
 #include "md_renderer.h"
 
+class BFilePanel;
+
 // Additional MSG_ codes beyond those in gui_sink.h.
 namespace gui {
 constexpr uint32_t MSG_NEW_CHAT     = 'NCVT'; // clear conversation + display
@@ -53,6 +55,8 @@ constexpr uint32_t MSG_HELP_DOCS    = 'HDOC'; // Help > Documentation
 constexpr uint32_t MSG_DEMO_MARKDOWN = 'DMMD'; // Help > Show Markdown Demo
 constexpr uint32_t MSG_LUDICROUS     = 'LUDC'; // Tools > Ludicrous Mode toggle
 constexpr uint32_t MSG_BROWSE_WORKDIR = 'BRWD'; // Settings: browse for working dir
+constexpr uint32_t MSG_EXPORT         = 'EXPT'; // File > Export Transcript…
+constexpr uint32_t MSG_EXPORT_SAVE    = 'EXPS'; // B_SAVE_REQUESTED from export panel
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,6 +290,7 @@ private:
 	void _InsertFileContent(const std::string& path); // drag-drop helper
 	void _ShowMarkdownDemo();    // render a rich markdown example into the chat output
 	void _DismissWelcome();      // hide the startup splash once a turn begins
+	void _ExportTranscript(const std::string& path); // write fMessages as Markdown
 
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
@@ -343,6 +348,9 @@ private:
 
 	// ── Slash-command autocomplete ───────────────────────────────────────────
 	CommandPopup*  fCommandPopup  = nullptr;
+
+	// ── Export transcript ─────────────────────────────────────────────────────
+	BFilePanel*    fExportPanel   = nullptr;  // lazily created B_SAVE_PANEL
 
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
 	bool           fUserScrolled  = false;

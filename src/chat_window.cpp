@@ -46,6 +46,7 @@
 
 #include <FilePanel.h>
 #include <MenuItem.h>
+#include <NodeInfo.h>
 #include <Path.h>
 #include <PopUpMenu.h>
 
@@ -941,6 +942,7 @@ ChatWindow::~ChatWindow()
 	}
 	delete fSink;
 	delete fSpinnerTimer;
+	delete fExportPanel;
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +957,8 @@ void ChatWindow::_BuildMenuBar()
 	BMenu* fileMenu = new BMenu("File");
 	fileMenu->AddItem(new BMenuItem("Settings\xE2\x80\xA6", // …
 		new BMessage(gui::MSG_SETTINGS), ','));
+	fileMenu->AddItem(new BMenuItem("Export Transcript\xE2\x80\xA6", // …
+		new BMessage(gui::MSG_EXPORT), 'E'));
 	fileMenu->AddSeparatorItem();
 	fileMenu->AddItem(new BMenuItem("Quit",
 		new BMessage(B_QUIT_REQUESTED), 'Q'));
@@ -1206,6 +1210,50 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		panel->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
 		panel->Show();
 		// panel deletes itself via BFilePanel's built-in quit handling.
+		break;
+	}
+
+	case gui::MSG_EXPORT: {
+		// Nothing to export on an empty conversation.
+		if (fMessages.empty()) {
+			BAlert* alert = new BAlert("Export Transcript",
+			    "There is no conversation to export yet.",
+			    "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+			alert->Go();
+			break;
+		}
+		// Lazily create the save panel; its B_SAVE_REQUESTED reply is
+		// retargeted to this window as MSG_EXPORT_SAVE.
+		if (!fExportPanel) {
+			fExportPanel = new BFilePanel(B_SAVE_PANEL,
+			                              new BMessenger(this),
+			                              nullptr, 0, false,
+			                              new BMessage(gui::MSG_EXPORT_SAVE));
+			fExportPanel->SetButtonLabel(B_DEFAULT_BUTTON, "Export");
+		}
+		// Suggest a filename derived from the conversation topic.
+		std::string suggested = fConvTopic.empty() ? "transcript" : fConvTopic;
+		for (char& c : suggested)
+			if (c == '/' || c == ':' || c < 32) c = ' ';
+		if (suggested.size() > 60) suggested.resize(60);
+		suggested += ".md";
+		fExportPanel->SetSaveText(suggested.c_str());
+		fExportPanel->Show();
+		break;
+	}
+
+	case gui::MSG_EXPORT_SAVE: {
+		// B_SAVE_REQUESTED reply: directory ref + chosen "name".
+		entry_ref dirRef;
+		const char* name = nullptr;
+		if (msg->FindRef("directory", &dirRef) == B_OK
+				&& msg->FindString("name", &name) == B_OK && name) {
+			BPath dir(&dirRef);
+			if (dir.InitCheck() == B_OK) {
+				BPath full(dir.Path(), name);
+				_ExportTranscript(full.Path());
+			}
+		}
 		break;
 	}
 
@@ -2170,6 +2218,99 @@ void ChatWindow::_SaveSession()
 	    fMessages);
 	if (!saved.empty())
 		fSessionPath = saved;
+}
+
+// Serialize the conversation to a Markdown file. Handles plain-string
+// content, array content (text + image placeholders), and the
+// tool_use / tool_result blocks that live in the history after a
+// tool-using turn. Best-effort: unknown block shapes are skipped.
+void ChatWindow::_ExportTranscript(const std::string& path)
+{
+	std::string out;
+	out += "# Claude transcript\n\n";
+	if (!fConvTopic.empty()) out += "**Topic:** " + fConvTopic + "\n\n";
+	out += "**Model:** " + fModel + "  \n";
+	out += "**Turns:** " + std::to_string(fTurnCount) + "\n\n---\n\n";
+
+	// Render one content value (string or block array) to Markdown.
+	auto renderContent = [](const nlohmann::json& content) -> std::string {
+		std::string s;
+		if (content.is_string()) {
+			s = content.get<std::string>();
+		} else if (content.is_array()) {
+			for (const auto& block : content) {
+				const std::string type = block.value("type", "");
+				if (type == "text") {
+					s += block.value("text", "");
+				} else if (type == "image") {
+					const std::string mt =
+						block.contains("source")
+							? block["source"].value("media_type", "image")
+							: "image";
+					s += "_[image attachment: " + mt + "]_";
+				} else if (type == "tool_use") {
+					s += "\n> 🔧 **tool call:** `" + block.value("name", "?")
+					   + "`\n";
+				} else if (type == "tool_result") {
+					std::string rc;
+					const auto& c = block.contains("content")
+						? block["content"] : nlohmann::json();
+					if (c.is_string()) rc = c.get<std::string>();
+					else if (c.is_array()) {
+						for (const auto& cb : c)
+							if (cb.value("type", "") == "text")
+								rc += cb.value("text", "");
+					}
+					if (rc.size() > 1000) rc = rc.substr(0, 1000) + "\n…[truncated]";
+					s += "\n> 🔧 **tool result:**\n```\n" + rc + "\n```\n";
+				}
+			}
+		}
+		return s;
+	};
+
+	for (const auto& turn : fMessages) {
+		const std::string role = turn.value("role", "");
+		if (!turn.contains("content")) continue;
+		const nlohmann::json& content = turn["content"];
+
+		// A user turn whose content is purely tool_result blocks is the
+		// automated half of a tool round-trip, not something the human
+		// typed — label it as such so the transcript reads correctly.
+		bool toolResultOnly = false;
+		if (role == "user" && content.is_array() && !content.empty()) {
+			toolResultOnly = true;
+			for (const auto& b : content)
+				if (b.value("type", "") != "tool_result") { toolResultOnly = false; break; }
+		}
+
+		const std::string body = renderContent(content);
+		if (body.empty()) continue;
+		if (toolResultOnly)
+			out += "## Tool result\n\n" + body + "\n\n";
+		else if (role == "user")
+			out += "## You\n\n" + body + "\n\n";
+		else if (role == "assistant")
+			out += "## Claude\n\n" + body + "\n\n";
+		else
+			out += "## " + role + "\n\n" + body + "\n\n";
+	}
+
+	BFile file(path.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	if (file.InitCheck() != B_OK) {
+		BAlert* alert = new BAlert("Export failed",
+		    "Could not write the transcript to that location.",
+		    "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		alert->Go();
+		return;
+	}
+	file.Write(out.data(), out.size());
+
+	// Stamp a text MIME type so Tracker opens it sensibly.
+	BNodeInfo nodeInfo(&file);
+	nodeInfo.SetType("text/markdown");
+
+	_AppendToolLine("\xE2\x9C\x93 transcript exported to " + path + "\n");
 }
 
 void ChatWindow::_LoadSession(const std::string& path)
