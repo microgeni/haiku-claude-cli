@@ -431,8 +431,8 @@ const rgb_color kColorDiffAdd     = {  80, 200,  80, 255 }; // green  — added 
 const rgb_color kColorDiffRemove  = { 220,  80,  80, 255 }; // red    — removed lines
 const rgb_color kColorDiffHeader  = { 140, 180, 220, 255 }; // steel-blue — diff header/meta
 // Cyan used for the input text, echoing the CLI's cyan "you>" prompt.
-// Chosen dark enough to stay legible on a light B_DOCUMENT_BACKGROUND.
-const rgb_color kColorInputCyan   = {   0, 150, 170, 255 };
+// Bright cyan that pops on the dark input background (kColorChatBg).
+const rgb_color kColorInputCyan   = {  60, 200, 215, 255 };
 
 // Known Anthropic models listed in the model picker.
 const char* kKnownModels[] = {
@@ -534,10 +534,10 @@ InputView::InputView(const char* name)
 void InputView::AttachedToWindow()
 {
 	BTextView::AttachedToWindow();
-	// Use system document background for the input area, but colour the
-	// typed text cyan to echo the CLI's cyan "you>" prompt.
-	SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-	SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+	// Match the dark chat area so the cyan input text pops like the
+	// CLI's bright-cyan-on-dark prompt.
+	SetViewColor(kColorChatBg);
+	SetLowColor(kColorChatBg);
 	SetHighColor(kColorInputCyan);
 	// A slightly larger font than the default for comfortable typing.
 	BFont f(be_plain_font);
@@ -591,12 +591,13 @@ void InputView::_DrawPlaceholder()
 	const char* placeholder = "Message Claude\xE2\x80\xA6"; // ellipsis
 	BFont f;
 	GetFont(&f);
-	rgb_color dim = tint_color(ui_color(B_DOCUMENT_TEXT_COLOR), B_LIGHTEN_2_TINT);
-	SetHighColor(dim);
+	// Dim gray that reads on the dark input background (matches the
+	// chat's muted tool-line colour).
+	SetHighColor(kColorToolLine);
 	BPoint pen(TextRect().left, TextRect().top + f.Size());
 	DrawString(placeholder, pen);
-	// Restore.
-	SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
+	// Restore the cyan typing colour so it isn't left as the dim gray.
+	SetHighColor(kColorInputCyan);
 }
 
 void InputView::MakeFocus(bool focused)
