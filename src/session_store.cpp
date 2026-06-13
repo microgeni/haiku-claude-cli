@@ -154,11 +154,12 @@ std::string Save(const std::string& existingPath,
                  const std::string& title,
                  const std::string& model,
                  int                turns,
-                 const nlohmann::json& messages)
+                 const nlohmann::json& messages,
+                 const SessionSettings& settings)
 {
 #ifndef __HAIKU__
 	(void)existingPath; (void)title; (void)model;
-	(void)turns; (void)messages;
+	(void)turns; (void)messages; (void)settings;
 	return {};
 #else
 	// Ensure sessions directory exists.
@@ -189,6 +190,12 @@ std::string Save(const std::string& existingPath,
 	envelope.AddString("messages", json_str.c_str());
 	envelope.AddString("model",    model.c_str());
 	envelope.AddInt32 ("turns",    static_cast<int32_t>(turns));
+	// Per-session settings — restored on load. Empty/zero fields are
+	// still written so loaders can distinguish "explicitly cleared"
+	// from "absent in an older file" (FindString fails on absent).
+	envelope.AddString("system_prompt", settings.systemPrompt.c_str());
+	envelope.AddString("working_dir",   settings.workingDir.c_str());
+	envelope.AddInt32 ("max_tokens",    static_cast<int32_t>(settings.maxTokens));
 
 	if (envelope.Flatten(&file) != B_OK) {
 		std::fprintf(stderr, "session: flatten failed for %s\n", filePath.c_str());
@@ -245,6 +252,33 @@ nlohmann::json Load(const std::string& path)
 	} catch (...) {}
 
 	return nlohmann::json::array();
+#endif
+}
+
+
+// ---------------------------------------------------------------------------
+// LoadSettings
+// ---------------------------------------------------------------------------
+
+bool LoadSettings(const std::string& path, SessionSettings& out)
+{
+#ifndef __HAIKU__
+	(void)path; (void)out;
+	return false;
+#else
+	BFile file(path.c_str(), B_READ_ONLY);
+	if (file.InitCheck() != B_OK) return false;
+
+	BMessage envelope;
+	if (envelope.Unflatten(&file) != B_OK) return false;
+
+	const char* s = nullptr;
+	if (envelope.FindString("model", &s) == B_OK && s)         out.model        = s;
+	if (envelope.FindString("system_prompt", &s) == B_OK && s) out.systemPrompt = s;
+	if (envelope.FindString("working_dir", &s) == B_OK && s)   out.workingDir   = s;
+	int32 mt = 0;
+	if (envelope.FindInt32("max_tokens", &mt) == B_OK)         out.maxTokens    = mt;
+	return true;
 #endif
 }
 

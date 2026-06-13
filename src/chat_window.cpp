@@ -2412,12 +2412,18 @@ void ChatWindow::_UpdateTitle()
 void ChatWindow::_SaveSession()
 {
 	if (fMessages.empty()) return;
+	session::SessionSettings settings;
+	settings.model        = fModel;
+	settings.systemPrompt = fSystemPrompt;
+	settings.workingDir   = fWorkingDir;
+	settings.maxTokens    = fMaxTokens;
 	const std::string saved = session::Save(
 	    fSessionPath,
 	    fConvTopic.empty() ? "Untitled" : fConvTopic,
 	    fModel,
 	    fTurnCount,
-	    fMessages);
+	    fMessages,
+	    settings);
 	if (!saved.empty())
 		fSessionPath = saved;
 }
@@ -2753,6 +2759,31 @@ void ChatWindow::_LoadSession(const std::string& path)
 	fSessionPath = path;
 	fTurnCount   = 0;
 	fConvTopic.clear();
+
+	// Restore the per-session settings (model, system prompt, working
+	// dir, max-tokens) so continuing the conversation uses the same
+	// context it was created with. Absent fields (older files) keep the
+	// window's current values.
+	session::SessionSettings st;
+	if (session::LoadSettings(path, st)) {
+		if (!st.model.empty())        fModel        = st.model;
+		if (!st.systemPrompt.empty()) fSystemPrompt = st.systemPrompt;
+		if (!st.workingDir.empty())   fWorkingDir   = st.workingDir;
+		if (st.maxTokens > 0)         fMaxTokens    = st.maxTokens;
+
+		// Reflect the restored values in the UI.
+		_UpdateTitle();
+		if (fSettings)
+			fSettings->SetValues(fSystemPrompt, fMaxTokens,
+			                     fNotifyMinSec, fWorkingDir);
+		// Mark the matching model menu item.
+		if (fModelMenu) {
+			for (int32 i = 0; i < fModelMenu->CountItems(); ++i) {
+				BMenuItem* it = fModelMenu->ItemAt(i);
+				if (it) it->SetMarked(it->Label() && fModel == it->Label());
+			}
+		}
+	}
 
 	// Replay the conversation into the output view so the user can see it.
 	for (const auto& turn : fMessages) {

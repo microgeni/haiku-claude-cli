@@ -45,6 +45,16 @@ struct SessionInfo {
 	time_t      modified = 0;
 };
 
+// Per-session settings restored when a session is loaded. Stored in the
+// file body (BMessage envelope), not as BFS attributes, since the system
+// prompt and working dir can be long and don't need indexing.
+struct SessionSettings {
+	std::string model;
+	std::string systemPrompt;
+	std::string workingDir;
+	int         maxTokens = 0;   // 0 = unset (caller keeps its default)
+};
+
 // Save (or overwrite) a session file for the given conversation.
 // Creates the sessions directory if it does not exist.
 // Returns the path written, or empty string on failure.
@@ -52,11 +62,18 @@ std::string Save(const std::string& existingPath,   // "" = create new file
                  const std::string& title,
                  const std::string& model,
                  int                turns,
-                 const nlohmann::json& messages);
+                 const nlohmann::json& messages,
+                 const SessionSettings& settings = {});
 
 // Load the messages JSON from a .session file.
 // Returns an empty array on failure.
 nlohmann::json Load(const std::string& path);
+
+// Load the per-session settings (model, system prompt, working dir,
+// max-tokens) saved alongside the conversation. Fields absent in older
+// session files are left at their struct defaults. Returns false only if
+// the file can't be read at all.
+bool LoadSettings(const std::string& path, SessionSettings& out);
 
 // Delete a .session file. Returns true on success (or if it was already
 // gone). Used by the GUI session sidebar.
