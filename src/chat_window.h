@@ -273,6 +273,7 @@ private:
 	void _SendTurn();
 	void _LaunchWorker(const std::string& userText);
 	void _HandlePermRequest(BMessage* msg);
+	void _HandleChoiceRequest(BMessage* msg);
 	void _CancelWorker();
 	void _NewChat();
 	void _ClearOutput();

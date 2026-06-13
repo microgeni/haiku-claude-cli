@@ -5,6 +5,9 @@
 
 #include <Message.h>
 
+#include "api.h"
+#include "tools.h"
+
 namespace gui {
 
 GuiSink::GuiSink(BMessenger window)
@@ -62,19 +65,32 @@ void GuiSink::ToolFinished(const std::string& name, bool ok,
 	fWindow.SendMessage(&msg);
 }
 
-int GuiSink::AskChoice(const std::string& /*prompt*/,
+int GuiSink::AskChoice(const std::string& prompt,
                         const std::vector<std::string>& options)
 {
-	// Step 4: no interactive choice UI yet. Return the first option
-	// (index 0) so the conversation can continue. A proper BAlert with
-	// buttons is Step 5.
-	(void)options;
-	return 0;
+	if (options.empty()) return -1;
+	if (!fPermSemReady)  return -1;
+
+	// Post the prompt and options to the main thread (non-blocking),
+	// then block on fPermSem until ChatWindow shows a modal and calls
+	// DeliverChoiceReply(). Mirrors the AskPermission handshake; the two
+	// never overlap because both run on the single worker thread.
+	BMessage msg(MSG_ASK_CHOICE);
+	msg.AddString("prompt", prompt.c_str());
+	for (const auto& opt : options)
+		msg.AddString("options", opt.c_str());
+	fWindow.SendMessage(&msg);
+
+	sem_wait(&fPermSem);
+	return fChoiceResult.load();
 }
 
 sink::Permission GuiSink::AskPermission(const std::string& tool,
                                          const std::string& preview)
 {
+	// Ludicrous mode: skip the alert entirely.
+	if (api::g_ludicrous_mode.load()) return sink::Permission::kAllow;
+
 	if (!fPermSemReady) return sink::Permission::kDeny;
 
 	// Post the question to the main thread (non-blocking).
@@ -118,16 +134,25 @@ void GuiSink::OnToolStatus(const std::string& phase)
 		// Tool finished — find a plain name from the phase string.
 		ToolFinished("tool", true, {});
 	} else {
-		// Extract name from "🔧 running <Name>…" pattern.
+		// Extract name (and optional ": args") from the
+		// "🔧 running <Name>: <args>…" pattern produced by api.cpp.
 		const std::string prefix = " running ";
 		std::string name = phase;
+		std::string args;
 		const auto p = phase.find(prefix);
 		if (p != std::string::npos) {
 			name = phase.substr(p + prefix.size());
+			// Strip the trailing UTF-8 ellipsis.
 			while (!name.empty() && (unsigned char)name.back() > 127)
-				name.pop_back(); // strip trailing UTF-8 ellipsis
+				name.pop_back();
+			// Split "<Name>: <args>" into name and args.
+			const auto colon = name.find(": ");
+			if (colon != std::string::npos) {
+				args = name.substr(colon + 2);
+				name = name.substr(0, colon);
+			}
 		}
-		ToolStarted(name, "running");
+		ToolStarted(name, args.empty() ? "running" : args);
 	}
 }
 
@@ -135,6 +160,25 @@ api::Permission GuiSink::AskPermission(const std::string& tool_name,
                                         const nlohmann::json& input,
                                         std::string* denial_reason)
 {
+	// Tools that are always safe need no dialog.
+	if (api::AlwaysAllowed().count(tool_name)) return api::Permission::Allow;
+	if (!tools::RequiresPermission(tool_name))  return api::Permission::Allow;
+
+	// Send a structured diff to the chat window before asking (or auto-approving).
+	// This fires for Edit and Write regardless of ludicrous mode so the user
+	// always sees what changed in the output area.
+	{
+		const std::string diff = tools::GuiDiff(tool_name, input);
+		if (!diff.empty()) {
+			BMessage diffMsg(MSG_TOOL_DIFF);
+			diffMsg.AddString("diff", diff.c_str());
+			fWindow.SendMessage(&diffMsg);
+		}
+	}
+
+	// Ludicrous mode: skip the alert entirely.
+	if (api::g_ludicrous_mode.load()) return api::Permission::Allow;
+
 	// Build a plain-text preview from the tool input (no ANSI codes —
 	// the preview goes into a BAlert which renders plain text only).
 	std::string preview;
@@ -162,6 +206,12 @@ api::Permission GuiSink::AskPermission(const std::string& tool_name,
 void GuiSink::DeliverPermissionReply(bool granted)
 {
 	fPermResult.store(granted);
+	if (fPermSemReady) sem_post(&fPermSem);
+}
+
+void GuiSink::DeliverChoiceReply(int index)
+{
+	fChoiceResult.store(index);
 	if (fPermSemReady) sem_post(&fPermSem);
 }
 

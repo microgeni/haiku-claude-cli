@@ -113,6 +113,77 @@ std::string ImageMediaType(const std::string& path)
 	return {};
 }
 
+// ChoiceModal — a small modal window presenting one button per option,
+// used by AskChoice when there are more than three options (BAlert caps
+// at three buttons). Runs its own nested event loop via a semaphore so
+// the calling code blocks until the user picks or closes the window.
+//
+// Returns the 0-based index of the chosen option, or -1 if the window is
+// closed without a selection.
+class ChoiceModal : public BWindow {
+public:
+	ChoiceModal(const std::string& prompt,
+	            const std::vector<std::string>& options)
+		: BWindow(BRect(0, 0, 360, 100), "Choose",
+		          B_MODAL_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
+		          B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
+		  fDoneSem(create_sem(0, "choice_modal"))
+	{
+		BStringView* label = new BStringView("prompt", prompt.c_str());
+		label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+
+		BLayoutBuilder::Group<> builder(this, B_VERTICAL, B_USE_SMALL_SPACING);
+		builder.SetInsets(B_USE_WINDOW_SPACING);
+		builder.Add(label);
+		for (size_t i = 0; i < options.size(); ++i) {
+			BMessage* m = new BMessage('CHpk');
+			m->AddInt32("index", static_cast<int32>(i));
+			BButton* b = new BButton("opt", options[i].c_str(), m);
+			b->SetTarget(this);
+			builder.Add(b);
+		}
+		CenterOnScreen();
+	}
+
+	~ChoiceModal() override { delete_sem(fDoneSem); }
+
+	void MessageReceived(BMessage* msg) override
+	{
+		if (msg->what == 'CHpk') {
+			int32 idx = -1;
+			msg->FindInt32("index", &idx);
+			fResult = idx;
+			release_sem(fDoneSem);
+			return;
+		}
+		BWindow::MessageReceived(msg);
+	}
+
+	bool QuitRequested() override
+	{
+		// Closing the window without a pick counts as cancel.
+		release_sem(fDoneSem);
+		return true;
+	}
+
+	// Show the window and block until a choice is made or it is closed.
+	int Go()
+	{
+		Show();
+		// Block the caller (worker-thread context via the window's
+		// MessageReceived dispatch happens on this window's thread, so
+		// we wait on the semaphore here and let the looper run).
+		acquire_sem(fDoneSem);
+		const int r = fResult;
+		if (Lock()) Quit();   // tears down the window + looper
+		return r;
+	}
+
+private:
+	sem_id fDoneSem;
+	int    fResult = -1;
+};
+
 // Slider for the notification delay. Snaps to 10-second steps and shows a
 // plain-English label ("Notify is disabled" / "Notify after 30s") that
 // updates live as the thumb moves.
@@ -1366,6 +1437,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		_HandlePermRequest(msg);
 		break;
 
+	case gui::MSG_ASK_CHOICE:
+		_HandleChoiceRequest(msg);
+		break;
+
 	case gui::MSG_STATUS: {
 		int32 kind = 0;
 		msg->FindInt32("kind", &kind);
@@ -2022,6 +2097,43 @@ void ChatWindow::_HandlePermRequest(BMessage* msg)
 		// choice 1 = allow once; choice 0 / Esc = deny.
 		if (fSink) fSink->DeliverPermissionReply(choice == 1);
 	}
+}
+
+void ChatWindow::_HandleChoiceRequest(BMessage* msg)
+{
+	const char* prompt = nullptr;
+	msg->FindString("prompt", &prompt);
+
+	std::vector<std::string> options;
+	const char* opt = nullptr;
+	for (int32 i = 0; msg->FindString("options", i, &opt) == B_OK; ++i)
+		options.emplace_back(opt ? opt : "");
+
+	if (options.empty()) {
+		if (fSink) fSink->DeliverChoiceReply(-1);
+		return;
+	}
+
+	const std::string promptStr = prompt && prompt[0] ? prompt : "Choose an option";
+
+	int chosen = -1;
+	if (options.size() <= 3) {
+		// Native BAlert handles up to three buttons. Button order matches
+		// option order (button 0 = option 0). Esc cancels to -1.
+		BAlert* alert = new BAlert("Choose", promptStr.c_str(),
+		    options.size() > 0 ? options[0].c_str() : nullptr,
+		    options.size() > 1 ? options[1].c_str() : nullptr,
+		    options.size() > 2 ? options[2].c_str() : nullptr,
+		    B_WIDTH_AS_USUAL, B_OFFSET_SPACING, B_INFO_ALERT);
+		alert->SetShortcut(options.size() - 1, B_ESCAPE);
+		chosen = static_cast<int>(alert->Go());
+	} else {
+		// More than three options — use the scrolling button modal.
+		ChoiceModal* modal = new ChoiceModal(promptStr, options);
+		chosen = modal->Go();   // deletes itself via Quit()
+	}
+
+	if (fSink) fSink->DeliverChoiceReply(chosen);
 }
 
 // ---------------------------------------------------------------------------

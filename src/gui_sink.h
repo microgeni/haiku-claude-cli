@@ -18,7 +18,9 @@ constexpr uint32_t MSG_CHUNK       = 'CHNK'; // B_STRING_TYPE "text"
 constexpr uint32_t MSG_DONE        = 'DONE'; // turn complete
 constexpr uint32_t MSG_TOOL_START  = 'TSTR'; // B_STRING_TYPE "name", "summary"
 constexpr uint32_t MSG_TOOL_DONE   = 'TDNE'; // B_STRING_TYPE "name", B_BOOL_TYPE "ok"
+constexpr uint32_t MSG_TOOL_DIFF   = 'TDIF'; // B_STRING_TYPE "diff" — prefixed diff block
 constexpr uint32_t MSG_ASK_PERM    = 'APEM'; // B_STRING_TYPE "tool", "preview"
+constexpr uint32_t MSG_ASK_CHOICE  = 'ACHO'; // "prompt" + B_STRING_TYPE[] "options"
 constexpr uint32_t MSG_STATUS      = 'STAT'; // B_INT32_TYPE "kind" (sink::StatusKind)
 constexpr uint32_t MSG_ERR         = 'RERR'; // B_STRING_TYPE "text"
 constexpr uint32_t MSG_SEND        = 'SEND'; // input control / button → window
@@ -75,10 +77,19 @@ public:
 	// thread after BAlert::Go() returns. Unblocks the worker thread.
 	void DeliverPermissionReply(bool granted);
 
+	// Called by ChatWindow on the main thread after the choice modal
+	// closes. `index` is the 0-based chosen option, or -1 if cancelled.
+	// Unblocks the worker thread parked in AskChoice().
+	void DeliverChoiceReply(int index);
+
 private:
 	BMessenger         fWindow;
 	sem_t              fPermSem;
 	std::atomic<bool>  fPermResult { false };
+	// Result delivered for an in-flight AskChoice (0-based index, -1 =
+	// cancelled). Shares fPermSem because permission and choice prompts
+	// never overlap — both block the single worker thread.
+	std::atomic<int>   fChoiceResult { -1 };
 	// Set to true when fPermSem has been initialised.
 	bool               fPermSemReady { false };
 };
