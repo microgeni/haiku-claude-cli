@@ -865,7 +865,7 @@ as they stream in and launch them with one slash command.
       and both the interactive REPL and the Telegram bridge's
       local prompt.
 
-### v1.4 — True async input (type while Claude thinks)
+### v1.4 — True async input (type while Claude thinks) ✓
 
 The `LocalWorker` thread introduced in v1.6.3 moves
 `SendWithTools` off the main thread, but the main thread still
@@ -973,6 +973,72 @@ earlier without restarting.
 
 ---
 
+### v1.5 — Native GUI (`claude-gui`) ✓
+
+A first-class BeAPI desktop client built from the same core logic
+modules as the CLI (`api`, `tools`, `config`, `hooks`, `mcp`,
+`oauth`, `models`, `notify`), with the terminal front-end swapped
+for a native Haiku GUI (`chat_window`, `gui_sink`, `app_main_gui`).
+Built via `make gui` → `build/claude-gui`; Haiku-only (links
+`libbe`, `libtracker`, `libnetwork`).
+
+The window streams responses into a styled `BTextView` with the
+shared markdown renderer and syntax highlighter, drives tools
+through a `GuiSink` that marshals every worker-thread event to the
+window thread via `BMessenger`, and persists conversations as BFS
+session files (browsable in Tracker).
+
+Architecture:
+- [x] **Worker thread + `GuiSink`** — `api::SendWithTools` runs on a
+      background `std::thread`; the sink posts `MSG_CHUNK` /
+      `MSG_TOOL_*` / `MSG_ASK_*` / `MSG_STATUS` / `MSG_ERR` BMessages
+      to the window (non-blocking). The worker is **joined** (never
+      detached) in `MSG_WORKER_DONE` / `QuitRequested` / dtor before
+      `delete fSink`, so it can never touch a freed sink.
+- [x] **Tool-context history** — the worker mutates a member
+      `fWorkerMessages` in place (not a discarded copy); on a clean
+      turn the main thread adopts it via `std::move`, so
+      `tool_use` / `tool_result` blocks survive into the next turn.
+- [x] **Permission dialog** — `BAlert` with Deny / Allow Once /
+      Always allow `<tool>`. "Always" inserts into
+      `api::AlwaysAllowed()` (the shared session allowlist) so the
+      tool is never re-prompted. Blanket auto-approve lives in
+      Tools ▸ Ludicrous Mode.
+- [x] **`AskChoice` modal** — numbered tool choices render as a
+      native `BAlert` (≤ 3) or a self-contained `ChoiceModal` window
+      (> 3) with a sem handshake; default button + Esc-cancel a11y.
+      (No active caller in the tool loop yet — forward-looking.)
+- [x] **Image attachments** — dropped JPEG / PNG / GIF / WebP
+      (≤ 5 MB) are base64-encoded and sent as `image` content blocks
+      in an array-form user message. Non-image files keep the
+      inline-text-fence behavior.
+
+Quality-of-life (the GUI counterpart to v0.2/v0.3):
+- [x] **Export Transcript** (File ▸ Export…, Cmd-E) — `BFilePanel`
+      → Markdown serializer handling text / array / image /
+      tool_use / tool_result content.
+- [x] **Find in conversation** (Cmd-F) — case-insensitive search bar
+      with live-search, prev/next wraparound, `n / total` counter.
+- [x] **Font zoom** (Cmd +/-/0) — rescales output runs
+      multiplicatively, preserving the renderer's heading/body
+      proportions; re-applied after each turn, replay, and clear.
+- [x] **Session sidebar** (View ▸ Sessions, Cmd-B) — left-docked
+      `BListView` of saved BFS sessions (newest first) with
+      New / Open / Delete; `session::Delete` added to the store.
+- [x] **Welcome splash**, model picker, token bar, slide-in
+      Settings panel, slash-command autocomplete popup, desktop
+      notifications, and the shared HVIF app icon.
+
+Deferred:
+- Persisted GUI preferences (window frame, zoom level, last model).
+- CLI feature parity: hooks/MCP status surface, `/compact`,
+  cost/usage display inside the GUI.
+- Wiring an actual caller for `AskChoice` in the tool loop.
+- Streaming-markdown intra-line rendering (currently line-by-line;
+  partial lines complete on the next chunk).
+
+---
+
 ## Haiku-native extras
 
 Features that don't exist in Claude Code but would make this CLI feel
@@ -987,8 +1053,10 @@ Things explicitly excluded from this roadmap:
 - **IDE integrations** (VS Code, JetBrains). Haiku users mostly live
   in Pe, Koder, or the terminal; an IDE extension would be a separate
   project.
-- **Image input**. The Messages API supports it, but there's no good
-  terminal workflow for attaching images on Haiku without a GUI surface.
+- **Image input in the terminal**. The Messages API supports it, but
+  there's no good terminal workflow for attaching images on Haiku.
+  (The native GUI *does* support image attachments as of v1.5 — the
+  exclusion is specifically the CLI/Terminal front-end.)
 - **Windows and Linux ports**. macOS builds via nix exist only as a
   development convenience for prototyping before building on Taurus.
 - **Plugin marketplace**. The user config directory is the plugin
