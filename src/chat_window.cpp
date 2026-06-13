@@ -12,6 +12,7 @@
 #include "chat_window.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -52,6 +53,7 @@
 #include "api.h"
 #include "code_styler.h"
 #include "commands.h"
+#include "syntax_highlight.h"
 #include "config.h"
 #include "gui_sink.h"
 #include "md_renderer.h"
@@ -64,6 +66,52 @@
 // stay dark regardless of the system theme (the output area is always dark).
 // ---------------------------------------------------------------------------
 namespace {
+
+// Standard RFC 4648 base64 encoder (not URL-safe — the Anthropic image
+// API wants '+' / '/' with '=' padding). Used to embed dropped image
+// files as base64 `image` content blocks in the outgoing message.
+std::string Base64Encode(const std::string& in)
+{
+	static const char* kTable =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	out.reserve(((in.size() + 2) / 3) * 4);
+	size_t i = 0;
+	for (; i + 2 < in.size(); i += 3) {
+		const unsigned n = (static_cast<unsigned char>(in[i]) << 16)
+		                 | (static_cast<unsigned char>(in[i + 1]) << 8)
+		                 |  static_cast<unsigned char>(in[i + 2]);
+		out += kTable[(n >> 18) & 63];
+		out += kTable[(n >> 12) & 63];
+		out += kTable[(n >> 6) & 63];
+		out += kTable[n & 63];
+	}
+	if (i < in.size()) {
+		unsigned n = static_cast<unsigned char>(in[i]) << 16;
+		if (i + 1 < in.size())
+			n |= static_cast<unsigned char>(in[i + 1]) << 8;
+		out += kTable[(n >> 18) & 63];
+		out += kTable[(n >> 12) & 63];
+		out += (i + 1 < in.size()) ? kTable[(n >> 6) & 63] : '=';
+		out += '=';
+	}
+	return out;
+}
+
+// Map a file extension to an Anthropic-supported image media type, or
+// return an empty string if the extension is not a supported image.
+std::string ImageMediaType(const std::string& path)
+{
+	const auto dot = path.rfind('.');
+	if (dot == std::string::npos) return {};
+	std::string ext = path.substr(dot + 1);
+	for (char& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
+	if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+	if (ext == "png")                  return "image/png";
+	if (ext == "gif")                  return "image/gif";
+	if (ext == "webp")                 return "image/webp";
+	return {};
+}
 
 // Slider for the notification delay. Snaps to 10-second steps and shows a
 // plain-English label ("Notify is disabled" / "Notify after 30s") that
@@ -140,6 +188,9 @@ const rgb_color kColorUserLabel   = {  86, 180, 233, 255 };
 const rgb_color kColorModelLabel  = { 204, 121,  90, 255 };
 const rgb_color kColorToolLine    = { 130, 130, 140, 255 };
 const rgb_color kColorError       = { 230,  75,  75, 255 };
+const rgb_color kColorDiffAdd     = {  80, 200,  80, 255 }; // green  — added lines
+const rgb_color kColorDiffRemove  = { 220,  80,  80, 255 }; // red    — removed lines
+const rgb_color kColorDiffHeader  = { 140, 180, 220, 255 }; // steel-blue — diff header/meta
 
 // Known Anthropic models listed in the model picker.
 const char* kKnownModels[] = {
@@ -234,7 +285,7 @@ InputView::InputView(const char* name)
 	            BRect(4, 4, 196, 20),
 	            B_FOLLOW_ALL, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
 {
-	SetWordWrap(false);
+	SetWordWrap(true);
 	SetStylable(false);
 }
 
@@ -251,11 +302,11 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// Fix height to one line; the layout engine must not stretch us taller.
+	// Fix height to 5 lines; the layout engine must not stretch us taller.
 	font_height fh;
 	f.GetHeight(&fh);
 	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	const float fixedH = lineH + 8.0f; // 4px padding top + bottom
+	const float fixedH = lineH * 5.0f + 8.0f; // 5 lines + 4px padding top + bottom
 	SetExplicitMinSize(BSize(B_SIZE_UNSET, fixedH));
 	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, fixedH));
 }
@@ -700,18 +751,83 @@ void SpinnerView::SetVisible(bool v)
 
 
 // ===========================================================================
+// WelcomeView — startup splash with the app icon + greeting text.
+// ===========================================================================
+
+WelcomeView::WelcomeView()
+	: BView("welcome", B_WILL_DRAW)
+{
+	SetViewColor(kColorChatBg);
+	SetLowColor(kColorChatBg);
+
+	// Pull the HVIF icon stamped onto the binary at link time — the same
+	// source the About box uses. 64x64 keeps it crisp on HiDPI displays.
+	app_info info;
+	if (be_roster->GetRunningAppInfo(be_app->Team(), &info) == B_OK) {
+		BFile appFile(&info.ref, B_READ_ONLY);
+		BAppFileInfo fileInfo(&appFile);
+		BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
+		if (fileInfo.GetIcon(icon, B_LARGE_ICON) == B_OK)
+			fIcon = icon;
+		else
+			delete icon;
+	}
+
+	// Reserve enough height for the icon plus two text lines.
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, 96));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 96));
+}
+
+WelcomeView::~WelcomeView()
+{
+	delete fIcon;
+}
+
+void WelcomeView::Draw(BRect /*updateRect*/)
+{
+	const BRect b = Bounds();
+
+	// Icon on the left, vertically centred.
+	float textLeft = 16.0f;
+	if (fIcon != nullptr) {
+		const float iconY = (b.Height() - 64.0f) / 2.0f;
+		SetDrawingMode(B_OP_ALPHA);
+		DrawBitmap(fIcon, BPoint(16.0f, iconY));
+		SetDrawingMode(B_OP_COPY);
+		textLeft = 16.0f + 64.0f + 16.0f;
+	}
+
+	// Title line: bold "Claude" in the model accent colour.
+	BFont titleFont(be_bold_font);
+	titleFont.SetSize(titleFont.Size() * 1.6f);
+	SetFont(&titleFont);
+	SetHighColor(kColorModelLabel);
+	const float titleY = b.Height() / 2.0f - 6.0f;
+	DrawString("Claude", BPoint(textLeft, titleY));
+
+	// Subtitle: dim hint, regular font.
+	BFont subFont(be_plain_font);
+	SetFont(&subFont);
+	SetHighColor(kColorToolLine);
+	DrawString("Join the AI revolution, resistance is futile!",
+	           BPoint(textLeft, titleY + 22.0f));
+}
+
+
+// ===========================================================================
 // ChatWindow
 // ===========================================================================
 
 ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int maxTokens, const std::string& systemPrompt,
-                        int notifyMinSec)
+                        int notifyMinSec, const std::string& workingDir)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE | B_AUTO_UPDATE_SIZE_LIMITS)
 	, fAuth(auth)
 	, fModel(model)
 	, fMaxTokens(maxTokens)
 	, fSystemPrompt(systemPrompt)
+	, fWorkingDir(workingDir)
 	, fMessages(nlohmann::json::array())
 {
 	fNotifyMinSec = (notifyMinSec < 0) ? 0 : notifyMinSec;
@@ -744,7 +860,14 @@ ChatWindow::~ChatWindow()
 {
 	delete fStyler;
 	delete fMdRenderer;
-	if (fWorker.joinable()) fWorker.detach();
+	// The worker is normally joined in QuitRequested() before the window
+	// is destroyed. This is a defensive fallback: if a worker somehow
+	// outlives that path, ask it to stop and join (never detach — that
+	// would leave it racing on a freed fSink).
+	if (fWorker.joinable()) {
+		g_interrupted = 1;
+		fWorker.join();
+	}
 	delete fSink;
 	delete fSpinnerTimer;
 }
@@ -819,6 +942,9 @@ void ChatWindow::_BuildLayout()
 	fScroll = new BScrollView("scroll", fOutput,
 	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
 
+	// ── Welcome splash (shown above the chat until the first turn) ───────────
+	fWelcome = new WelcomeView();
+
 	// Floating jump-to-bottom button (overlaid, repositioned in FrameResized).
 	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93 New", // ↓
 	                        new BMessage(gui::MSG_JUMP_BOTTOM));
@@ -862,7 +988,10 @@ void ChatWindow::_BuildLayout()
 	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.AddGroup(B_HORIZONTAL, 0)
-			.Add(fScroll, 1.0f)
+			.AddGroup(B_VERTICAL, 0)
+				.Add(fWelcome, 0.0f)
+				.Add(fScroll, 1.0f)
+			.End()
 			.Add(fSettings, 0.0f)
 		.End()
 		.Add(fTokenBar, 0.0f)
@@ -1190,6 +1319,49 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 	}
 
+	case gui::MSG_TOOL_DIFF: {
+		// Render a structured diff (from Edit/Write tools) as coloured lines.
+		// Each line in the "diff" string starts with a sigil:
+		//   '!' — header / meta line (path, ellipsis notice)
+		//   '+' — added line (green)
+		//   '-' — removed line (red)
+		//   ' ' — context line (dim grey)
+		const char* rawDiff = nullptr;
+		msg->FindString("diff", &rawDiff);
+		if (!rawDiff || !rawDiff[0]) break;
+
+		// Blank line before the diff block for visual separation.
+		AppendWithColor(fOutput, "\n", kColorToolLine);
+
+		std::istringstream iss(rawDiff);
+		std::string line;
+		while (std::getline(iss, line)) {
+			if (line.empty()) {
+				AppendWithColor(fOutput, "\n", kColorToolLine);
+				continue;
+			}
+			const char sigil = line[0];
+			const std::string text = line.substr(1) + "\n";
+			switch (sigil) {
+				case '!':
+					AppendWithColor(fOutput, text, kColorDiffHeader);
+					break;
+				case '+':
+					AppendWithColor(fOutput, "+ " + text, kColorDiffAdd);
+					break;
+				case '-':
+					AppendWithColor(fOutput, "- " + text, kColorDiffRemove);
+					break;
+				default: // ' ' context
+					AppendWithColor(fOutput, "  " + text, kColorToolLine);
+					break;
+			}
+		}
+		AppendWithColor(fOutput, "\n", kColorToolLine);
+		if (!fUserScrolled) _ScrollToBottom();
+		break;
+	}
+
 	case gui::MSG_ASK_PERM:
 		_HandlePermRequest(msg);
 		break;
@@ -1199,10 +1371,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		msg->FindInt32("kind", &kind);
 		switch (static_cast<sink::StatusKind>(kind)) {
 			case sink::StatusKind::kThinking:
-				SetTitle("Claude \xE2\x80\x94 thinking\xE2\x80\xA6");
+				SetTitle("Claude");
 				break;
 			case sink::StatusKind::kCallingTool:
-				SetTitle("Claude \xE2\x80\x94 running tool\xE2\x80\xA6");
+				SetTitle("Claude");
 				break;
 			case sink::StatusKind::kIdle:
 				_UpdateTitle();
@@ -1226,9 +1398,14 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		int32 input  = 0;
 		int32 output = 0;
 		int32 maxCtx = 0;
+		bool  ok     = true;
 		msg->FindInt32("input",  &input);
 		msg->FindInt32("output", &output);
 		msg->FindInt32("max",    &maxCtx);
+		msg->FindBool("ok",      &ok);
+		// Remember whether the turn completed cleanly so MSG_WORKER_DONE
+		// only commits the mutated history on success.
+		fTurnCommitted = ok;
 		fSessionInputTokens  += input;
 		fSessionOutputTokens += output;
 		if (fTokenBar) {
@@ -1240,6 +1417,8 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_WORKER_DONE: {
 		fWorkerRunning.store(false);
+		// The worker is no longer detached — join it so fSink is only
+		// freed after the worker thread has fully exited (no UAF).
 		if (fWorker.joinable()) fWorker.join();
 		delete fSink;
 		fSink = nullptr;
@@ -1256,13 +1435,25 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		fInWebFetch = false;
 		fWebFetchBuf.clear();
 
-		// Commit turn to history.
-		if (!fPendingUserText.empty())
-			fMessages.push_back({{"role", "user"},
-			                     {"content", fPendingUserText}});
-		if (!fPendingAssistantText.empty())
-			fMessages.push_back({{"role", "assistant"},
-			                     {"content", fPendingAssistantText}});
+		// Commit turn to history. On a clean completion adopt the full
+		// messages array the worker built — it contains the user turn
+		// plus any tool_use / tool_result blocks and the assistant's
+		// final content, so tool context survives into the next turn.
+		// On cancellation (fTurnCommitted == false) fall back to the
+		// plain user/assistant text so a half-finished tool exchange
+		// doesn't leave an orphaned tool_use that would 400 the API.
+		if (fTurnCommitted && fWorkerMessages.is_array()
+				&& !fWorkerMessages.empty()) {
+			fMessages = std::move(fWorkerMessages);
+		} else {
+			if (!fPendingUserText.empty())
+				fMessages.push_back({{"role", "user"},
+				                     {"content", fPendingUserText}});
+			if (!fPendingAssistantText.empty())
+				fMessages.push_back({{"role", "assistant"},
+				                     {"content", fPendingAssistantText}});
+		}
+		fWorkerMessages = nlohmann::json::array();
 		fPendingUserText.clear();
 		fPendingAssistantText.clear();
 
@@ -1396,8 +1587,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 bool ChatWindow::QuitRequested()
 {
 	if (fWorkerRunning.load()) {
+		// Ask the in-flight request to abort, then wait for the worker
+		// thread to actually exit before tearing down the sink it holds.
 		g_interrupted = 1;
 		if (fWorker.joinable()) fWorker.join();
+		fWorkerRunning.store(false);
 		delete fSink;
 		fSink = nullptr;
 	}
@@ -1424,6 +1618,15 @@ void ChatWindow::_AppendToolLine(const std::string& text)
 void ChatWindow::_ScrollToBottom()
 {
 	fOutput->ScrollToOffset(fOutput->TextLength());
+}
+
+void ChatWindow::_DismissWelcome()
+{
+	// Collapse the startup splash the first time the chat gets real
+	// content. Safe to call repeatedly — Hide() on an already-hidden
+	// view is a no-op.
+	if (fWelcome != nullptr && !fWelcome->IsHidden())
+		fWelcome->Hide();
 }
 
 bool ChatWindow::_IsNearBottom() const
@@ -1495,6 +1698,40 @@ void ChatWindow::_ProcessChunk(const std::string& chunk)
 // _FlushCodeBlock — render accumulated code in a BScintillaView
 // ---------------------------------------------------------------------------
 
+// Map a syntax::TokenKind to an rgb_color and bold flag for BTextView.
+// Colours are chosen to read well on the dark code-block background.
+static void TokenStyle(syntax::TokenKind kind,
+                       rgb_color& color, bool& bold)
+{
+	bold = false;
+	switch (kind) {
+		case syntax::TokenKind::Keyword:
+			color = {220, 100, 220, 255}; bold = true;  break; // bold magenta
+		case syntax::TokenKind::Type:
+			color = { 80, 200, 220, 255}; bold = true;  break; // bold cyan
+		case syntax::TokenKind::Preprocessor:
+			color = {200, 100, 200, 255};                break; // magenta
+		case syntax::TokenKind::String:
+			color = {100, 200, 100, 255};                break; // green
+		case syntax::TokenKind::Number:
+			color = { 80, 200, 200, 255};                break; // cyan
+		case syntax::TokenKind::Comment:
+			color = {130, 130, 140, 255};                break; // dim grey
+		case syntax::TokenKind::Operator:
+			color = {210, 180,  80, 255};                break; // yellow
+		case syntax::TokenKind::Constant:
+			color = {220, 180,  60, 255}; bold = true;  break; // bold yellow
+		case syntax::TokenKind::Builtin:
+			color = { 80, 200,  80, 255}; bold = true;  break; // bold green
+		case syntax::TokenKind::Variable:
+			color = { 80, 200, 200, 255};                break; // cyan
+		case syntax::TokenKind::Special:
+			color = {220,  80,  80, 255}; bold = true;  break; // bold red
+		default: // Plain
+			color = {200, 200, 160, 255};                break; // warm cream
+	}
+}
+
 void ChatWindow::_FlushCodeBlock()
 {
 	if (fCodeBuffer.empty()) return;
@@ -1505,25 +1742,68 @@ void ChatWindow::_FlushCodeBlock()
 	// attached to the screen, causing GPF crashes on SendMessage().
 	// Styled BTextView runs are simpler and crash-free.
 
-	// Opening fence with language label.
 	if (fMdRenderer) {
+		// ── Language label (italic, dim) ─────────────────────────────────
 		if (!fCodeLang.empty()) {
 			md::Run langRun;
 			langRun.text     = fCodeLang + "\n";
 			langRun.hasColor = true;
 			langRun.color    = {120, 120, 140, 255};
 			langRun.italic   = true;
+			langRun.monospace = true;
 			fMdRenderer->AppendRun(langRun);
 		}
-		md::Run codeRun;
-		codeRun.text      = fCodeBuffer;
-		codeRun.monospace = true;
-		codeRun.hasColor  = true;
-		codeRun.color     = {200, 200, 160, 255};
-		fMdRenderer->AppendRun(codeRun);
-		md::Run nl;
-		nl.text = "\n";
-		fMdRenderer->AppendRun(nl);
+
+		// ── Syntax-highlighted body ───────────────────────────────────────
+		// Split the accumulated buffer into lines and tokenise each one.
+		// Each token span becomes its own md::Run so BTextView renders it
+		// in the correct colour.  Adjacent spans of the same kind are
+		// already merged by syntax::Tokenise's push() helper, so the
+		// run count is minimal.
+		const std::string& buf = fCodeBuffer;
+		size_t lineStart = 0;
+		while (lineStart <= buf.size()) {
+			const size_t nl = buf.find('\n', lineStart);
+			const bool   atEnd = (nl == std::string::npos);
+			const std::string line = atEnd
+			    ? buf.substr(lineStart)
+			    : buf.substr(lineStart, nl - lineStart + 1); // include '\n'
+
+			if (!line.empty()) {
+				// Tokenise without the trailing newline, then re-attach it.
+				const std::string bare = (line.back() == '\n')
+				    ? line.substr(0, line.size() - 1)
+				    : line;
+
+				const auto spans = syntax::Tokenise(fCodeLang, bare);
+				for (const auto& span : spans) {
+					md::Run r;
+					r.text      = span.text;
+					r.monospace = true;
+					r.hasColor  = true;
+					TokenStyle(span.kind, r.color, r.bold);
+					fMdRenderer->AppendRun(r);
+				}
+				// Re-emit the newline as a plain monospace run so the
+				// colour doesn't bleed into the next line's background.
+				if (line.back() == '\n') {
+					md::Run nlRun;
+					nlRun.text      = "\n";
+					nlRun.monospace = true;
+					nlRun.hasColor  = true;
+					nlRun.color     = {200, 200, 160, 255};
+					fMdRenderer->AppendRun(nlRun);
+				}
+			}
+
+			if (atEnd) break;
+			lineStart = nl + 1;
+		}
+
+		// Trailing blank line to separate the block from the next paragraph.
+		md::Run sep;
+		sep.text = "\n";
+		fMdRenderer->AppendRun(sep);
 		fMdRenderer->ScrollToEnd();
 	} else {
 		_AppendText(fCodeBuffer);
@@ -1563,6 +1843,8 @@ void ChatWindow::_SendTurn()
 
 void ChatWindow::_LaunchWorker(const std::string& userText)
 {
+	_DismissWelcome();
+
 	fPendingUserText.clear();
 	fPendingAssistantText.clear();
 	fPendingUserText = userText;
@@ -1588,18 +1870,46 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 	const int            maxTokens    = fMaxTokens;
 	const std::string    systemPrompt = config::ComposeSystem(fSystemPrompt,
 	                                                           fWorkingDir);
-	nlohmann::json       messages     = fMessages;
-	messages.push_back({{"role", "user"}, {"content", userText}});
+
+	// Seed the worker-owned messages array from the canonical history and
+	// append this turn's user message. The worker mutates fWorkerMessages
+	// in place; the main thread adopts it after join() in MSG_WORKER_DONE.
+	fWorkerMessages = fMessages;
+	if (fPendingImages.empty()) {
+		// Plain text turn — content is a simple string.
+		fWorkerMessages.push_back({{"role", "user"}, {"content", userText}});
+	} else {
+		// Multimodal turn — content is an array of blocks: the text first,
+		// then one `image` block per dropped image (base64 source).
+		nlohmann::json content = nlohmann::json::array();
+		if (!userText.empty())
+			content.push_back({{"type", "text"}, {"text", userText}});
+		for (const auto& [mediaType, b64] : fPendingImages) {
+			content.push_back({
+				{"type", "image"},
+				{"source", {
+					{"type",       "base64"},
+					{"media_type", mediaType},
+					{"data",       b64},
+				}},
+			});
+		}
+		fWorkerMessages.push_back({{"role", "user"}, {"content", content}});
+		fPendingImages.clear();
+	}
+	fTurnCommitted = false;
 
 	fSink = new gui::GuiSink(BMessenger(this));
 	gui::GuiSink* sink = fSink;
 	sink->BeginMessage("assistant");
 
 	fWorkerRunning.store(true);
-	fWorker = std::thread([=]() {
+	// Capture `this`, sink, and the scalars by value. fWorkerMessages is
+	// mutated through `this`; it is not touched by the main thread until
+	// after join(), so there is no data race.
+	fWorker = std::thread([this, auth, model, maxTokens, systemPrompt, sink]() {
 		const api::SendResult result = api::SendWithTools(auth, model, maxTokens,
-		                   const_cast<nlohmann::json&>(messages),
-		                   systemPrompt, sink);
+		                   fWorkerMessages, systemPrompt, sink);
 		sink->EndMessage();
 
 		// Post token counts so the TokenBar can update.
@@ -1607,10 +1917,14 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 		tokMsg.AddInt32("input",  result.input_tokens);
 		tokMsg.AddInt32("output", result.output_tokens);
 		tokMsg.AddInt32("max",    maxTokens);
+		// exit_code 0 means the turn completed cleanly (not cancelled);
+		// only then should the mutated history be committed.
+		tokMsg.AddBool("ok", result.exit_code == 0);
 		BMessenger(this).SendMessage(&tokMsg);
 		BMessenger(this).SendMessage(gui::MSG_WORKER_DONE);
 	});
-	fWorker.detach();
+	// NOTE: do NOT detach — the thread is joined in MSG_WORKER_DONE and
+	// QuitRequested so fSink is never freed while the worker still holds it.
 }
 
 void ChatWindow::_CancelWorker()
@@ -1628,6 +1942,7 @@ void ChatWindow::_NewChat()
 	fTurnCount   = 0;
 	fConvTopic.clear();
 	fSessionPath.clear();
+	fPendingImages.clear();
 	fSessionInputTokens  = 0;
 	fSessionOutputTokens = 0;
 	if (fTokenBar) {
@@ -1635,6 +1950,10 @@ void ChatWindow::_NewChat()
 		fTokenBar->SetStats(0, 0, 0);
 	}
 	_UpdateTitle();
+
+	// Fresh conversation — bring back the welcome splash.
+	if (fWelcome != nullptr && fWelcome->IsHidden())
+		fWelcome->Show();
 
 	// Always restore the input to a ready state — _CancelWorker() only
 	// requests interruption and leaves _SetBusy(false) to MSG_WORKER_DONE,
@@ -1662,8 +1981,10 @@ void ChatWindow::_HandlePermRequest(BMessage* msg)
 	msg->FindString("tool",    &tool);
 	msg->FindString("preview", &preview);
 
+	const std::string toolName = tool ? tool : "(unknown)";
+
 	std::string body = "Allow tool: ";
-	body += tool ? tool : "(unknown)";
+	body += toolName;
 	if (preview && preview[0]) {
 		body += "\n\n";
 		const std::string pv(preview);
@@ -1673,20 +1994,32 @@ void ChatWindow::_HandlePermRequest(BMessage* msg)
 	// Three-button alert:
 	//   button 0 (B_ESCAPE shortcut) — Deny
 	//   button 1                     — Allow once
-	//   button 2                     — Allow all (enable ludicrous mode)
+	//   button 2                     — Always allow this tool (session)
+	//
+	// "Always allow" adds the tool name to api::AlwaysAllowed(), the
+	// same session-scoped allowlist the CLI uses. Subsequent calls to
+	// the same tool short-circuit in GuiSink::AskPermission and never
+	// reach this dialog again. (The blanket "⚡ Allow All" / ludicrous
+	// mode lives in the Tools menu for users who want it.)
+	//
+	// The worker thread is parked on fPermSem while this runs, so
+	// mutating api::AlwaysAllowed() here is race-free.
+	std::string alwaysLabel = "Always allow " + toolName;
 	BAlert* alert = new BAlert("Tool Permission", body.c_str(),
-	    "Deny", "Allow", "\xE2\x9A\xA1 Allow All",
+	    "Deny", "Allow Once", alwaysLabel.c_str(),
 	    B_WIDTH_AS_USUAL, B_WARNING_ALERT);
 	alert->SetShortcut(0, B_ESCAPE);
 	const int32 choice = alert->Go();
 
 	if (choice == 2) {
-		// Engage ludicrous mode — auto-approve this and all future tools.
-		api::g_ludicrous_mode.store(true);
-		if (fLudicrousItem) fLudicrousItem->SetMarked(true);
-		_AppendToolLine("\xE2\x9A\xA1 Ludicrous mode engaged \xE2\x80\x94 all tools auto-approved\n");
+		// Add to the session allowlist so this tool is never prompted
+		// again for the rest of the session.
+		api::AlwaysAllowed().insert(toolName);
+		_AppendToolLine("\xE2\x9C\x93 " + toolName
+			+ " allowed for this session\n");
 		if (fSink) fSink->DeliverPermissionReply(true);
 	} else {
+		// choice 1 = allow once; choice 0 / Esc = deny.
 		if (fSink) fSink->DeliverPermissionReply(choice == 1);
 	}
 }
@@ -1711,10 +2044,7 @@ void ChatWindow::_SetBusy(bool busy)
 
 void ChatWindow::_UpdateTitle()
 {
-	std::string title = "Claude \xE2\x80\x94 " + fModel; // em dash
-	if (!fConvTopic.empty())
-		title += " \xE2\x80\x94 " + fConvTopic;
-	SetTitle(title.c_str());
+	SetTitle("Claude");
 }
 
 void ChatWindow::_SaveSession()
@@ -1732,6 +2062,7 @@ void ChatWindow::_SaveSession()
 
 void ChatWindow::_LoadSession(const std::string& path)
 {
+	_DismissWelcome();
 	if (path.empty()) return;
 	nlohmann::json loaded = session::Load(path);
 	if (loaded.empty()) return;
@@ -1801,6 +2132,8 @@ void ChatWindow::_RefsReceived(BMessage* msg)
 
 void ChatWindow::_ShowMarkdownDemo()
 {
+	_DismissWelcome();
+
 	// Emit a user "question" label so the demo looks like a real turn.
 	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
 	_AppendText("Show me a markdown rendering demo\n");
@@ -1931,6 +2264,42 @@ void ChatWindow::_ShowMarkdownDemo()
 
 void ChatWindow::_InsertFileContent(const std::string& path)
 {
+	// ── Image files become base64 `image` content blocks ─────────────────────
+	// Anthropic supports JPEG / PNG / GIF / WebP up to ~5 MB each. We read
+	// the raw bytes, base64-encode them, and stash them in fPendingImages so
+	// _LaunchWorker can emit them as image blocks alongside the text. A chip
+	// is inserted into the input so the user sees the attachment.
+	if (const std::string mediaType = ImageMediaType(path); !mediaType.empty()) {
+		constexpr off_t kMaxImageBytes = 5 * 1024 * 1024;
+		BFile imgFile(path.c_str(), B_READ_ONLY);
+		if (imgFile.InitCheck() != B_OK) return;
+		off_t imgSize = 0;
+		imgFile.GetSize(&imgSize);
+		if (imgSize <= 0) return;
+		if (imgSize > kMaxImageBytes) {
+			BAlert* alert = new BAlert("Image too large",
+			    "That image exceeds the 5 MB limit and cannot be attached.",
+			    "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+			alert->Go();
+			return;
+		}
+		std::string raw(static_cast<size_t>(imgSize), '\0');
+		if (imgFile.Read(&raw[0], raw.size()) <= 0) return;
+
+		fPendingImages.emplace_back(mediaType, Base64Encode(raw));
+
+		// Insert a visible chip and focus the input.
+		std::string name = path;
+		if (const auto slash = name.rfind('/'); slash != std::string::npos)
+			name = name.substr(slash + 1);
+		const std::string chip = "\n[\xF0\x9F\x96\xBC image: " + name + "]\n";
+		const int32 end = fInput->TextLength();
+		fInput->Insert(end, chip.c_str(), static_cast<int32>(chip.size()));
+		fInput->Select(fInput->TextLength(), fInput->TextLength());
+		fInput->MakeFocus(true);
+		return;
+	}
+
 	// Read the file — cap at 64 KB to avoid flooding the context.
 	constexpr size_t kMaxBytes = 64 * 1024;
 	BFile file(path.c_str(), B_READ_ONLY);

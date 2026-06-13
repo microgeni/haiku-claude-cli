@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <Button.h>
+#include <Bitmap.h>
 #include <ListView.h>
 #include <Menu.h>
 #include <MenuBar.h>
@@ -200,6 +201,24 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WelcomeView — a splash panel shown above the chat output on a fresh window.
+//
+// Draws the application's HVIF icon (loaded from the running binary via
+// BAppFileInfo, the same source as the About box) alongside a title and a
+// short hint line — the GUI counterpart to the CLI's ASCII-art banner.
+// Collapses itself once the first turn begins so it never crowds the chat.
+class WelcomeView : public BView {
+public:
+	WelcomeView();
+	~WelcomeView() override;
+
+	void Draw(BRect updateRect) override;
+
+private:
+	BBitmap* fIcon = nullptr;  // owned; 64x64 RGBA app icon, may be nullptr
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ChatWindow — the main application window.
 //
 // Layout (simplified):
@@ -226,7 +245,8 @@ class ChatWindow : public BWindow {
 public:
 	ChatWindow(const config::Auth& auth, const std::string& model,
 	           int maxTokens, const std::string& systemPrompt,
-	           int notifyMinSec = 5);
+	           int notifyMinSec = 5,
+	           const std::string& workingDir = {});
 	~ChatWindow() override;
 
 	void MessageReceived(BMessage* msg) override;
@@ -264,11 +284,13 @@ private:
 	void _LoadSession(const std::string& path); // restore a saved session
 	void _InsertFileContent(const std::string& path); // drag-drop helper
 	void _ShowMarkdownDemo();    // render a rich markdown example into the chat output
+	void _DismissWelcome();      // hide the startup splash once a turn begins
 
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
 	BTextView*     fOutput        = nullptr;
+	WelcomeView*   fWelcome       = nullptr;  // startup splash, collapsed on first turn
 	BScrollView*   fScroll        = nullptr;
 	BButton*       fJumpBtn       = nullptr;  // floating "↓" overlay button
 	TokenBar*      fTokenBar      = nullptr;
@@ -339,6 +361,19 @@ private:
 	gui::GuiSink*       fSink          = nullptr;
 	std::string         fPendingUserText;
 	std::string         fPendingAssistantText;
+	// Image files dropped onto the window for the next turn. Each entry
+	// is { media_type, base64_data } and becomes an `image` content block
+	// (base64 source) in the outgoing user message so Claude can see it.
+	// Drained when the turn is launched.
+	std::vector<std::pair<std::string, std::string>> fPendingImages;
+	// The messages array the worker hands to api::SendWithTools. The worker
+	// mutates it in place (appending tool_use / tool_result / assistant
+	// blocks), so after the turn is joined the main thread adopts it as the
+	// canonical conversation history — preserving tool context across turns.
+	nlohmann::json      fWorkerMessages;
+	// True when the worker finished normally (not cancelled), so the
+	// MSG_WORKER_DONE handler knows whether to commit fWorkerMessages.
+	bool                fTurnCommitted = false;
 };
 
 #endif // HAIKU_CLAUDE_CLI_CHAT_WINDOW_H
