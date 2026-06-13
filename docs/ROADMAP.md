@@ -973,7 +973,7 @@ earlier without restarting.
 
 ---
 
-### v1.5 — Native GUI (`claude-gui`) ✓
+### v1.9 — Native GUI (`claude-gui`) ✓
 
 A first-class BeAPI desktop client built from the same core logic
 modules as the CLI (`api`, `tools`, `config`, `hooks`, `mcp`,
@@ -1064,7 +1064,7 @@ Things explicitly excluded from this roadmap:
   project.
 - **Image input in the terminal**. The Messages API supports it, but
   there's no good terminal workflow for attaching images on Haiku.
-  (The native GUI *does* support image attachments as of v1.5 — the
+  (The native GUI *does* support image attachments as of v1.9 — the
   exclusion is specifically the CLI/Terminal front-end.)
 - **Windows and Linux ports**. macOS builds via nix exist only as a
   development convenience for prototyping before building on Taurus.
