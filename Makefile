@@ -46,11 +46,12 @@ BIN      := $(BUILDDIR)/claude
 # GUI-only sources must be excluded from the CLI wildcard so BeAPI
 # headers and symbols don't bleed into the terminal build.
 GUI_ONLY_SRCS := \
-    $(SRCDIR)/gui_sink.cpp     \
-    $(SRCDIR)/gui_stubs.cpp    \
-    $(SRCDIR)/code_styler.cpp  \
-    $(SRCDIR)/md_renderer.cpp  \
-    $(SRCDIR)/chat_window.cpp  \
+    $(SRCDIR)/gui_sink.cpp          \
+    $(SRCDIR)/gui_stubs.cpp         \
+    $(SRCDIR)/code_styler.cpp       \
+    $(SRCDIR)/md_renderer.cpp       \
+    $(SRCDIR)/syntax_highlight.cpp  \
+    $(SRCDIR)/chat_window.cpp       \
     $(SRCDIR)/app_main_gui.cpp
 
 _ALL_SRCS := $(wildcard $(SRCDIR)/*.cpp)
@@ -82,11 +83,16 @@ PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).h
 
 all: $(BIN)
 
-# ── GUI target (Haiku only — links libbe) ────────────────────────────────────
+# GUI target (Haiku only — links libbe) ────────────────────────────────────
 # The GUI reuses all the core logic modules from src/ but substitutes the
 # terminal-specific files (main, session, repl, tui, commands, stats,
 # terminal_sink, telegram) for the BeAPI front-end files.
-GUI_BIN     := $(BUILDDIR)/claude-gui
+#
+# The binary is named "Claude" (capitalized, no hyphen) to follow Haiku's
+# application naming convention (StyledEdit, Terminal, Tracker). The CLI
+# binary stays lowercase "claude". The app signature is an internal MIME
+# identifier and is intentionally left stable across the rename.
+GUI_BIN     := $(BUILDDIR)/Claude
 GUI_APP_SIG ?= application/x-vnd.Microgeni-claude-gui
 
 # Modules shared between CLI and GUI (core logic, no terminal UI).
@@ -105,13 +111,14 @@ GUI_CORE_SRCS := \
 
 # GUI-specific front-end files.
 GUI_FRONT_SRCS := \
-    $(SRCDIR)/tui.cpp          \
-    $(SRCDIR)/code_styler.cpp  \
-    $(SRCDIR)/md_renderer.cpp  \
-    $(SRCDIR)/gui_stubs.cpp    \
-    $(SRCDIR)/gui_sink.cpp     \
-    $(SRCDIR)/session_store.cpp \
-    $(SRCDIR)/chat_window.cpp  \
+    $(SRCDIR)/tui.cpp               \
+    $(SRCDIR)/code_styler.cpp       \
+    $(SRCDIR)/md_renderer.cpp       \
+    $(SRCDIR)/syntax_highlight.cpp  \
+    $(SRCDIR)/gui_stubs.cpp         \
+    $(SRCDIR)/gui_sink.cpp          \
+    $(SRCDIR)/session_store.cpp     \
+    $(SRCDIR)/chat_window.cpp       \
     $(SRCDIR)/app_main_gui.cpp
 
 GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
@@ -124,7 +131,7 @@ YAMLCPP_LIBS   := $(shell $(PKG_CONFIG) --libs   yaml-cpp 2>/dev/null || echo -l
 # Same compile flags as the CLI + libbe headers + yaml-cpp.
 GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS)
 GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
-                -pthread -lbe -lnetwork
+                -pthread -lbe -lnetwork -ltracker
 
 $(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@mkdir -p $(@D)

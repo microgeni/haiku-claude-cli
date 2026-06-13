@@ -973,14 +973,15 @@ earlier without restarting.
 
 ---
 
-### v1.9 — Native GUI (`claude-gui`) ✓
+### v1.9 — Native GUI (`Claude`) ✓
 
 A first-class BeAPI desktop client built from the same core logic
 modules as the CLI (`api`, `tools`, `config`, `hooks`, `mcp`,
 `oauth`, `models`, `notify`), with the terminal front-end swapped
 for a native Haiku GUI (`chat_window`, `gui_sink`, `app_main_gui`).
-Built via `make gui` → `build/claude-gui`; Haiku-only (links
-`libbe`, `libtracker`, `libnetwork`).
+Built via `make gui` → `build/Claude` (capitalized per Haiku app
+naming convention; the CLI binary stays lowercase `claude`).
+Haiku-only (links `libbe`, `libtracker`, `libnetwork`).
 
 The window streams responses into a styled `BTextView` with the
 shared markdown renderer and syntax highlighter, drives tools
