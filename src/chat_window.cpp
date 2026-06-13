@@ -136,13 +136,22 @@ public:
 		BLayoutBuilder::Group<> builder(this, B_VERTICAL, B_USE_SMALL_SPACING);
 		builder.SetInsets(B_USE_WINDOW_SPACING);
 		builder.Add(label);
+		BButton* first = nullptr;
 		for (size_t i = 0; i < options.size(); ++i) {
 			BMessage* m = new BMessage('CHpk');
 			m->AddInt32("index", static_cast<int32>(i));
 			BButton* b = new BButton("opt", options[i].c_str(), m);
 			b->SetTarget(this);
+			if (i == 0) first = b;
 			builder.Add(b);
 		}
+
+		// Keyboard a11y: Enter activates the first option, Esc cancels.
+		if (first) {
+			first->MakeDefault(true);
+			first->MakeFocus(true);
+		}
+		AddShortcut(B_ESCAPE, 0, new BMessage('CHcl'));
 		CenterOnScreen();
 	}
 
@@ -154,7 +163,12 @@ public:
 			int32 idx = -1;
 			msg->FindInt32("index", &idx);
 			fResult = idx;
-			release_sem(fDoneSem);
+			_Finish();
+			return;
+		}
+		if (msg->what == 'CHcl') {   // Esc — cancel
+			fResult = -1;
+			_Finish();
 			return;
 		}
 		BWindow::MessageReceived(msg);
@@ -163,7 +177,7 @@ public:
 	bool QuitRequested() override
 	{
 		// Closing the window without a pick counts as cancel.
-		release_sem(fDoneSem);
+		_Finish();
 		return true;
 	}
 
@@ -181,8 +195,19 @@ public:
 	}
 
 private:
+	// Release the wait semaphore exactly once, however the modal ends
+	// (button, Esc, or window close).
+	void _Finish()
+	{
+		if (!fFinished) {
+			fFinished = true;
+			release_sem(fDoneSem);
+		}
+	}
+
 	sem_id fDoneSem;
-	int    fResult = -1;
+	int    fResult   = -1;
+	bool   fFinished = false;
 };
 
 // Slider for the notification delay. Snaps to 10-second steps and shows a
@@ -1479,8 +1504,13 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_DONE:
 		if (fInCodeBlock) { fInCodeBlock = false; _FlushCodeBlock(); }
-		if (fMdRenderer)  fMdRenderer->Flush();
+		// Emit a trailing partial line before flushing so it isn't lost.
+		if (!fLineBuffer.empty() && !fInCodeBlock) {
+			if (fMdRenderer) fMdRenderer->Write(fLineBuffer);
+			else             _AppendText(fLineBuffer);
+		}
 		fLineBuffer.clear();
+		if (fMdRenderer)  fMdRenderer->Flush();
 		fInWebFetch = false;
 		fWebFetchBuf.clear();
 		break;
@@ -1639,8 +1669,14 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 		// Flush any open code block.
 		if (fInCodeBlock) { fInCodeBlock = false; _FlushCodeBlock(); }
-		if (fMdRenderer)  fMdRenderer->Flush();
+		// Emit a final partial line (a response that didn't end in '\n')
+		// before flushing the renderer so trailing text isn't dropped.
+		if (!fLineBuffer.empty() && !fInCodeBlock) {
+			if (fMdRenderer) fMdRenderer->Write(fLineBuffer);
+			else             _AppendText(fLineBuffer);
+		}
 		fLineBuffer.clear();
+		if (fMdRenderer)  fMdRenderer->Flush();
 		fInWebFetch = false;
 		fWebFetchBuf.clear();
 
@@ -1899,13 +1935,13 @@ void ChatWindow::_ProcessChunk(const std::string& chunk)
 		}
 	}
 
-	// Partial line — pass to markdown renderer (buffers until '\n').
-	if (!fLineBuffer.empty() && !fInCodeBlock) {
-		if (fMdRenderer) {
-			fMdRenderer->Write(fLineBuffer);
-			fLineBuffer.clear();
-		}
-	}
+	// A trailing partial line (no terminating '\n' yet) is intentionally
+	// left in fLineBuffer: the next chunk appends to it and the fence /
+	// markdown logic above runs once the line actually completes. The
+	// renderer also buffers internally, so passing partial text here would
+	// either render nothing (held until newline) or risk processing an
+	// incomplete fence marker. The end-of-turn handler flushes any final
+	// partial line via the explicit fLineBuffer write + fMdRenderer->Flush().
 }
 
 // ---------------------------------------------------------------------------
