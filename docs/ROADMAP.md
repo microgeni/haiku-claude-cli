@@ -902,7 +902,7 @@ scratch.
       Ctrl+X is detected; `repl::RestoreInput` then seeds the edit buffer.
       The amended re-submission becomes the canonical history entry.
 
-#### True non-blocking prompt (type-ahead)
+#### True non-blocking prompt (type-ahead) ✓
 
 Return to `ReadMessage()` immediately after enqueuing, so the
 user can compose the next message while the current one streams.
@@ -910,18 +910,27 @@ The incoming keystrokes are buffered by libedit; the turn is
 submitted only after the worker signals completion (or the user
 explicitly queues it).
 
-- [ ] **`fWorkerOwnsDisplay` as a tri-state** — idle / streaming
-      / done. When streaming, libedit still shows the prompt but
-      keypresses are buffered rather than echoed over the stream.
-      When done, the buffer is flushed into the active line.
-- [ ] **Double-Enter to queue** — if the user finishes typing
-      and presses Enter while a turn is still running, the new
-      prompt is held in `fQueuedInput` on `LocalWorker`. As soon
-      as the current result is drained the next job is enqueued
-      without returning to `ReadMessage()`.
-- [ ] **Visual separation** — a dim `[queued]` annotation on the
-      input row while the previous turn is still streaming so the
-      user knows their input is staged, not submitted yet.
+- [x] **`fWorkerOwnsDisplay` as a tri-state** — added an explicit
+      `DisplayState { Idle, Streaming, Done }` on `LocalWorker`
+      alongside the existing `fWorkerOwnsDisplay` terminal-ownership
+      bool. The worker sets `Streaming` on dispatch and `Done` on
+      completion; `drain_turn()` returns it to `Idle`. The main loop
+      reads `Streaming` vs `Done` to decide whether to stage input or
+      drain.
+- [x] **Double-Enter to queue** — a line submitted while
+      `fDisplayState == Streaming` is stashed in
+      `LocalWorker::fQueuedInput` instead of blocking on
+      `fDisplayCv.wait`. The loop returns to the prompt; when the
+      top-of-loop drain fires after the turn completes, the queued
+      line is moved into the next iteration's `queuedLine` and
+      dispatched through the normal path-drop / slash / hooks /
+      `dispatch_turn` flow without re-entering `ReadMessage()`.
+      Queue depth is 1 — a second queued line replaces the first with
+      a `[queued (replaced previous)]` notice.
+- [x] **Visual separation** — a dim `[queued: …]` annotation is
+      printed to the scroll history and a `[queued] next prompt` hint
+      is shown on the status row while the input is staged, so the
+      user knows it is staged, not yet submitted.
 
 **Deferred within this milestone**:
 - Streaming the worker's output interleaved with user keystrokes
