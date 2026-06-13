@@ -981,7 +981,9 @@ modules as the CLI (`api`, `tools`, `config`, `hooks`, `mcp`,
 for a native Haiku GUI (`chat_window`, `gui_sink`, `app_main_gui`).
 Built via `make gui` → `build/Claude` (capitalized per Haiku app
 naming convention; the CLI binary stays lowercase `claude`).
-Haiku-only (links `libbe`, `libtracker`, `libnetwork`).
+Installed via `make install-gui` (→ `PREFIX/apps/Claude` + style
+data under `PREFIX/data/claude-gui/`). Haiku-only (links `libbe`,
+`libtracker`, `libnetwork`).
 
 The window streams responses into a styled `BTextView` with the
 shared markdown renderer and syntax highlighter, drives tools
