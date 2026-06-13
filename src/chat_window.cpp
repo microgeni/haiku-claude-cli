@@ -660,7 +660,15 @@ void InputView::SetEnabled(bool enabled)
 {
 	fEnabled = enabled;
 	MakeEditable(enabled);
-	SetViewUIColor(enabled ? B_DOCUMENT_BACKGROUND_COLOR : B_PANEL_BACKGROUND_COLOR);
+	// Stay on the dark chat-matching background; dim it slightly while
+	// disabled (during a turn) so the state is still legible. Do NOT
+	// fall back to the light B_DOCUMENT_BACKGROUND_COLOR — that would
+	// undo the dark unified look after the first turn.
+	const rgb_color bg = enabled
+		? kColorChatBg
+		: tint_color(kColorChatBg, B_LIGHTEN_1_TINT);
+	SetViewColor(bg);
+	SetLowColor(bg);
 	Invalidate();
 }
 
