@@ -2088,7 +2088,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_HELP_DOCS: {
 		// Open the project README on GitHub in the default browser.
-		const std::string url = "https://github.com/reddyishere/haiku-claude-cli";
+		const std::string url = "https://github.com/microgeni/haiku-claude-cli";
 		const std::string cmd = "open " + url + " &";
 		std::system(cmd.c_str());  // flawfinder: ignore
 		break;
