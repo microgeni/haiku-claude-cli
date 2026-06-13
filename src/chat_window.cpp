@@ -927,6 +927,12 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	AddShortcut('L', B_COMMAND_KEY, new BMessage(gui::MSG_CLEAR_OUTPUT));
 	AddShortcut(',', B_COMMAND_KEY, new BMessage(gui::MSG_SETTINGS));
 	AddShortcut('F', B_COMMAND_KEY, new BMessage(gui::MSG_FIND));
+	// Font zoom. Bind both '+' and '=' (same key, unshifted) for zoom-in
+	// so the user doesn't have to hold Shift.
+	AddShortcut('+', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_IN));
+	AddShortcut('=', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_IN));
+	AddShortcut('-', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_OUT));
+	AddShortcut('0', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_RESET));
 }
 
 ChatWindow::~ChatWindow()
@@ -969,6 +975,15 @@ void ChatWindow::_BuildMenuBar()
 	BMenu* editMenu = new BMenu("Edit");
 	editMenu->AddItem(new BMenuItem("Clear Chat",
 		new BMessage(gui::MSG_CLEAR_OUTPUT), 'L'));
+	editMenu->AddItem(new BMenuItem("Find\xE2\x80\xA6", // …
+		new BMessage(gui::MSG_FIND), 'F'));
+	editMenu->AddSeparatorItem();
+	editMenu->AddItem(new BMenuItem("Zoom In",
+		new BMessage(gui::MSG_ZOOM_IN), '+'));
+	editMenu->AddItem(new BMenuItem("Zoom Out",
+		new BMessage(gui::MSG_ZOOM_OUT), '-'));
+	editMenu->AddItem(new BMenuItem("Actual Size",
+		new BMessage(gui::MSG_ZOOM_RESET), '0'));
 	fMenuBar->AddItem(editMenu);
 
 	// ── Tools ───────────────────────────────────────────────────────────────
@@ -1248,6 +1263,18 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_FIND:
 		_ToggleFindBar();
+		break;
+
+	case gui::MSG_ZOOM_IN:
+		_Zoom(+1);
+		break;
+
+	case gui::MSG_ZOOM_OUT:
+		_Zoom(-1);
+		break;
+
+	case gui::MSG_ZOOM_RESET:
+		_Zoom(0);
 		break;
 
 	case gui::MSG_FIND_NEXT:
@@ -1644,6 +1671,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			fTokenBar->SetStats(fTurnCount, fSessionInputTokens, fSessionOutputTokens);
 		_SetBusy(false);
 		_UpdateTitle();
+
+		// If the user has zoomed, scale the text that just streamed in
+		// (it arrived at base size) so the whole transcript stays at the
+		// chosen zoom level.
+		if (fZoomFactor != 1.0f) _ApplyZoom();
 
 		// Auto-save session to BFS after every completed turn.
 		_SaveSession();
@@ -2154,6 +2186,10 @@ void ChatWindow::_ClearOutput()
 	fCodeViews.clear();
 	// Reset the TextRect to fit the now-empty view.
 	fOutput->SetTextRect(fOutput->Bounds().InsetByCopy(4, 4));
+	// The buffer is empty; reset the zoom-applied boundary but keep the
+	// user's chosen factor so new text is scaled to it on next append.
+	fZoomedLen   = 0;
+	fAppliedZoom = fZoomFactor;
 }
 
 void ChatWindow::_HandlePermRequest(BMessage* msg)
@@ -2462,6 +2498,67 @@ void ChatWindow::_FindNext(bool forward)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Font zoom (Cmd +/-/0)
+// ---------------------------------------------------------------------------
+
+// delta: +1 = zoom in, -1 = zoom out, 0 = reset to 100%.
+void ChatWindow::_Zoom(int delta)
+{
+	constexpr float kStep = 0.1f;
+	constexpr float kMin  = 0.6f;
+	constexpr float kMax  = 2.5f;
+
+	if (delta == 0) {
+		fZoomFactor = 1.0f;
+	} else {
+		fZoomFactor += (delta > 0 ? kStep : -kStep);
+		if (fZoomFactor < kMin) fZoomFactor = kMin;
+		if (fZoomFactor > kMax) fZoomFactor = kMax;
+	}
+	_ApplyZoom();
+}
+
+// Rescale the output runs to the desired zoom factor. Two regions are
+// handled: text already scaled to fAppliedZoom (offsets 0..fZoomedLen) is
+// adjusted by the incremental ratio, and freshly-streamed text beyond
+// fZoomedLen (which arrived at base size) is scaled by the full factor.
+// Relative sizes the markdown renderer chose (headings vs body) are
+// preserved because each run is scaled multiplicatively. Called on every
+// zoom command and after each turn (MSG_WORKER_DONE) so streamed text
+// catches up.
+void ChatWindow::_ApplyZoom()
+{
+	if (!fOutput) return;
+	const int32 len = fOutput->TextLength();
+	if (len <= 0) { fAppliedZoom = fZoomFactor; fZoomedLen = 0; return; }
+
+	auto scaleRange = [&](int32 from, int32 to, float ratio) {
+		if (from >= to || ratio == 1.0f) return;
+		text_run_array* runs = fOutput->RunArray(from, to);
+		if (!runs) return;
+		for (int32 i = 0; i < runs->count; ++i)
+			runs->runs[i].font.SetSize(runs->runs[i].font.Size() * ratio);
+		fOutput->SetRunArray(from, to, runs);
+		free(runs);
+	};
+
+	// Clamp the previously-scaled boundary in case text was cleared.
+	if (fZoomedLen > len) fZoomedLen = len;
+
+	// Region 1: already-scaled text → adjust by the incremental ratio.
+	const float ratio = (fAppliedZoom > 0.0f) ? (fZoomFactor / fAppliedZoom)
+	                                           : fZoomFactor;
+	scaleRange(0, fZoomedLen, ratio);
+
+	// Region 2: new text appended since the last apply → full factor.
+	scaleRange(fZoomedLen, len, fZoomFactor);
+
+	fAppliedZoom = fZoomFactor;
+	fZoomedLen   = len;
+	fOutput->Invalidate();
+}
+
 void ChatWindow::_LoadSession(const std::string& path)
 {
 	_DismissWelcome();
@@ -2507,6 +2604,9 @@ void ChatWindow::_LoadSession(const std::string& path)
 	_UpdateTitle();
 	_ScrollToBottom();
 	fInput->MakeFocus(true);
+
+	// Apply the current zoom to the replayed transcript.
+	if (fZoomFactor != 1.0f) _ApplyZoom();
 
 	// Loaded sessions don't carry token totals; reset and show the
 	// replayed turn count so the bar stays consistent with the CLI.

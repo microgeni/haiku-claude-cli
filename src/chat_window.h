@@ -62,6 +62,9 @@ constexpr uint32_t MSG_FIND_NEXT      = 'FNXT'; // find bar: next match / Enter
 constexpr uint32_t MSG_FIND_PREV      = 'FPRV'; // find bar: previous match
 constexpr uint32_t MSG_FIND_CLOSE     = 'FCLO'; // find bar: close / Esc
 constexpr uint32_t MSG_FIND_LIVE      = 'FLIV'; // find bar: query text changed
+constexpr uint32_t MSG_ZOOM_IN        = 'ZMIN'; // Cmd-+ : larger chat font
+constexpr uint32_t MSG_ZOOM_OUT       = 'ZMOT'; // Cmd-- : smaller chat font
+constexpr uint32_t MSG_ZOOM_RESET     = 'ZMRS'; // Cmd-0 : reset chat font
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +304,10 @@ private:
 	void _ToggleFindBar();              // show/hide + focus the find field
 	void _FindNext(bool forward);       // select+scroll to next/prev match (wraps)
 
+	// ── Font zoom (Cmd +/-/0) ──────────────────────────────────────────────────
+	void _Zoom(int delta);              // delta: +1 in, -1 out, 0 reset
+	void _ApplyZoom();                  // rescale all output runs to fZoomFactor
+
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
@@ -324,6 +331,11 @@ private:
 	BTextControl*  fFindField     = nullptr;  // query input
 	BStringView*   fFindStatus    = nullptr;  // "3 / 12" match counter
 	int32          fFindMatchStart = -1;      // offset of the current match
+
+	// ── Font zoom ──────────────────────────────────────────────────────────────
+	float          fZoomFactor    = 1.0f;     // desired output font multiplier
+	float          fAppliedZoom   = 1.0f;     // factor applied to text up to fZoomedLen
+	int32          fZoomedLen     = 0;        // output length already scaled to fAppliedZoom
 
 	// ── Conversation state ───────────────────────────────────────────────────
 	config::Auth   fAuth;
