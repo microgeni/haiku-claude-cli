@@ -40,6 +40,7 @@ std::string LogDir()             { return ConfigDir() + "/logs"; }
 std::string UserMemoryPath()    { return ConfigDir() + "/CLAUDE.md"; }
 std::string ProjectMemoryPath() { return "CLAUDE.md"; }
 std::string SessionsDir()       { return ConfigDir() + "/sessions"; }
+std::string GuiPrefsPath()      { return ConfigDir() + "/gui_prefs.msg"; }
 
 // Walk `path` one component at a time and mkdir each prefix. mkdir(2)
 // returning EEXIST is fine — someone (maybe a previous call, maybe the

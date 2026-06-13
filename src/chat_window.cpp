@@ -60,6 +60,7 @@
 #include "gui_sink.h"
 #include "md_renderer.h"
 #include "models.h"
+#include "paths.h"
 #include "session_store.h"
 
 // ---------------------------------------------------------------------------
@@ -970,6 +971,9 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	AddShortcut('=', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_IN));
 	AddShortcut('-', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_OUT));
 	AddShortcut('0', B_COMMAND_KEY, new BMessage(gui::MSG_ZOOM_RESET));
+
+	// Restore window frame, zoom, and last model from the prefs file.
+	_LoadGuiPrefs();
 }
 
 ChatWindow::~ChatWindow()
@@ -1907,6 +1911,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 bool ChatWindow::QuitRequested()
 {
+	// Persist window frame / zoom / model before tearing down.
+	_SaveGuiPrefs();
+
 	if (fWorkerRunning.load()) {
 		// Ask the in-flight request to abort, then wait for the worker
 		// thread to actually exit before tearing down the sink it holds.
@@ -2742,6 +2749,64 @@ void ChatWindow::_DeleteSelectedSession()
 		if (fSessionPath == path) fSessionPath.clear();
 		_RefreshSessionList();
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Global GUI preferences — a flattened BMessage at paths::GuiPrefsPath().
+// ---------------------------------------------------------------------------
+
+void ChatWindow::_LoadGuiPrefs()
+{
+	BFile file(paths::GuiPrefsPath().c_str(), B_READ_ONLY);
+	if (file.InitCheck() != B_OK) return;
+	BMessage prefs;
+	if (prefs.Unflatten(&file) != B_OK) return;
+
+	// Window frame — clamp into the current screen so a prefs file from
+	// a larger display doesn't park the window off-screen.
+	BRect frame;
+	if (prefs.FindRect("frame", &frame) == B_OK && frame.IsValid()
+			&& frame.Width() > 200 && frame.Height() > 150) {
+		MoveTo(frame.LeftTop());
+		ResizeTo(frame.Width(), frame.Height());
+	}
+
+	float zoom = 1.0f;
+	if (prefs.FindFloat("zoom", &zoom) == B_OK
+			&& zoom >= 0.6f && zoom <= 2.5f) {
+		fZoomFactor  = zoom;
+		fAppliedZoom = zoom;   // new text arrives pre-scaled to this
+	}
+
+	// Last-used model — only when the caller didn't already pin one via
+	// a session or CLI flag (fModel still at the constructor default is
+	// hard to detect, so we just adopt the saved model and re-mark the
+	// menu; a loaded session overrides this later anyway).
+	const char* model = nullptr;
+	if (prefs.FindString("model", &model) == B_OK && model && model[0]) {
+		fModel = model;
+		_UpdateTitle();
+		if (fModelMenu) {
+			for (int32 i = 0; i < fModelMenu->CountItems(); ++i) {
+				BMenuItem* it = fModelMenu->ItemAt(i);
+				if (it) it->SetMarked(it->Label() && fModel == it->Label());
+			}
+		}
+	}
+}
+
+void ChatWindow::_SaveGuiPrefs()
+{
+	paths::MkdirP(paths::ConfigDir());
+	BMessage prefs('GPRF');
+	prefs.AddRect("frame", Frame());
+	prefs.AddFloat("zoom", fZoomFactor);
+	prefs.AddString("model", fModel.c_str());
+
+	BFile file(paths::GuiPrefsPath().c_str(),
+	           B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	if (file.InitCheck() == B_OK)
+		prefs.Flatten(&file);
 }
 
 void ChatWindow::_LoadSession(const std::string& path)

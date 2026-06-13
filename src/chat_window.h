@@ -318,6 +318,10 @@ private:
 	void _LoadSelectedSession();        // load the highlighted session
 	void _DeleteSelectedSession();      // delete the highlighted session (confirm)
 
+	// ── Global GUI preferences (persist across launches) ───────────────────────
+	void _LoadGuiPrefs();               // restore window frame / zoom / model
+	void _SaveGuiPrefs();               // write current frame / zoom / model
+
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
