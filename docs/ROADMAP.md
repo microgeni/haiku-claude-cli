@@ -1042,6 +1042,13 @@ Quality-of-life (the GUI counterpart to v0.2/v0.3):
 - [x] **Welcome splash**, model picker, token bar, slide-in
       Settings panel, slash-command autocomplete popup, desktop
       notifications, and the shared HVIF app icon.
+- [x] **In-app sign-in** — an `AuthWindow` modal shown when no
+      credentials are found, instead of a dead-end "use the terminal"
+      alert. Two paths: paste an API key (saved 0600 via
+      `config::SaveApiKey`) or OAuth (opens the browser via
+      `oauth::BuildAuthUrl`, then `ExchangeCode` on the pasted redirect
+      code). `ResolveAuth` gained a stored-API-key fallback that also
+      benefits the CLI.
 
 Also shipped:
 - [x] **Per-session settings** — each saved session remembers the
