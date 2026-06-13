@@ -1302,6 +1302,9 @@ void ChatWindow::_BuildLayout()
 	// ── Settings panel (right) ────────────────────────────────────────────────
 	fSettings = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec,
 	                               fWorkingDir, fModelField);
+	// Sane width range for the right (settings) splitter pane.
+	fSettings->SetExplicitMinSize(BSize(220, B_SIZE_UNSET));
+	fSettings->SetExplicitMaxSize(BSize(560, B_SIZE_UNLIMITED));
 
 	// ── Find bar (hidden until Cmd-F) ─────────────────────────────────────────
 	// A thin horizontal strip: query field | ◀ | ▶ | counter | ✕.
@@ -1332,10 +1335,10 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	// ── Layout ────────────────────────────────────────────────────────────────
-	// The session sidebar and the chat area sit in a horizontal BSplitView
-	// so the divider between them can be dragged (Genio-style). The chat
-	// column (welcome splash + scroll) is wrapped in its own view so the
-	// split has exactly two children.
+	// The session sidebar, chat area, and settings panel sit in a single
+	// horizontal BSplitView (Genio-style) so both the left (sidebar) and
+	// right (settings) dividers can be dragged. The chat column (welcome
+	// splash + scroll) is wrapped in its own view as the middle item.
 	BView* chatColumn = new BView("chatcolumn", B_SUPPORTS_LAYOUT);
 	BLayoutBuilder::Group<>(chatColumn, B_VERTICAL, 0)
 		.Add(fWelcome, 0.0f)
@@ -1345,18 +1348,17 @@ void ChatWindow::_BuildLayout()
 	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
 	fSplit->SetName("mainsplit");
 	BLayoutBuilder::Split<>(fSplit)
-		.Add(fSessionPanel, 0.25f)   // sidebar — collapsible, smaller weight
-		.Add(chatColumn,    0.75f);  // chat — takes the rest
-	// Keep the sidebar from collapsing to nothing or eating the window.
+		.Add(fSessionPanel, 0.22f)   // sidebar  — collapsible
+		.Add(chatColumn,    0.56f)   // chat     — takes the rest
+		.Add(fSettings,     0.22f);  // settings — collapsible
+	// Both side panels are collapsible; the chat (index 1) is not.
 	fSplit->SetCollapsible(0, true);
+	fSplit->SetCollapsible(2, true);
 
 	// Input row: spinner | input (expands) | vertical button column
 	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
-		.AddGroup(B_HORIZONTAL, 0)
-			.Add(fSplit, 1.0f)
-			.Add(fSettings, 0.0f)
-		.End()
+		.Add(fSplit, 1.0f)
 		.Add(fTokenBar, 0.0f)
 		.Add(fFindBar, 0.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
@@ -3014,11 +3016,15 @@ void ChatWindow::_LoadGuiPrefs()
 		fAppliedZoom = zoom;   // new text arrives pre-scaled to this
 	}
 
-	// Restore the sidebar splitter weight relative to the chat (0.75).
-	float sidebarWeight = 0.0f;
-	if (fSplit && prefs.FindFloat("sidebar_weight", &sidebarWeight) == B_OK
-			&& sidebarWeight > 0.0f && sidebarWeight < 5.0f) {
-		fSplit->SetItemWeight((int32)0, sidebarWeight, false);
+	// Restore the splitter weights relative to the chat (middle item).
+	if (fSplit) {
+		float sidebarWeight = 0.0f, settingsWeight = 0.0f;
+		if (prefs.FindFloat("sidebar_weight", &sidebarWeight) == B_OK
+				&& sidebarWeight > 0.0f && sidebarWeight < 5.0f)
+			fSplit->SetItemWeight((int32)0, sidebarWeight, false);
+		if (prefs.FindFloat("settings_weight", &settingsWeight) == B_OK
+				&& settingsWeight > 0.0f && settingsWeight < 5.0f)
+			fSplit->SetItemWeight((int32)2, settingsWeight, false);
 		fSplit->SetItemWeight((int32)1, 1.0f, true);
 	}
 
@@ -3046,8 +3052,11 @@ void ChatWindow::_SaveGuiPrefs()
 	prefs.AddRect("frame", Frame());
 	prefs.AddFloat("zoom", fZoomFactor);
 	prefs.AddString("model", fModel.c_str());
-	// Sidebar splitter weight (relative width of the session panel).
-	if (fSplit) prefs.AddFloat("sidebar_weight", fSplit->ItemWeight((int32)0));
+	// Splitter weights (relative widths of the side panels).
+	if (fSplit) {
+		prefs.AddFloat("sidebar_weight",  fSplit->ItemWeight((int32)0));
+		prefs.AddFloat("settings_weight", fSplit->ItemWeight((int32)2));
+	}
 
 	BFile file(paths::GuiPrefsPath().c_str(),
 	           B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
