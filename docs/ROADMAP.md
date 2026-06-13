@@ -1040,8 +1040,8 @@ Also shipped:
       quit and restored on launch.
 
 Deferred:
-- CLI feature parity: hooks/MCP status surface, `/compact`,
-  cost/usage display inside the GUI.
+- CLI feature parity: hooks/MCP status surface, `/compact` inside the
+  GUI. (Running cost estimate now shown in the token bar.)
 - Wiring an actual caller for `AskChoice` in the tool loop.
 - Streaming-markdown intra-line rendering (currently line-by-line;
   partial lines complete on the next chunk).
