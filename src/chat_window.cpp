@@ -993,73 +993,6 @@ const char* kGuiSpinnerVerbs[] = {
 constexpr int kGuiVerbCount = sizeof(kGuiSpinnerVerbs) / sizeof(kGuiSpinnerVerbs[0]);
 } // namespace
 
-SpinnerView::SpinnerView()
-	: BView("spinner", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
-{
-	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, kHeight));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, kHeight));
-	Hide(); // starts hidden
-}
-
-void SpinnerView::Draw(BRect /*updateRect*/)
-{
-	if (!fVisible) return;
-
-	SetLowColor(ViewColor());
-
-	// Rotating braille glyph in the accent colour.
-	const char* glyph = kGuiSpinnerGlyphs[fStep % kGuiGlyphCount];
-	const char* verb  = kGuiSpinnerVerbs[fVerbIdx];
-
-	// Elapsed time, CLI format (Xs / Xm Ys).
-	const int total = static_cast<int>((system_time() - fStart) / 1000000LL);
-	char elapsed[24];
-	if (total < 60)
-		std::snprintf(elapsed, sizeof(elapsed), "%ds", total);
-	else
-		std::snprintf(elapsed, sizeof(elapsed), "%dm %ds", total / 60, total % 60);
-
-	BFont f(be_plain_font);
-	f.SetSize(11.0f);
-	SetFont(&f);
-	font_height fh;
-	f.GetHeight(&fh);
-	const float baseline = (Bounds().Height() + fh.ascent - fh.descent) / 2.0f;
-
-	float x = 4.0f;
-	SetHighColor(ui_color(B_KEYBOARD_NAVIGATION_COLOR));
-	MovePenTo(x, baseline);
-	DrawString(glyph);
-	x += f.StringWidth(glyph) + 8.0f;
-
-	const std::string label = std::string(verb) + "\xE2\x80\xA6  " + elapsed;
-	SetHighColor(tint_color(ui_color(B_PANEL_TEXT_COLOR), B_LIGHTEN_1_TINT));
-	MovePenTo(x, baseline);
-	DrawString(label.c_str());
-}
-
-void SpinnerView::Tick()
-{
-	fStep = (fStep + 1) % kGuiGlyphCount;
-	if (fVisible) Invalidate();
-}
-
-void SpinnerView::SetVisible(bool v)
-{
-	if (v) {
-		// Fresh verb + clock each turn, like a new CLI Spinner.
-		fStart   = system_time();
-		fStep    = 0;
-		fVerbIdx = static_cast<int>((system_time() / 1000) % kGuiVerbCount);
-		fVisible = true;
-		Show();
-	} else {
-		fVisible = false;
-		Hide();
-	}
-}
-
 
 // ===========================================================================
 // WelcomeView — startup splash with the app icon + greeting text.
@@ -1349,9 +1282,6 @@ void ChatWindow::_BuildLayout()
 	fSessionPanel->SetExplicitMinSize(BSize(140, B_SIZE_UNSET));
 	fSessionPanel->SetExplicitMaxSize(BSize(500, B_SIZE_UNLIMITED));
 
-	// ── Spinner ──────────────────────────────────────────────────────────────
-	fSpinner = new SpinnerView();
-
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
 
@@ -1429,12 +1359,11 @@ void ChatWindow::_BuildLayout()
 	fSplit->SetCollapsible(0, true);
 	fSplit->SetCollapsible(2, true);
 
-	// Input row: input (expands) | vertical button column. The spinner
-	// is no longer here — it shows in the status strip above the token
-	// bar (see fSpinner placement below).
+	// Input row: input (expands) | vertical button column. The thinking
+	// spinner is rendered inline in the chat transcript (after the
+	// "claude ▸" header), not as a separate widget here.
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fSplit, 1.0f)
-		.Add(fSpinner, 0.0f)
 		.Add(fTokenBar, 0.0f)
 		.Add(fFindBar, 0.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
@@ -1800,13 +1729,15 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	// ── Spinner tick ─────────────────────────────────────────────────────────
 	case gui::MSG_TICK:
-		if (fSpinner) fSpinner->Tick();
+		_SpinnerTick();
 		break;
 
 	// ── Worker → window messages ─────────────────────────────────────────────
 	case gui::MSG_CHUNK: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
+			// First real output of the turn — erase the thinking spinner.
+			_SpinnerStop();
 			if (fInWebFetch) {
 				fWebFetchBuf += text;
 				// If clearly not HTML after 40 chars, emit directly.
@@ -1841,6 +1772,8 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 
 	case gui::MSG_TOOL_START: {
+		// A tool may run before any assistant text — clear the spinner.
+		_SpinnerStop();
 		const char* name    = nullptr;
 		const char* summary = nullptr;
 		msg->FindString("name",    &name);
@@ -1880,6 +1813,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case gui::MSG_TOOL_DIFF: {
+		_SpinnerStop();
 		// Render a structured diff (from Edit/Write tools) as coloured lines.
 		// Each line in the "diff" string starts with a sigil:
 		//   '!' — header / meta line (path, ellipsis notice)
@@ -1948,6 +1882,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case gui::MSG_ERR: {
+		_SpinnerStop();
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
 			AppendWithColor(fOutput,
@@ -1990,7 +1925,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// Stop spinner.
 		delete fSpinnerTimer;
 		fSpinnerTimer = nullptr;
-		if (fSpinner) fSpinner->SetVisible(false);
+		_SpinnerStop();
 
 		// Flush any open code block.
 		if (fInCodeBlock) { fInCodeBlock = false; _FlushCodeBlock(); }
@@ -2212,6 +2147,60 @@ void ChatWindow::_AppendToolLine(const std::string& text)
 {
 	AppendWithColor(fOutput, text, kColorToolLine);
 	if (!fUserScrolled) _ScrollToBottom();
+}
+
+// ── Inline thinking spinner ────────────────────────────────────────────────
+// Renders a CLI-style "⣾ Thinking… 3s" line as the last text in the chat
+// output while waiting for the first token. _SpinnerTick rewrites it in
+// place; _SpinnerStop erases it before the real reply (or tool line) lands.
+
+static std::string SpinnerLineText(int step, int verb, bigtime_t start)
+{
+	const char* glyph = kGuiSpinnerGlyphs[step % kGuiGlyphCount];
+	const char* v     = kGuiSpinnerVerbs[verb % kGuiVerbCount];
+	const int total = static_cast<int>((system_time() - start) / 1000000LL);
+	char elapsed[24];
+	if (total < 60)
+		std::snprintf(elapsed, sizeof(elapsed), "%ds", total);
+	else
+		std::snprintf(elapsed, sizeof(elapsed), "%dm %ds", total / 60, total % 60);
+	return std::string(glyph) + " " + v + "\xE2\x80\xA6  " + elapsed;
+}
+
+void ChatWindow::_SpinnerStart()
+{
+	fSpinnerStep   = 0;
+	fSpinnerVerb   = static_cast<int>((system_time() / 1000) % kGuiVerbCount);
+	fSpinnerStart  = system_time();
+	fSpinnerOffset = fOutput->TextLength();
+	fSpinnerActive = true;
+	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
+	                                         fSpinnerStart), kColorInputCyan);
+	if (!fUserScrolled) _ScrollToBottom();
+}
+
+void ChatWindow::_SpinnerTick()
+{
+	if (!fSpinnerActive) return;
+	fSpinnerStep++;
+	// Replace everything from the spinner offset to the end with the new
+	// frame. (Nothing else writes to fOutput while we're waiting, so the
+	// spinner is always the trailing text.)
+	const int32 end = fOutput->TextLength();
+	if (fSpinnerOffset <= end)
+		fOutput->Delete(fSpinnerOffset, end);
+	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
+	                                         fSpinnerStart), kColorInputCyan);
+	if (!fUserScrolled) _ScrollToBottom();
+}
+
+void ChatWindow::_SpinnerStop()
+{
+	if (!fSpinnerActive) return;
+	fSpinnerActive = false;
+	const int32 end = fOutput->TextLength();
+	if (fSpinnerOffset <= end)
+		fOutput->Delete(fSpinnerOffset, end);
 }
 
 void ChatWindow::_ScrollToBottom()
@@ -2475,7 +2464,7 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 	fToolsUsed     = 0;
 
 	// Start spinner timer (80ms ticks).
-	if (fSpinner) fSpinner->SetVisible(true);
+	_SpinnerStart();
 	BMessage tickMsg(gui::MSG_TICK);
 	fSpinnerTimer = new BMessageRunner(BMessenger(this), &tickMsg, 80000LL);
 
@@ -2542,7 +2531,7 @@ void ChatWindow::_LaunchCompact()
 	fTurnStartTime = system_time();
 	fToolsUsed     = 0;
 
-	if (fSpinner) fSpinner->SetVisible(true);
+	_SpinnerStart();
 	BMessage tickMsg(gui::MSG_TICK);
 	fSpinnerTimer = new BMessageRunner(BMessenger(this), &tickMsg, 80000LL);
 

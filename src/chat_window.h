@@ -208,29 +208,6 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SpinnerView — CLI-style progress line shown while the worker is running.
-// Renders a rotating braille glyph + a randomized gerund verb ("Thinking…")
-// + elapsed time, matching the terminal CLI's spinner. Lives in the status
-// strip (token-bar row), not beside the input. Hidden when idle.
-// ─────────────────────────────────────────────────────────────────────────────
-class SpinnerView : public BView {
-public:
-	static const int kHeight = 18;
-
-	SpinnerView();
-
-	void	Draw(BRect updateRect) override;
-	void	Tick();               // advance one frame (called on TICK message)
-	void	SetVisible(bool v);   // picks a fresh verb + resets the clock on show
-
-private:
-	int        fStep    = 0;
-	bool        fVisible = false;
-	int        fVerbIdx = 0;          // index into the gerund verb table
-	bigtime_t  fStart   = 0;          // system_time() when shown
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
 // WelcomeView — a splash panel shown above the chat output on a fresh window.
 //
 // Draws the application's HVIF icon (loaded from the running binary via
@@ -310,6 +287,11 @@ private:
 	void _NewChat();
 	void _ClearOutput();
 
+	// ── Inline thinking spinner (rendered in the chat transcript) ─────────────
+	void _SpinnerStart();        // append the spinner line after "claude ▸"
+	void _SpinnerTick();         // rewrite the spinner line in place (per tick)
+	void _SpinnerStop();         // erase the spinner line (first token / done)
+
 	// ── Toolbar / UI state ───────────────────────────────────────────────────
 	void _SetBusy(bool busy);    // swap Send↔Stop, enable/disable input
 	void _UpdateTitle();         // set window title from model + state
@@ -348,7 +330,6 @@ private:
 	BScrollView*   fScroll        = nullptr;
 	BButton*       fJumpBtn       = nullptr;  // floating "↓" overlay button
 	TokenBar*      fTokenBar      = nullptr;
-	SpinnerView*   fSpinner       = nullptr;
 	InputView*     fInput         = nullptr;
 	BButton*       fSend          = nullptr;
 	BButton*       fStop          = nullptr;  // replaces Send while busy
@@ -422,6 +403,17 @@ private:
 
 	// ── Spinner timer ────────────────────────────────────────────────────────
 	BMessageRunner* fSpinnerTimer  = nullptr;
+
+	// ── Inline thinking spinner state ─────────────────────────────────────────
+	// While waiting for the first token, a spinner line is the last text in
+	// fOutput. fSpinnerActive guards the tick/erase; fSpinnerOffset is where
+	// the spinner text begins (everything from there to end is rewritten or
+	// erased). A fresh verb + clock are chosen per turn.
+	bool       fSpinnerActive = false;
+	int32      fSpinnerOffset = 0;
+	int        fSpinnerStep   = 0;
+	int        fSpinnerVerb   = 0;
+	bigtime_t  fSpinnerStart  = 0;
 
 	// ── Turn timing & tool tracking ───────────────────────────────────────────
 	bigtime_t       fTurnStartTime        = 0;
