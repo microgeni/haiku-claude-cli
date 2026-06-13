@@ -982,8 +982,9 @@ for a native Haiku GUI (`chat_window`, `gui_sink`, `app_main_gui`).
 Built via `make gui` → `build/Claude` (capitalized per Haiku app
 naming convention; the CLI binary stays lowercase `claude`).
 Installed via `make install-gui` (→ `PREFIX/apps/Claude` + style
-data under `PREFIX/data/claude-gui/`) or packaged as an HPKG via
-`make package-gui` (separate `claude_gui` package, provides
+data under `PREFIX/data/claude-gui/`). Shipped in the **same**
+`claude_cli` HPKG as the CLI (`make package` bundles both
+`bin/claude` and `apps/Claude`, providing `cmd:claude` +
 `app:Claude`). Haiku-only (links `libbe`, `libtracker`,
 `libnetwork`).
 
