@@ -545,13 +545,16 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// Fix height to 5 lines; the layout engine must not stretch us taller.
+	// Height: allow the input to shrink to ~2 lines (so a small window is
+	// possible) and grow up to ~6 lines, rather than being pinned at a
+	// fixed 5-line height that blocks reducing the window vertically.
 	font_height fh;
 	f.GetHeight(&fh);
 	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	const float fixedH = lineH * 5.0f + 8.0f; // 5 lines + 4px padding top + bottom
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, fixedH));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, fixedH));
+	const float minH  = lineH * 2.0f + 8.0f;
+	const float maxH  = lineH * 6.0f + 8.0f;
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, minH));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, maxH));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -1277,9 +1280,10 @@ void ChatWindow::_BuildLayout()
 			.AddGlue()
 		.End()
 	.End();
-	// The splitter controls the sidebar width now; keep only a sane
-	// minimum so it doesn't shrink below usability, and a generous max.
-	fSessionPanel->SetExplicitMinSize(BSize(140, B_SIZE_UNSET));
+	// Keep the panel usable but let the window shrink: a small min-width
+	// (the splitter governs the actual width). A large min here would be
+	// summed into the window's minimum and block reducing the window.
+	fSessionPanel->SetExplicitMinSize(BSize(80, B_SIZE_UNSET));
 	fSessionPanel->SetExplicitMaxSize(BSize(500, B_SIZE_UNLIMITED));
 
 	// ── Input area ───────────────────────────────────────────────────────────
@@ -1306,8 +1310,8 @@ void ChatWindow::_BuildLayout()
 	// ── Settings panel (right) ────────────────────────────────────────────────
 	fSettings = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec,
 	                               fWorkingDir, fModelField);
-	// Sane width range for the right (settings) splitter pane.
-	fSettings->SetExplicitMinSize(BSize(220, B_SIZE_UNSET));
+	// Small min-width so the window can still shrink; splitter governs.
+	fSettings->SetExplicitMinSize(BSize(120, B_SIZE_UNSET));
 	fSettings->SetExplicitMaxSize(BSize(560, B_SIZE_UNLIMITED));
 
 	// ── Find bar (hidden until Cmd-F) ─────────────────────────────────────────
@@ -1348,6 +1352,9 @@ void ChatWindow::_BuildLayout()
 		.Add(fWelcome, 0.0f)
 		.Add(fScroll, 1.0f)
 	.End();
+	// Let the chat column shrink — the BTextView/BScrollView would
+	// otherwise report a wide min-width that blocks reducing the window.
+	chatColumn->SetExplicitMinSize(BSize(160, B_SIZE_UNSET));
 
 	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
 	fSplit->SetName("mainsplit");
@@ -1379,7 +1386,7 @@ void ChatWindow::_BuildLayout()
 		.End()
 	.End();
 
-	SetSizeLimits(420, 32767, 300, 32767);
+	SetSizeLimits(320, 32767, 220, 32767);
 
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
