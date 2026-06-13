@@ -1029,8 +1029,17 @@ Quality-of-life (the GUI counterpart to v0.2/v0.3):
       Settings panel, slash-command autocomplete popup, desktop
       notifications, and the shared HVIF app icon.
 
+Also shipped:
+- [x] **Per-session settings** — each saved session remembers the
+      model, system prompt, working directory, and max-tokens it was
+      created with (stored in the session-file envelope) and restores
+      them on load, so continuing an old conversation keeps its
+      context.
+- [x] **Persisted GUI preferences** — window frame, chat zoom level,
+      and last-used model are saved to `<ConfigDir>/gui_prefs.msg` on
+      quit and restored on launch.
+
 Deferred:
-- Persisted GUI preferences (window frame, zoom level, last model).
 - CLI feature parity: hooks/MCP status surface, `/compact`,
   cost/usage display inside the GUI.
 - Wiring an actual caller for `AskChoice` in the tool loop.
