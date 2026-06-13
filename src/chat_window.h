@@ -71,6 +71,7 @@ constexpr uint32_t MSG_SESSION_SELECT  = 'SSEL'; // sidebar: load selected sessi
 constexpr uint32_t MSG_SESSION_DELETE  = 'SDEL'; // sidebar: delete selected session
 constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
 constexpr uint32_t MSG_SESSION_RENAME  = 'SRNM'; // sidebar: rename selected session
+constexpr uint32_t MSG_COMPACT         = 'CMPT'; // Edit: compact conversation context
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -296,6 +297,8 @@ private:
 	// ── Turn lifecycle ───────────────────────────────────────────────────────
 	void _SendTurn();
 	void _LaunchWorker(const std::string& userText);
+	void _LaunchCompact();       // summarize + replace context, keep scrollback
+	void _SpawnWorker();         // shared: start spinner + worker thread on fWorkerMessages
 	void _HandlePermRequest(BMessage* msg);
 	void _HandleChoiceRequest(BMessage* msg);
 	void _CancelWorker();
@@ -437,9 +440,13 @@ private:
 	// blocks), so after the turn is joined the main thread adopts it as the
 	// canonical conversation history — preserving tool context across turns.
 	nlohmann::json      fWorkerMessages;
-	// True when the worker finished normally (not cancelled), so the
-	// MSG_WORKER_DONE handler knows whether to commit fWorkerMessages.
+	// True when fWorkerMessages was built but the result wasn't committed
+	// (cancelled): the MSG_WORKER_DONE handler then keeps history.
 	bool                fTurnCommitted = false;
+	// True while a /compact turn is in flight: MSG_WORKER_DONE replaces
+	// fMessages with the compacted two-entry array instead of adopting
+	// fWorkerMessages, and leaves the on-screen transcript intact.
+	bool                fCompactPending = false;
 };
 
 #endif // HAIKU_CLAUDE_CLI_CHAT_WINDOW_H

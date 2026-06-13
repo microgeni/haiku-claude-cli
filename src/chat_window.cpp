@@ -1172,6 +1172,9 @@ void ChatWindow::_BuildMenuBar()
 		new BMessage(gui::MSG_ZOOM_OUT), '-'));
 	editMenu->AddItem(new BMenuItem("Actual Size",
 		new BMessage(gui::MSG_ZOOM_RESET), '0'));
+	editMenu->AddSeparatorItem();
+	editMenu->AddItem(new BMenuItem("Compact Conversation",
+		new BMessage(gui::MSG_COMPACT), 'K'));
 	fMenuBar->AddItem(editMenu);
 
 	// ── View ────────────────────────────────────────────────────────────────
@@ -1553,6 +1556,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_SESSION_RENAME:
 		_RenameSelectedSession();
+		break;
+
+	case gui::MSG_COMPACT:
+		_LaunchCompact();
 		break;
 
 	case gui::MSG_SESSION_NEW:
@@ -1946,7 +1953,23 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// On cancellation (fTurnCommitted == false) fall back to the
 		// plain user/assistant text so a half-finished tool exchange
 		// doesn't leave an orphaned tool_use that would 400 the API.
-		if (fTurnCommitted && fWorkerMessages.is_array()
+		if (fCompactPending) {
+			// /compact: replace the underlying context with the summary
+			// (the streamed assistant text), but keep the on-screen
+			// transcript visible. On failure leave history untouched.
+			if (fTurnCommitted && !fPendingAssistantText.empty()) {
+				fMessages = nlohmann::json::array({
+					{{"role", "user"},
+					 {"content", "[previous conversation context follows]"}},
+					{{"role", "assistant"}, {"content", fPendingAssistantText}},
+				});
+				_AppendToolLine("\xE2\x9C\x93 context compacted \xE2\x80\x94 "
+					"conversation summarized; on-screen history kept\n");
+			} else {
+				_AppendToolLine("[compact failed \xE2\x80\x94 history unchanged]\n");
+			}
+			fCompactPending = false;
+		} else if (fTurnCommitted && fWorkerMessages.is_array()
 				&& !fWorkerMessages.empty()) {
 			fMessages = std::move(fWorkerMessages);
 		} else {
@@ -2340,6 +2363,21 @@ void ChatWindow::_SendTurn()
 	const char* raw = fInput->Text();
 	if (!raw || raw[0] == '\0') return;
 	const std::string userText(raw);
+
+	// Recognise the /compact slash command typed into the input — clear
+	// the field and run the compact flow instead of sending it as a turn.
+	{
+		std::string trimmed = userText;
+		while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
+			trimmed.pop_back();
+		if (trimmed == "/compact") {
+			fInput->SetText("");
+			fInput->PushHistory(userText);
+			_LaunchCompact();
+			return;
+		}
+	}
+
 	fInput->SetText("");
 	fInput->PushHistory(userText);
 
@@ -2382,12 +2420,6 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 	BMessage tickMsg(gui::MSG_TICK);
 	fSpinnerTimer = new BMessageRunner(BMessenger(this), &tickMsg, 80000LL);
 
-	const config::Auth   auth         = fAuth;
-	const std::string    model        = fModel;
-	const int            maxTokens    = fMaxTokens;
-	const std::string    systemPrompt = config::ComposeSystem(fSystemPrompt,
-	                                                           fWorkingDir);
-
 	// Seed the worker-owned messages array from the canonical history and
 	// append this turn's user message. The worker mutates fWorkerMessages
 	// in place; the main thread adopts it after join() in MSG_WORKER_DONE.
@@ -2414,34 +2446,107 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 		fWorkerMessages.push_back({{"role", "user"}, {"content", content}});
 		fPendingImages.clear();
 	}
-	fTurnCommitted = false;
+	fTurnCommitted  = false;
+	fCompactPending = false;
+
+	_SpawnWorker();
+}
+
+// Run /compact: ask Claude to (1) persist file summaries via WriteAttr and
+// (2) summarize the conversation, then replace the underlying context with
+// the summary while leaving the on-screen transcript intact. Mirrors the
+// CLI's /compact (commands.cpp), reusing the worker + GuiSink so the
+// summary streams into the chat like a normal reply.
+void ChatWindow::_LaunchCompact()
+{
+	if (fWorkerRunning.load()) return;          // a turn is already running
+	if (fMessages.empty()) {
+		_AppendToolLine("[nothing to compact]\n");
+		return;
+	}
+
+	_DismissWelcome();
+
+	// Visible markers in the scrollback so the user sees what happened.
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 /compact\n", kColorUserLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+
+	fPendingUserText.clear();
+	fPendingAssistantText.clear();
+	fInCodeBlock = false;
+	fCodeBuffer.clear();
+	fLineBuffer.clear();
+	fInWebFetch = false;
+	fWebFetchBuf.clear();
+
+	_SetBusy(true);
+	fTurnStartTime = system_time();
+	fToolsUsed     = 0;
+
+	if (fSpinner) fSpinner->SetVisible(true);
+	BMessage tickMsg(gui::MSG_TICK);
+	fSpinnerTimer = new BMessageRunner(BMessenger(this), &tickMsg, 80000LL);
+
+	// Build the request: current history + the two-task compact prompt
+	// (same wording as the CLI so behavior matches).
+	fWorkerMessages = fMessages;
+	fWorkerMessages.push_back({
+		{"role", "user"},
+		{"content",
+			"Two tasks, in order:\n"
+			"\n"
+			"1. For each source file you've gained real understanding of "
+			"during this conversation, call WriteAttr to persist a concise "
+			"one-line claude:summary capturing what the file is for. Only "
+			"write for files you could confidently describe \xE2\x80\x94 skip "
+			"files only mentioned in passing. WriteAttr is auto-approved and "
+			"restricted to the claude:* namespace, so these writes are cheap "
+			"and safe. This lets future sessions start with accurate "
+			"summaries instead of mechanical placeholders.\n"
+			"\n"
+			"2. Then summarize the preceding conversation in 2-3 short "
+			"paragraphs, preserving important context, decisions, code, and "
+			"open questions. Reply with only the summary after the WriteAttr "
+			"calls."},
+	});
+	fTurnCommitted  = false;
+	fCompactPending = true;
+
+	_SpawnWorker();
+}
+
+// Shared worker spawn: assumes fWorkerMessages is prepared. Streams the
+// reply through a fresh GuiSink and posts MSG_TOKENS / MSG_WORKER_DONE.
+void ChatWindow::_SpawnWorker()
+{
+	const config::Auth auth         = fAuth;
+	const std::string  model        = fModel;
+	const int          maxTokens    = fMaxTokens;
+	const std::string  systemPrompt = config::ComposeSystem(fSystemPrompt,
+	                                                         fWorkingDir);
 
 	fSink = new gui::GuiSink(BMessenger(this));
 	gui::GuiSink* sink = fSink;
 	sink->BeginMessage("assistant");
 
 	fWorkerRunning.store(true);
-	// Capture `this`, sink, and the scalars by value. fWorkerMessages is
-	// mutated through `this`; it is not touched by the main thread until
-	// after join(), so there is no data race.
+	// fWorkerMessages is mutated through `this`; the main thread does not
+	// touch it until after join() in MSG_WORKER_DONE, so no data race.
 	fWorker = std::thread([this, auth, model, maxTokens, systemPrompt, sink]() {
 		const api::SendResult result = api::SendWithTools(auth, model, maxTokens,
 		                   fWorkerMessages, systemPrompt, sink);
 		sink->EndMessage();
 
-		// Post token counts so the TokenBar can update.
 		BMessage tokMsg(gui::MSG_TOKENS);
 		tokMsg.AddInt32("input",  result.input_tokens);
 		tokMsg.AddInt32("output", result.output_tokens);
 		tokMsg.AddInt32("max",    maxTokens);
-		// exit_code 0 means the turn completed cleanly (not cancelled);
-		// only then should the mutated history be committed.
 		tokMsg.AddBool("ok", result.exit_code == 0);
 		BMessenger(this).SendMessage(&tokMsg);
 		BMessenger(this).SendMessage(gui::MSG_WORKER_DONE);
 	});
-	// NOTE: do NOT detach — the thread is joined in MSG_WORKER_DONE and
-	// QuitRequested so fSink is never freed while the worker still holds it.
+	// NOTE: do NOT detach — joined in MSG_WORKER_DONE / QuitRequested so
+	// fSink is never freed while the worker still holds it.
 }
 
 void ChatWindow::_CancelWorker()
