@@ -1029,6 +1029,10 @@ Quality-of-life (the GUI counterpart to v0.2/v0.3):
       a row for a Rename / Open / Delete context menu. Rename updates
       only the `claude:title` attribute. `session::Delete` /
       `session::Rename` added to the store.
+- [x] **Three-pane `BSplitView`** — sidebar, chat, and Settings panel
+      share one horizontal split so *both* the left (sessions) and
+      right (settings) dividers are draggable (Genio-style); both side
+      panes are collapsible and their widths persist.
 - [x] **Welcome splash**, model picker, token bar, slide-in
       Settings panel, slash-command autocomplete popup, desktop
       notifications, and the shared HVIF app icon.
