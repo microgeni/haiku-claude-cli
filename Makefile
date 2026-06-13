@@ -83,12 +83,7 @@ PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-# GUI HPKG — separate package (app:Claude) with its own staging dir.
-GUI_PKG_NAME  ?= claude_gui
-GUI_PKG_STAGE := $(BUILDDIR)/pkg-gui
-GUI_PKG_FILE  := $(BUILDDIR)/$(GUI_PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
-
-.PHONY: all gui clean install install-gui package package-gui release lint security check
+.PHONY: all gui clean install install-gui package release lint security check
 
 all: $(BIN)
 
@@ -241,19 +236,33 @@ install: $(BIN)
 # Build a Haiku HPKG. Requires Haiku's `package` tool.
 package: $(PKG_FILE)
 
-$(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
+# One HPKG ships both front-ends: the CLI binary (bin/claude) and the
+# GUI app (apps/Claude) plus the GUI's syntax-highlight data. The GUI is
+# Haiku-only, so its binary is a prerequisite here too.
+$(PKG_FILE): $(BIN) $(GUI_BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@command -v package >/dev/null 2>&1 || { \
 	    echo "error: 'package' command not found — HPKG build requires Haiku."; \
 	    exit 1; \
 	}
 	rm -rf "$(PKG_STAGE)"
 	mkdir -p "$(PKG_STAGE)/bin" \
+	         "$(PKG_STAGE)/apps" \
+	         "$(PKG_STAGE)/data/claude-gui/styles" \
+	         "$(PKG_STAGE)/data/claude-gui/languages" \
 	         "$(PKG_STAGE)/documentation/man/man1" \
 	         "$(PKG_STAGE)/documentation/packages/claude-cli"
-	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
+	cp "$(BIN)"      "$(PKG_STAGE)/bin/claude"
+	cp "$(GUI_BIN)"  "$(PKG_STAGE)/apps/Claude"
 	cp docs/claude.1  "$(PKG_STAGE)/documentation/man/man1/claude.1"
 	cp CHANGELOG.md   "$(PKG_STAGE)/documentation/packages/claude-cli/CHANGELOG.md"
 	cp README.md      "$(PKG_STAGE)/documentation/packages/claude-cli/ReadMe.md"
+	@# GUI syntax-highlight data (styles + languages).
+	@if [ -d assets/data/styles ]; then \
+	    cp assets/data/styles/*    "$(PKG_STAGE)/data/claude-gui/styles/"    2>/dev/null || true; \
+	fi
+	@if [ -d assets/data/languages ]; then \
+	    cp assets/data/languages/* "$(PKG_STAGE)/data/claude-gui/languages/" 2>/dev/null || true; \
+	fi
 	@if [ -f "$(ICON_HVIF)" ]; then \
 	    echo "  staging icon to data/claude-cli/icon.hvif"; \
 	    mkdir -p "$(PKG_STAGE)/data/claude-cli"; \
@@ -261,11 +270,13 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	fi
 	@if command -v addattr >/dev/null 2>&1; then \
 	    if [ -f "$(ICON_HVIF)" ]; then \
-	        echo "  stamping BEOS:ICON from $(ICON_HVIF) onto staged binary"; \
+	        echo "  stamping BEOS:ICON onto staged binaries"; \
 	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/apps/Claude"; \
 	    fi; \
-	    echo "  stamping BEOS:APP_SIG = $(APP_SIG) onto staged binary"; \
-	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)" "$(PKG_STAGE)/bin/claude"; \
+	    echo "  stamping BEOS:APP_SIG (cli=$(APP_SIG), gui=$(GUI_APP_SIG))"; \
+	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)"     "$(PKG_STAGE)/bin/claude"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(PKG_STAGE)/apps/Claude"; \
 	fi
 	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
 	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
@@ -275,47 +286,6 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@echo
 	@echo "Created: $(PKG_FILE)"
 	@ls -l "$(PKG_FILE)"
-
-# Build a Haiku HPKG for the GUI app. Requires Haiku's `package` tool and
-# a built GUI binary. Stages Claude into apps/, the style/language data
-# into data/claude-gui/, and docs, then writes the .hpkg.
-package-gui: $(GUI_PKG_FILE)
-
-$(GUI_PKG_FILE): $(GUI_BIN) .PackageInfoGui.in | $(BUILDDIR)
-	@command -v package >/dev/null 2>&1 || { \
-	    echo "error: 'package' command not found — HPKG build requires Haiku."; \
-	    exit 1; \
-	}
-	rm -rf "$(GUI_PKG_STAGE)"
-	mkdir -p "$(GUI_PKG_STAGE)/apps" \
-	         "$(GUI_PKG_STAGE)/data/claude-gui/styles" \
-	         "$(GUI_PKG_STAGE)/data/claude-gui/languages" \
-	         "$(GUI_PKG_STAGE)/documentation/packages/claude-gui"
-	cp "$(GUI_BIN)" "$(GUI_PKG_STAGE)/apps/Claude"
-	cp CHANGELOG.md "$(GUI_PKG_STAGE)/documentation/packages/claude-gui/CHANGELOG.md"
-	cp README.md    "$(GUI_PKG_STAGE)/documentation/packages/claude-gui/ReadMe.md"
-	@if [ -d assets/data/styles ]; then \
-	    cp assets/data/styles/*    "$(GUI_PKG_STAGE)/data/claude-gui/styles/"    2>/dev/null || true; \
-	fi
-	@if [ -d assets/data/languages ]; then \
-	    cp assets/data/languages/* "$(GUI_PKG_STAGE)/data/claude-gui/languages/" 2>/dev/null || true; \
-	fi
-	@if command -v addattr >/dev/null 2>&1; then \
-	    if [ -f "$(ICON_HVIF)" ]; then \
-	        echo "  stamping BEOS:ICON onto staged Claude"; \
-	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(GUI_PKG_STAGE)/apps/Claude"; \
-	    fi; \
-	    echo "  stamping BEOS:APP_SIG = $(GUI_APP_SIG) onto staged Claude"; \
-	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(GUI_PKG_STAGE)/apps/Claude"; \
-	fi
-	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
-	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
-	    .PackageInfoGui.in > "$(GUI_PKG_STAGE)/.PackageInfo"
-	rm -f "$(GUI_PKG_FILE)"
-	package create -C "$(GUI_PKG_STAGE)" "$(GUI_PKG_FILE)"
-	@echo
-	@echo "Created: $(GUI_PKG_FILE)"
-	@ls -l "$(GUI_PKG_FILE)"
 
 -include $(DEPS)
 
