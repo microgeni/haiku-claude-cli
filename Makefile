@@ -61,8 +61,12 @@ DEPS := $(OBJS:.o=.d)
 
 PREFIX  ?= /boot/system/non-packaged
 BINDIR  ?= $(PREFIX)/bin
+APPSDIR ?= $(PREFIX)/apps
 MANDIR  ?= $(PREFIX)/documentation/man/man1
 DATADIR ?= $(PREFIX)/data/claude-cli
+# The GUI reads syntax-highlight styles/languages from here at runtime
+# (see code_styler.cpp FindDefaultTheme / FindLanguagesDir).
+GUI_DATADIR ?= $(PREFIX)/data/claude-gui
 
 # Haiku vector icon stamped onto the installed binary via
 # `addattr … BEOS:ICON`. Optional: if the file is missing or
@@ -79,7 +83,7 @@ PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all gui clean install package release lint security check
+.PHONY: all gui clean install install-gui package release lint security check
 
 all: $(BIN)
 
@@ -152,6 +156,35 @@ $(GUI_BIN): $(GUI_OBJS) | $(BUILDDIR)
 
 .PHONY: gui
 gui: $(GUI_BIN)
+
+# Install the GUI as a native Haiku application. The binary goes into
+# the apps directory (so the Deskbar's app menu and Tracker pick it up),
+# and the syntax-highlight style/language data is copied to the runtime
+# location code_styler.cpp looks for. Haiku-only — the GUI itself only
+# builds there. Run `make gui` first (or it builds via the dependency).
+install-gui: $(GUI_BIN)
+	install -d "$(DESTDIR)$(APPSDIR)"
+	install -m 755 "$(GUI_BIN)" "$(DESTDIR)$(APPSDIR)/Claude"
+	@echo "  installing GUI style data to $(GUI_DATADIR)"
+	install -d "$(DESTDIR)$(GUI_DATADIR)/styles"
+	install -d "$(DESTDIR)$(GUI_DATADIR)/languages"
+	@if [ -d assets/data/styles ]; then \
+	    install -m 644 assets/data/styles/* "$(DESTDIR)$(GUI_DATADIR)/styles/" 2>/dev/null || true; \
+	fi
+	@if [ -d assets/data/languages ]; then \
+	    install -m 644 assets/data/languages/* "$(DESTDIR)$(GUI_DATADIR)/languages/" 2>/dev/null || true; \
+	fi
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON on $(APPSDIR)/Claude"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(DESTDIR)$(APPSDIR)/Claude"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(GUI_APP_SIG)"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(DESTDIR)$(APPSDIR)/Claude"; \
+	else \
+	    echo "  (skipping icon/sig stamp — no addattr)"; \
+	fi
+	@echo "  installed: $(APPSDIR)/Claude"
 
 # Optimized build in a separate directory so it doesn't invalidate
 # incremental dev builds. Reinvokes make with MODE=release.
