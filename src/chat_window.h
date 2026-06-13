@@ -208,21 +208,26 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SpinnerView — small animated arc drawn while the worker is running.
+// SpinnerView — CLI-style progress line shown while the worker is running.
+// Renders a rotating braille glyph + a randomized gerund verb ("Thinking…")
+// + elapsed time, matching the terminal CLI's spinner. Lives in the status
+// strip (token-bar row), not beside the input. Hidden when idle.
 // ─────────────────────────────────────────────────────────────────────────────
 class SpinnerView : public BView {
 public:
-	static const int kSize = 18;
+	static const int kHeight = 18;
 
 	SpinnerView();
 
 	void	Draw(BRect updateRect) override;
-	void	Tick();               // advance one step (called on TICK message)
-	void	SetVisible(bool v);
+	void	Tick();               // advance one frame (called on TICK message)
+	void	SetVisible(bool v);   // picks a fresh verb + resets the clock on show
 
 private:
-	int   fStep    = 0;
-	bool  fVisible = false;
+	int        fStep    = 0;
+	bool        fVisible = false;
+	int        fVerbIdx = 0;          // index into the gerund verb table
+	bigtime_t  fStart   = 0;          // system_time() when shown
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

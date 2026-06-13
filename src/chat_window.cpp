@@ -973,11 +973,32 @@ void SettingsPanel::Toggle()
 // SpinnerView
 // ===========================================================================
 
+// CLI-style spinner vocabulary (mirrors tui.cpp): braille rotation glyphs
+// and randomized gerund verbs. Kept local to the GUI so it doesn't depend
+// on the terminal Spinner class.
+namespace {
+const char* kGuiSpinnerGlyphs[] = {
+	"\xE2\xA3\xBE", "\xE2\xA3\xBD", "\xE2\xA3\xBB", "\xE2\xA2\xBF",
+	"\xE2\xA1\xBF", "\xE2\xA0\xBF", "\xE2\xA2\xAF", "\xE2\xA3\xB7",
+};
+constexpr int kGuiGlyphCount = sizeof(kGuiSpinnerGlyphs) / sizeof(kGuiSpinnerGlyphs[0]);
+
+const char* kGuiSpinnerVerbs[] = {
+	"Thinking",  "Forming",   "Pondering", "Musing",
+	"Brewing",   "Weaving",   "Crafting",  "Conjuring",
+	"Distilling","Scheming",  "Plotting",  "Sifting",
+	"Unraveling","Cooking",   "Stewing",   "Mulling",
+	"Simmering", "Reckoning", "Percolating","Chewing",
+};
+constexpr int kGuiVerbCount = sizeof(kGuiSpinnerVerbs) / sizeof(kGuiSpinnerVerbs[0]);
+} // namespace
+
 SpinnerView::SpinnerView()
-	: BView("spinner", B_WILL_DRAW)
+	: BView("spinner", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
 {
-	SetExplicitMinSize(BSize(kSize, kSize));
-	SetExplicitMaxSize(BSize(kSize, kSize));
+	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, kHeight));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, kHeight));
 	Hide(); // starts hidden
 }
 
@@ -985,34 +1006,58 @@ void SpinnerView::Draw(BRect /*updateRect*/)
 {
 	if (!fVisible) return;
 
-	const float cx = Bounds().Width() / 2.0f;
-	const float cy = Bounds().Height() / 2.0f;
-	const float r  = (cx < cy ? cx : cy) - 2.0f;
+	SetLowColor(ViewColor());
 
-	SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_DARKEN_2_TINT));
-	StrokeArc(BPoint(cx, cy), r, r, 0.0f, 360.0f);
+	// Rotating braille glyph in the accent colour.
+	const char* glyph = kGuiSpinnerGlyphs[fStep % kGuiGlyphCount];
+	const char* verb  = kGuiSpinnerVerbs[fVerbIdx];
 
-	// Draw a 120° arc that rotates with each tick.
-	const float startAngle = static_cast<float>(fStep * 30);
+	// Elapsed time, CLI format (Xs / Xm Ys).
+	const int total = static_cast<int>((system_time() - fStart) / 1000000LL);
+	char elapsed[24];
+	if (total < 60)
+		std::snprintf(elapsed, sizeof(elapsed), "%ds", total);
+	else
+		std::snprintf(elapsed, sizeof(elapsed), "%dm %ds", total / 60, total % 60);
+
+	BFont f(be_plain_font);
+	f.SetSize(11.0f);
+	SetFont(&f);
+	font_height fh;
+	f.GetHeight(&fh);
+	const float baseline = (Bounds().Height() + fh.ascent - fh.descent) / 2.0f;
+
+	float x = 4.0f;
 	SetHighColor(ui_color(B_KEYBOARD_NAVIGATION_COLOR));
-	SetPenSize(2.0f);
-	StrokeArc(BPoint(cx, cy), r, r, startAngle, 120.0f);
-	SetPenSize(1.0f);
+	MovePenTo(x, baseline);
+	DrawString(glyph);
+	x += f.StringWidth(glyph) + 8.0f;
+
+	const std::string label = std::string(verb) + "\xE2\x80\xA6  " + elapsed;
+	SetHighColor(tint_color(ui_color(B_PANEL_TEXT_COLOR), B_LIGHTEN_1_TINT));
+	MovePenTo(x, baseline);
+	DrawString(label.c_str());
 }
 
 void SpinnerView::Tick()
 {
-	fStep = (fStep + 11) % 12;
+	fStep = (fStep + 1) % kGuiGlyphCount;
 	if (fVisible) Invalidate();
 }
 
 void SpinnerView::SetVisible(bool v)
 {
-	fVisible = v;
-	if (v)
+	if (v) {
+		// Fresh verb + clock each turn, like a new CLI Spinner.
+		fStart   = system_time();
+		fStep    = 0;
+		fVerbIdx = static_cast<int>((system_time() / 1000) % kGuiVerbCount);
+		fVisible = true;
 		Show();
-	else
+	} else {
+		fVisible = false;
 		Hide();
+	}
 }
 
 
@@ -1384,15 +1429,16 @@ void ChatWindow::_BuildLayout()
 	fSplit->SetCollapsible(0, true);
 	fSplit->SetCollapsible(2, true);
 
-	// Input row: spinner | input (expands) | vertical button column
-	// Button column (top-to-bottom): Send/Stop, Clear, ⚙
+	// Input row: input (expands) | vertical button column. The spinner
+	// is no longer here — it shows in the status strip above the token
+	// bar (see fSpinner placement below).
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fSplit, 1.0f)
+		.Add(fSpinner, 0.0f)
 		.Add(fTokenBar, 0.0f)
 		.Add(fFindBar, 0.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
-			.Add(fSpinner, 0.0f)
 			.Add(fInput, 1.0f)
 			.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
 				.Add(fSend)
@@ -2709,13 +2755,15 @@ void ChatWindow::_SetBusy(bool busy)
 	if (busy) {
 		fSend->Hide();
 		fStop->Show();
-		fInput->SetEnabled(false);
 	} else {
 		fStop->Hide();
 		fSend->Show();
-		fInput->SetEnabled(true);
 		fInput->MakeFocus(true);
 	}
+	// The input stays enabled, dark, and cyan throughout — busy state no
+	// longer disables or recolours it (type-ahead friendly; matches the
+	// CLI which keeps the prompt live). Progress is shown by the in-chat
+	// spinner instead.
 }
 
 void ChatWindow::_UpdateTitle()
