@@ -1257,17 +1257,30 @@ void ChatWindow::_BuildLayout()
 	                               new BMessage(gui::MSG_SESSION_DELETE));
 	fSessionPanel = new BView("sessionpanel", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
 	fSessionPanel->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+
+	// Keep the action buttons grouped at the left at a uniform width
+	// (so the 2x2 grid lines up) rather than stretching to fill the
+	// panel. A trailing glue on each row pushes them left no matter how
+	// wide the sidebar is dragged.
+	float btnW = 0.0f;
+	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
+		btnW = std::max(btnW, b->PreferredSize().Width());
+	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
+		b->SetExplicitSize(BSize(btnW, B_SIZE_UNSET));
+
 	BLayoutBuilder::Group<>(fSessionPanel, B_VERTICAL, B_USE_SMALL_SPACING)
 		.SetInsets(B_USE_SMALL_INSETS)
 		.Add(new BStringView("sesshdr", "Sessions"), 0.0f)
 		.Add(fSessionScroll, 1.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(sessNew)
-			.Add(sessOpen)
+			.Add(sessNew, 0.0f)
+			.Add(sessOpen, 0.0f)
+			.AddGlue()
 		.End()
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(sessRen)
-			.Add(sessDel)
+			.Add(sessRen, 0.0f)
+			.Add(sessDel, 0.0f)
+			.AddGlue()
 		.End()
 	.End();
 	// The splitter controls the sidebar width now; keep only a sane
