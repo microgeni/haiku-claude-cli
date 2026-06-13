@@ -127,6 +127,7 @@ GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
                 -pthread -lbe -lnetwork
 
 $(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
+	@mkdir -p $(@D)
 	$(CXX) $(GUI_CXXFLAGS) -MMD -MP -MF $(@:.o=.d) -c -o $@ $<
 
 $(GUI_BIN): $(GUI_OBJS) | $(BUILDDIR)
@@ -162,6 +163,7 @@ $(BIN): $(OBJS) | $(BUILDDIR)
 	fi
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
+	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 $(BUILDDIR):
