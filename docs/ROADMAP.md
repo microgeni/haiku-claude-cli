@@ -1023,12 +1023,12 @@ Quality-of-life (the GUI counterpart to v0.2/v0.3):
       multiplicatively, preserving the renderer's heading/body
       proportions; re-applied after each turn, replay, and clear.
 - [x] **Session sidebar** (View ▸ Sessions, Cmd-B) — left-docked
-      `BListView` of saved BFS sessions (newest first) with
-      New / Open / Rename / Delete. Multi-select (Shift/Cmd-click)
-      supports bulk delete; right-click a row for a Rename / Open /
-      Delete context menu. Rename updates only the `claude:title`
-      attribute. `session::Delete` / `session::Rename` added to the
-      store.
+      session list in a draggable `BSplitView` (Genio-style resizable
+      divider, width persisted) with New / Open / Rename / Delete.
+      Multi-select (Shift/Cmd-click) supports bulk delete; right-click
+      a row for a Rename / Open / Delete context menu. Rename updates
+      only the `claude:title` attribute. `session::Delete` /
+      `session::Rename` added to the store.
 - [x] **Welcome splash**, model picker, token bar, slide-in
       Settings panel, slash-command autocomplete popup, desktop
       notifications, and the shared HVIF app icon.
