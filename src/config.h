@@ -54,14 +54,26 @@ struct Auth {
 };
 
 // Resolve authentication in priority order: OAuth tokens (auto-
-// refreshed when expired), then ANTHROPIC_API_KEY env var.
+// refreshed when expired), then ANTHROPIC_API_KEY env var, then a
+// stored API key written via SaveApiKey() (GUI login).
 Auth ResolveAuth();
+
+// Persist / read / clear an Anthropic API key in a 0600 file at
+// <ConfigDir>/api_key. Used by the GUI auth dialog so a key entered
+// once is remembered across launches (the env var still wins). Returns
+// true on success; LoadApiKey returns "" when none is stored.
+bool        SaveApiKey(const std::string& key);
+std::string LoadApiKey();
+bool        ClearApiKey();
 
 // Compose the effective system prompt: user CLAUDE.md, project
 // CLAUDE.md, BFS summary snapshot (Haiku only), then `flag_system`.
 // Called per-turn so edits to the CLAUDE.md files take effect
 // immediately.
-std::string ComposeSystem(const std::string& flag_system);
+// `working_dir` overrides the working-directory line appended to the
+// prompt; pass an empty string to fall back to getcwd().
+std::string ComposeSystem(const std::string& flag_system,
+                           const std::string& working_dir = {});
 
 // Replace invalid UTF-8 bytes (including truncated sequences) with
 // U+FFFD so nlohmann::json::dump() never throws type_error.316.

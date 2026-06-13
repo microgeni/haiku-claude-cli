@@ -330,10 +330,58 @@ Auth ResolveAuth() {
 	if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k) {  // flawfinder: ignore
 		return {AuthKind::ApiKey, k};
 	}
+	if (std::string stored = LoadApiKey(); !stored.empty()) {
+		return {AuthKind::ApiKey, stored};
+	}
 	return {};
 }
 
-std::string ComposeSystem(const std::string& flag_system) {
+// Path to the stored API key file (0600). Sibling of config.json.
+static std::string ApiKeyPath() {
+	return paths::ConfigDir() + "/api_key";
+}
+
+bool SaveApiKey(const std::string& key) {
+	std::string k = key;
+	// Trim whitespace/newlines so a pasted key with a trailing newline
+	// doesn't break the Authorization header.
+	while (!k.empty() && (k.back() == '\n' || k.back() == '\r'
+			|| k.back() == ' ' || k.back() == '\t')) k.pop_back();
+	size_t i = 0;
+	while (i < k.size() && (k[i] == ' ' || k[i] == '\t')) ++i;
+	k = k.substr(i);
+	if (k.empty()) return false;
+
+	paths::MkdirP(paths::ConfigDir());
+	const std::string path = ApiKeyPath();
+	// O_CREAT|0600 so the key file is never world-readable, even
+	// transiently (mirrors the OAuth credentials write).
+	const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0) return false;
+	FILE* fp = ::fdopen(fd, "w");
+	if (!fp) { ::close(fd); return false; }
+	const std::string out = k + "\n";
+	const bool ok = std::fwrite(out.data(), 1, out.size(), fp) == out.size();
+	std::fclose(fp);
+	return ok;
+}
+
+std::string LoadApiKey() {
+	std::ifstream f(ApiKeyPath());
+	if (!f.is_open()) return {};
+	std::string k;
+	std::getline(f, k);
+	while (!k.empty() && (k.back() == '\n' || k.back() == '\r'
+			|| k.back() == ' ' || k.back() == '\t')) k.pop_back();
+	return k;
+}
+
+bool ClearApiKey() {
+	return std::remove(ApiKeyPath().c_str()) == 0;
+}
+
+std::string ComposeSystem(const std::string& flag_system,
+                           const std::string& working_dir) {
 	std::string out;
 	auto append = [&](const std::string& chunk) {
 		if (chunk.empty()) return;
@@ -345,6 +393,18 @@ std::string ComposeSystem(const std::string& flag_system) {
 	append(BfsSystemBlock());
 	append(BehaviorSystemBlock());
 	append(flag_system);
+
+	// Append the working directory so Claude always knows where relative
+	// paths resolve — useful when the user runs the CLI from a project root.
+	// The GUI passes an explicit path; the CLI falls back to getcwd().
+	if (!working_dir.empty()) {
+		append("Working directory: " + working_dir);
+	} else {
+		char cwdbuf[4096];
+		if (getcwd(cwdbuf, sizeof(cwdbuf)))
+			append(std::string("Working directory: ") + cwdbuf);
+	}
+
 	return out;
 }
 
