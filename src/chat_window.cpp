@@ -1388,14 +1388,15 @@ void ChatWindow::_BuildLayout()
 	// resizes.
 	BView* buttonCol = new BView("buttoncol", B_SUPPORTS_LAYOUT);
 	BLayoutBuilder::Group<>(buttonCol, B_VERTICAL, 2.0f)
+		.SetInsets(0, 0, 3, 0)   // small right inset so focus rings aren't clipped
 		.Add(fSend)
 		.Add(fStop)
 		.Add(fClearBtn)
 		.Add(fSettingsBtn)
 		.AddGlue()
 	.End();
-	buttonCol->SetExplicitMinSize(BSize(96, B_SIZE_UNSET));
-	buttonCol->SetExplicitMaxSize(BSize(96, B_SIZE_UNLIMITED));
+	buttonCol->SetExplicitMinSize(BSize(104, B_SIZE_UNSET));
+	buttonCol->SetExplicitMaxSize(BSize(104, B_SIZE_UNLIMITED));
 
 	BLayoutBuilder::Group<>(fInputBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
 		.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
