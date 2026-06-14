@@ -1170,6 +1170,10 @@ void ChatWindow::_BuildMenuBar()
 	BMenu* viewMenu = new BMenu("View");
 	viewMenu->AddItem(new BMenuItem("Sessions",
 		new BMessage(gui::MSG_TOGGLE_SESSIONS), 'B'));
+	fInputItem = new BMenuItem("Input",
+		new BMessage(gui::MSG_TOGGLE_INPUT), 'I');
+	fInputItem->SetMarked(true);   // input bar is shown by default
+	viewMenu->AddItem(fInputItem);
 	fMenuBar->AddItem(viewMenu);
 
 	// ── Tools ───────────────────────────────────────────────────────────────
@@ -1389,10 +1393,11 @@ void ChatWindow::_BuildLayout()
 			.AddGlue()
 		.End()
 	.End();
-	// Fixed strip height: tall enough for the 3-button column. min == max
-	// so the layout can neither grow nor shrink it.
-	fInputBar->SetExplicitMinSize(BSize(B_SIZE_UNSET, 104.0f));
-	fInputBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 104.0f));
+	// Fixed strip height: tall enough for the 3-row button column
+	// (Send/Stop, Clear, Settings) plus spacing and insets. min == max so
+	// the layout can neither grow nor shrink it.
+	fInputBar->SetExplicitMinSize(BSize(B_SIZE_UNSET, 132.0f));
+	fInputBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 132.0f));
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fSplit, 1.0f)
@@ -1563,6 +1568,19 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_TOGGLE_SESSIONS:
 		_ToggleSessionList();
+		break;
+
+	case gui::MSG_TOGGLE_INPUT:
+		if (fInputBar) {
+			if (fInputBar->IsHidden()) {
+				fInputBar->Show();
+				if (fInputItem) fInputItem->SetMarked(true);
+				fInput->MakeFocus(true);
+			} else {
+				fInputBar->Hide();
+				if (fInputItem) fInputItem->SetMarked(false);
+			}
+		}
 		break;
 
 	case gui::MSG_SESSION_SELECT:

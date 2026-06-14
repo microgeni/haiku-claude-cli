@@ -67,6 +67,7 @@ constexpr uint32_t MSG_ZOOM_IN        = 'ZMIN'; // Cmd-+ : larger chat font
 constexpr uint32_t MSG_ZOOM_OUT       = 'ZMOT'; // Cmd-- : smaller chat font
 constexpr uint32_t MSG_ZOOM_RESET     = 'ZMRS'; // Cmd-0 : reset chat font
 constexpr uint32_t MSG_TOGGLE_SESSIONS = 'TSES'; // View: toggle session sidebar
+constexpr uint32_t MSG_TOGGLE_INPUT    = 'TINP'; // View: toggle the input bar
 constexpr uint32_t MSG_SESSION_SELECT  = 'SSEL'; // sidebar: load selected session
 constexpr uint32_t MSG_SESSION_DELETE  = 'SDEL'; // sidebar: delete selected session
 constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
@@ -325,6 +326,7 @@ private:
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
+	BMenuItem*     fInputItem     = nullptr;  // View > Input (checkmark)
 	BTextView*     fOutput        = nullptr;
 	WelcomeView*   fWelcome       = nullptr;  // startup splash, collapsed on first turn
 	BScrollView*   fScroll        = nullptr;
