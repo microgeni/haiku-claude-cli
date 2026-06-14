@@ -1387,7 +1387,7 @@ void ChatWindow::_BuildLayout()
 	// the right and never squeezed by the weight-1 input when the window
 	// resizes.
 	BView* buttonCol = new BView("buttoncol", B_SUPPORTS_LAYOUT);
-	BLayoutBuilder::Group<>(buttonCol, B_VERTICAL, B_USE_SMALL_SPACING)
+	BLayoutBuilder::Group<>(buttonCol, B_VERTICAL, 2.0f)
 		.Add(fSend)
 		.Add(fStop)
 		.Add(fClearBtn)
