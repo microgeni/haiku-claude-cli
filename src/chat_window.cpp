@@ -1421,10 +1421,21 @@ void ChatWindow::_BuildLayout()
 		.Add(fInputBar, 0.0f)
 	.End();
 
-	// Vertical floor reserves room for the menu bar, a minimal chat area,
-	// the token bar, and the full bottom strip so shrinking the window
-	// never squeezes the input prompt away.
-	SetSizeLimits(320, 32767, 300, 32767);
+	// Derive the window's minimum size from the layout's own computed
+	// minimum so the window can never be shrunk smaller than what fits
+	// every row (menu, a minimal chat, token bar, fixed input bar). A
+	// guessed floor that's smaller than the real layout min lets the
+	// bottom input bar get clipped below the visible area on shrink —
+	// which is what made the buttons disappear once the window went
+	// under its starting size.
+	if (BLayout* layout = GetLayout()) {
+		const BSize minSize = layout->MinSize();
+		const float minW = (minSize.width  > 0) ? minSize.width  + 1.0f : 320.0f;
+		const float minH = (minSize.height > 0) ? minSize.height + 1.0f : 300.0f;
+		SetSizeLimits(minW, 32767, minH, 32767);
+	} else {
+		SetSizeLimits(320, 32767, 300, 32767);
+	}
 
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
