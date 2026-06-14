@@ -359,6 +359,12 @@ private:
 	BScrollView*   fSessionScroll = nullptr;  // scroller around fSessionList
 	BSplitView*    fSplit         = nullptr;  // draggable divider: sidebar | chat
 
+	// Window minimum size (computed in _BuildLayout from the fixed row
+	// heights); used to clamp a restored frame so it never starts below
+	// the floor that keeps the input bar visible.
+	float          fWindowMinW    = 360.0f;
+	float          fWindowMinH    = 300.0f;
+
 	// ── Conversation state ───────────────────────────────────────────────────
 	config::Auth   fAuth;
 	std::string    fModel;

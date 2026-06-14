@@ -1421,21 +1421,20 @@ void ChatWindow::_BuildLayout()
 		.Add(fInputBar, 0.0f)
 	.End();
 
-	// Derive the window's minimum size from the layout's own computed
-	// minimum so the window can never be shrunk smaller than what fits
-	// every row (menu, a minimal chat, token bar, fixed input bar). A
-	// guessed floor that's smaller than the real layout min lets the
-	// bottom input bar get clipped below the visible area on shrink —
-	// which is what made the buttons disappear once the window went
-	// under its starting size.
-	if (BLayout* layout = GetLayout()) {
-		const BSize minSize = layout->MinSize();
-		const float minW = (minSize.width  > 0) ? minSize.width  + 1.0f : 320.0f;
-		const float minH = (minSize.height > 0) ? minSize.height + 1.0f : 300.0f;
-		SetSizeLimits(minW, 32767, minH, 32767);
-	} else {
-		SetSizeLimits(320, 32767, 300, 32767);
-	}
+	// The window must never be smaller than the sum of the fixed rows
+	// plus a minimal chat, or the layout will collapse/hide the bottom
+	// input bar (observed: fInputBar reported hidden on over-shrink).
+	// Compute an explicit floor from the known row heights rather than
+	// trusting GetLayout()->MinSize(), which proved unreliable here.
+	const float kInputBarH = 132.0f;
+	const float kTokenBarH = static_cast<float>(TokenBar::kBarHeight);
+	const float kMenuH     = fMenuBar ? fMenuBar->Frame().Height() : 20.0f;
+	const float kChatMinH  = 80.0f;
+	const float minH = kMenuH + kChatMinH + kTokenBarH + kInputBarH + 24.0f;
+	const float minW = 360.0f;
+	SetSizeLimits(minW, 32767, minH, 32767);
+	fWindowMinH = minH;
+	fWindowMinW = minW;
 
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
@@ -1505,6 +1504,13 @@ void ChatWindow::_RepositionOverlays()
 void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
+	// Safety net: if the layout ever collapses/hides the bottom input bar
+	// on an over-shrink, bring it back. The size floor should prevent it,
+	// but this guarantees the input is never lost.
+	if (fInputBar && fInputBar->IsHidden()
+			&& fInputItem && fInputItem->IsMarked()) {
+		fInputBar->Show();
+	}
 	// Force the window layout to recompute child frames on resize. Without
 	// this, some children (notably the fixed-size input-bar buttons) can
 	// be left at stale positions/sizes after a resize even though they're
@@ -3255,7 +3261,13 @@ void ChatWindow::_LoadGuiPrefs()
 	if (prefs.FindRect("frame", &frame) == B_OK && frame.IsValid()
 			&& frame.Width() > 200 && frame.Height() > 150) {
 		MoveTo(frame.LeftTop());
-		ResizeTo(frame.Width(), frame.Height());
+		// Clamp to the window minimum so a small saved frame can't start
+		// the window below the floor that keeps the input bar visible.
+		float rw = frame.Width();
+		float rh = frame.Height();
+		if (rw < fWindowMinW) rw = fWindowMinW;
+		if (rh < fWindowMinH) rh = fWindowMinH;
+		ResizeTo(rw, rh);
 	}
 
 	float zoom = 1.0f;
