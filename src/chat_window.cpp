@@ -545,16 +545,17 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// Fixed height (min == max): the input never grows or shrinks on
-	// window resize. Combined with the bottom row's zero layout weight,
-	// the whole input+buttons strip stays a fixed size and the chat
-	// scroll area absorbs all vertical change.
+	// The input fills its row vertically (unlimited max) so its height
+	// matches the side button column, which defines the bottom row's
+	// height. A small min keeps it from collapsing to nothing when the
+	// window is shrunk. The row itself has zero layout weight, so it
+	// stays at the button-column height while the chat area absorbs
+	// vertical resize.
 	font_height fh;
 	f.GetHeight(&fh);
-	const float lineH  = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	const float fixedH = lineH * 4.0f + 8.0f;
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, fixedH));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, fixedH));
+	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, lineH + 8.0f));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -1386,7 +1387,10 @@ void ChatWindow::_BuildLayout()
 		.End()
 	.End();
 
-	SetSizeLimits(320, 32767, 220, 32767);
+	// Vertical floor reserves room for the menu bar, a minimal chat area,
+	// the token bar, and the full bottom strip (input + 3-button column)
+	// so shrinking the window never squeezes the input prompt away.
+	SetSizeLimits(320, 32767, 300, 32767);
 
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
