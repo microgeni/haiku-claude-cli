@@ -1064,7 +1064,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int maxTokens, const std::string& systemPrompt,
                         int notifyMinSec, const std::string& workingDir)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
-	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE | B_AUTO_UPDATE_SIZE_LIMITS)
+	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
 	, fModel(model)
 	, fMaxTokens(maxTokens)
@@ -1218,6 +1218,10 @@ void ChatWindow::_BuildLayout()
 
 	fScroll = new BScrollView("scroll", fOutput,
 	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
+	// Allow the scrolled chat to shrink small so it yields vertical space
+	// to the fixed bottom strip when the window is reduced (otherwise the
+	// BTextView's natural min-height squeezes the input out of view).
+	fScroll->SetExplicitMinSize(BSize(120, 50));
 
 	// ── Welcome splash (shown above the chat until the first turn) ───────────
 	fWelcome = new WelcomeView();
@@ -1347,9 +1351,11 @@ void ChatWindow::_BuildLayout()
 		.Add(fWelcome, 0.0f)
 		.Add(fScroll, 1.0f)
 	.End();
-	// Let the chat column shrink — the BTextView/BScrollView would
-	// otherwise report a wide min-width that blocks reducing the window.
-	chatColumn->SetExplicitMinSize(BSize(160, B_SIZE_UNSET));
+	// Let the chat column shrink in both axes — the BTextView/BScrollView
+	// would otherwise report a large min size (wide + tall) that crowds
+	// out the fixed bottom strip when the window is shrunk, making the
+	// input prompt disappear. A small explicit min lets the chat yield.
+	chatColumn->SetExplicitMinSize(BSize(160, 60));
 
 	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
 	fSplit->SetName("mainsplit");
