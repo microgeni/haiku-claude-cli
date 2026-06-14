@@ -1382,16 +1382,25 @@ void ChatWindow::_BuildLayout()
 	// show/hide-able.
 	fInputBar = new BView("inputbar", B_SUPPORTS_LAYOUT);
 	fInputBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+
+	// Button column as its own fixed-width view so it's always visible on
+	// the right and never squeezed by the weight-1 input when the window
+	// resizes.
+	BView* buttonCol = new BView("buttoncol", B_SUPPORTS_LAYOUT);
+	BLayoutBuilder::Group<>(buttonCol, B_VERTICAL, B_USE_SMALL_SPACING)
+		.Add(fSend)
+		.Add(fStop)
+		.Add(fClearBtn)
+		.Add(fSettingsBtn)
+		.AddGlue()
+	.End();
+	buttonCol->SetExplicitMinSize(BSize(96, B_SIZE_UNSET));
+	buttonCol->SetExplicitMaxSize(BSize(96, B_SIZE_UNLIMITED));
+
 	BLayoutBuilder::Group<>(fInputBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
 		.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
 		.Add(fInput, 1.0f)
-		.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
-			.Add(fSend)
-			.Add(fStop)
-			.Add(fClearBtn)
-			.Add(fSettingsBtn)
-			.AddGlue()
-		.End()
+		.Add(buttonCol, 0.0f)
 	.End();
 	// Fixed strip height: tall enough for the 3-row button column
 	// (Send/Stop, Clear, Settings) plus spacing and insets. min == max so
