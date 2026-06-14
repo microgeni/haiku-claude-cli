@@ -525,7 +525,7 @@ void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
 InputView::InputView(const char* name)
 	: BTextView(BRect(0, 0, 200, 24), name,
 	            BRect(4, 4, 196, 20),
-	            B_FOLLOW_ALL, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
+	            B_FOLLOW_NONE, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
 {
 	SetWordWrap(true);
 	SetStylable(false);
@@ -1221,7 +1221,7 @@ void ChatWindow::_BuildLayout()
 	fOutput->SetFontAndColor(be_fixed_font, B_FONT_ALL, &kColorText);
 
 	fScroll = new BScrollView("scroll", fOutput,
-	                          B_FOLLOW_ALL, 0, false, true, B_FANCY_BORDER);
+	                          B_FOLLOW_NONE, 0, false, true, B_FANCY_BORDER);
 	// Allow the scrolled chat to shrink small so it yields vertical space
 	// to the fixed bottom strip when the window is reduced (otherwise the
 	// BTextView's natural min-height squeezes the input out of view).
