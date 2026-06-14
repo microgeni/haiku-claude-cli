@@ -1198,7 +1198,11 @@ void ChatWindow::_BuildMenuBar()
 		new BMessage(gui::MSG_ABOUT)));
 	fMenuBar->AddItem(helpMenu);
 
-	AddChild(fMenuBar);
+	// NOTE: the menu bar is added to the window's layout (as the top row)
+	// in _BuildLayout, not AddChild'd here — mixing a manually-added menu
+	// bar with a window-wide BLayoutBuilder layout makes the layout cover
+	// the full height (including under the menu bar), which on resize
+	// pushes the bottom input bar off-screen.
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,6 +1414,7 @@ void ChatWindow::_BuildLayout()
 	fInputBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 132.0f));
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+		.Add(fMenuBar, 0.0f)
 		.Add(fSplit, 1.0f)
 		.Add(fTokenBar, 0.0f)
 		.Add(fFindBar, 0.0f)
