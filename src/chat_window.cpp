@@ -1260,6 +1260,7 @@ void ChatWindow::_BuildLayout()
 	BButton* sessDel = new BButton("sessdel", "Delete",
 	                               new BMessage(gui::MSG_SESSION_DELETE));
 	fSessionPanel = new BView("sessionpanel", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
+	fSessionPanel->SetResizingMode(B_FOLLOW_NONE);
 	fSessionPanel->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 
 	// Keep the action buttons grouped at the left at a uniform width
@@ -1338,6 +1339,7 @@ void ChatWindow::_BuildLayout()
 	findClose->SetExplicitSize(BSize(32, B_SIZE_UNSET));
 
 	fFindBar = new BView("findbar", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
+	fFindBar->SetResizingMode(B_FOLLOW_NONE);
 	fFindBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	BLayoutBuilder::Group<>(fFindBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
 		.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
@@ -1355,6 +1357,7 @@ void ChatWindow::_BuildLayout()
 	// right (settings) dividers can be dragged. The chat column (welcome
 	// splash + scroll) is wrapped in its own view as the middle item.
 	BView* chatColumn = new BView("chatcolumn", B_SUPPORTS_LAYOUT);
+	chatColumn->SetResizingMode(B_FOLLOW_NONE);
 	BLayoutBuilder::Group<>(chatColumn, B_VERTICAL, 0)
 		.Add(fWelcome, 0.0f)
 		.Add(fScroll, 1.0f)
@@ -1385,12 +1388,14 @@ void ChatWindow::_BuildLayout()
 	// squeezed away when the window shrinks. It's also independently
 	// show/hide-able.
 	fInputBar = new BView("inputbar", B_SUPPORTS_LAYOUT);
+	fInputBar->SetResizingMode(B_FOLLOW_NONE);
 	fInputBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 
 	// Button column as its own fixed-width view so it's always visible on
 	// the right and never squeezed by the weight-1 input when the window
 	// resizes.
 	BView* buttonCol = new BView("buttoncol", B_SUPPORTS_LAYOUT);
+	buttonCol->SetResizingMode(B_FOLLOW_NONE);
 	BLayoutBuilder::Group<>(buttonCol, B_VERTICAL, 2.0f)
 		.SetInsets(0, 0, 3, 0)   // small right inset so focus rings aren't clipped
 		.Add(fSend)
@@ -1505,8 +1510,7 @@ void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
 	// Safety net: if the layout ever collapses/hides the bottom input bar
-	// on an over-shrink, bring it back. The size floor should prevent it,
-	// but this guarantees the input is never lost.
+	// on an over-shrink, bring it back when View > Input says it's shown.
 	if (fInputBar && fInputBar->IsHidden()
 			&& fInputItem && fInputItem->IsMarked()) {
 		fInputBar->Show();
