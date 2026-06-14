@@ -545,10 +545,14 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// No explicit height constraints: the input simply fills whatever
-	// space its cell in the bottom row is given (the row height comes
-	// from the side button column). A tiny min keeps it from vanishing.
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, 24.0f));
+	// Give the input a real minimum height (~3 lines) so the bottom strip
+	// can never be squeezed away when the window shrinks — the chat area
+	// (which has a much smaller min) yields the space instead. Unlimited
+	// max lets the input fill the row to the button-column height.
+	font_height fh;
+	f.GetHeight(&fh);
+	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, lineH * 3.0f + 8.0f));
 	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 }
 
