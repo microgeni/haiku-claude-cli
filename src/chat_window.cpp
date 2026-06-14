@@ -1494,6 +1494,12 @@ void ChatWindow::_RepositionOverlays()
 void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
+	// Force the window layout to recompute child frames on resize. Without
+	// this, some children (notably the fixed-size input-bar buttons) can
+	// be left at stale positions/sizes after a resize even though they're
+	// correct at startup.
+	if (GetLayout())
+		GetLayout()->Relayout(true);
 	_RepositionOverlays();
 	// Keep output text rect in sync with the view bounds so word-wrap
 	// and Insert() render correctly after the window is resized.
