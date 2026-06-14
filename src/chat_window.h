@@ -340,6 +340,7 @@ private:
 	SettingsPanel* fSettings      = nullptr;
 
 	// ── Find bar (Cmd-F) ──────────────────────────────────────────────────────
+	BView*         fInputBar      = nullptr;  // fixed-height bottom strip: input + buttons
 	BView*         fFindBar       = nullptr;  // hidden container, between chat + input
 	BTextControl*  fFindField     = nullptr;  // query input
 	BStringView*   fFindStatus    = nullptr;  // "3 / 12" match counter

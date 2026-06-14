@@ -545,14 +545,10 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// Give the input a real minimum height (~3 lines) so the bottom strip
-	// can never be squeezed away when the window shrinks — the chat area
-	// (which has a much smaller min) yields the space instead. Unlimited
-	// max lets the input fill the row to the button-column height.
-	font_height fh;
-	f.GetHeight(&fh);
-	const float lineH = ceilf(fh.ascent + fh.descent + fh.leading) + 1.0f;
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, lineH * 3.0f + 8.0f));
+	// The input fills its cell inside the fixed-height input bar; the bar
+	// (not the input) owns the strip height, so only a small min is
+	// needed here and an unlimited max lets it fill the bar.
+	SetExplicitMinSize(BSize(B_SIZE_UNSET, 24.0f));
 	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 }
 
@@ -1374,26 +1370,40 @@ void ChatWindow::_BuildLayout()
 	// Input row: input (expands) | vertical button column. The thinking
 	// spinner is rendered inline in the chat transcript (after the
 	// "claude ▸" header), not as a separate widget here.
+	// ── Bottom input bar — a dedicated fixed-height view ──────────────────────
+	// Wrapping the input + buttons in their own BView (like the session
+	// sidebar is its own panel) makes the layout treat the whole strip as
+	// one indivisible block with an explicit height, so it can never be
+	// squeezed away when the window shrinks. It's also independently
+	// show/hide-able.
+	fInputBar = new BView("inputbar", B_SUPPORTS_LAYOUT);
+	fInputBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	BLayoutBuilder::Group<>(fInputBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
+		.Add(fInput, 1.0f)
+		.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
+			.Add(fSend)
+			.Add(fStop)
+			.Add(fClearBtn)
+			.Add(fSettingsBtn)
+			.AddGlue()
+		.End()
+	.End();
+	// Fixed strip height: tall enough for the 3-button column. min == max
+	// so the layout can neither grow nor shrink it.
+	fInputBar->SetExplicitMinSize(BSize(B_SIZE_UNSET, 104.0f));
+	fInputBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 104.0f));
+
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fSplit, 1.0f)
 		.Add(fTokenBar, 0.0f)
 		.Add(fFindBar, 0.0f)
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING, 0.0f)
-			.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
-			.Add(fInput, 1.0f)
-			.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
-				.Add(fSend)
-				.Add(fStop)
-				.Add(fClearBtn)
-				.Add(fSettingsBtn)
-				.AddGlue()
-			.End()
-		.End()
+		.Add(fInputBar, 0.0f)
 	.End();
 
 	// Vertical floor reserves room for the menu bar, a minimal chat area,
-	// the token bar, and the full bottom strip (input + 3-button column)
-	// so shrinking the window never squeezes the input prompt away.
+	// the token bar, and the full bottom strip so shrinking the window
+	// never squeezes the input prompt away.
 	SetSizeLimits(320, 32767, 300, 32767);
 
 	// Find bar starts hidden; Cmd-F reveals it.
