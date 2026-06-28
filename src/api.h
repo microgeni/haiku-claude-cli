@@ -13,17 +13,29 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "output_sink.h"
 
 // Anthropic Messages API client and tool-use loop. SendConversation
 // does one streamed POST to /v1/messages; SendWithTools wraps that
 // in a loop that dispatches each tool_use block back through the
 // tools:: registry, re-feeding tool_results until the model stops
 // requesting tools.
+
+// RAII handle so terminal_sink.cpp can pause/resume the ESC-interrupt
+// background thread around SelectOption calls without knowing the
+// concrete EscInterruptGuard type (which is private to api.cpp).
+struct EscInterruptGuardHandle {
+	virtual void pause()  = 0;
+	virtual void resume() = 0;
+	virtual ~EscInterruptGuardHandle() = default;
+};
+
 namespace api {
 
 using json = nlohmann::json;
 
-enum class Permission { Allow, Deny };
+// api::Permission is defined in output_sink.h; it is in the api::
+// namespace there so all existing api::Permission references compile.
 
 struct SendResult {
 	int                exit_code = 0;
@@ -40,45 +52,19 @@ struct SendResult {
 	int                cache_read_input_tokens     = 0;
 };
 
-// Cross-thread progress handle used by the Telegram bridge to watch a
-// streaming response and push incremental edits to the chat. Written
-// by the SSE parser's text_delta branch; read by the bridge's
-// updater thread. Nulled out when no remote consumer is attached.
+// Used by session.cpp's LocalWorker to animate the Telegram mirror
+// placeholder for locally-initiated turns (StartThinkingUpdater).
+// Separate from the TelegramSink streaming path for Telegram-origin
+// turns, which no longer uses this struct.
 struct StreamProgress {
 	std::mutex        mu;
 	std::string       text;
 	std::atomic<int>  version {0};
-	// Non-empty while a tool is actively running. The updater thread
-	// shows this string instead of the "thinking…" animation.
-	std::string       tool_phase;
+	std::string       tool_phase; // unused after Step 3; kept for compat
 };
 
-// Globals that module boundaries cross: these used to live in
-// main.cpp's anonymous namespace. Extern-declared here so the
-// Telegram bridge, REPL session, and permission prompt can all read
-// and write them without plumbing references through every call.
-
-// Set by the bridge so ProcessSseEvent can push token deltas.
+// Set by session.cpp LocalWorker when mirroring a local turn to Telegram.
 extern StreamProgress* g_stream_progress;
-
-// Set by a bridge context to forward tool lifecycle notices (start,
-// result, denial) as separate Telegram messages. Cleared when no
-// remote consumer is attached.
-extern std::function<void(const std::string&)> g_tool_status_hook;
-
-// Set by the bridge to route permission prompts through Telegram.
-// Signature: (tool_name, preview_text, local_answered) → Permission.
-// `local_answered` is non-null when the local TTY is racing the
-// same prompt; the hook must poll it and return Deny once the local
-// side wins.
-extern std::function<Permission(const std::string&, const std::string&,
-                                 std::atomic<bool>*)> g_telegram_permission_hook;
-
-// Non-interactive mode is set by the Telegram bridge: there's no
-// stdin to prompt on, so destructive tools are either blanket-allowed
-// or blanket-denied based on config.
-extern bool g_non_interactive_tools;
-extern bool g_non_interactive_allow_destructive;
 
 // Set at startup from Config::fAllowDestructiveTools or -y/--yes.
 // Grants destructive-tool permission without prompting whenever
@@ -89,11 +75,10 @@ extern bool g_allow_destructive_tools;
 // destructive tool calls and skips permission prompts entirely.
 extern std::atomic<bool> g_ludicrous_mode;
 
-// Pauses the Telegram thinking-updater threads while a permission
-// prompt is in flight so the bot doesn't spam EditMessageText and
-// hit rate limits that would delay the inline-keyboard permission
-// message.
-extern std::atomic<bool> g_telegram_updater_paused;
+// Pointer to the currently active EscInterruptGuard, exposed so
+// TerminalSink::AskPermission can pause/resume it around SelectOption
+// calls. Null when no turn is in flight.
+extern EscInterruptGuardHandle* g_active_esc_guard;
 
 // Response-header cache populated by the SSE client. Keys are the
 // lowercased `anthropic-*` header names. Consumed by /usage.
@@ -120,18 +105,23 @@ private:
 // whether the tools array is sent — set false for sub-agents that
 // must not call tools. `auth` is taken by value so the 401-refresh
 // path can swap in a renewed token and retry without touching the
-// caller's copy.
+// caller's copy. `sink_in` is the OutputSink to use; if null a
+// fresh TerminalSink is created for this call.
 SendResult SendConversation(config::Auth auth, const std::string& model,
                             int max_tokens, const json& messages,
-                            const std::string& custom_system, bool include_tools);
+                            const std::string& custom_system, bool include_tools,
+                            OutputSink* sink_in = nullptr);
 
 // Multi-round tool-use loop: SendConversation → dispatch tool_use
 // blocks → append tool_results → repeat until stop_reason leaves
 // "tool_use". Mutates `messages` in place so the caller can persist
 // the full conversation.
+// When `sink_in` is non-null, uses that sink instead of creating a
+// fresh TerminalSink. Used by the Telegram bridge to pass TelegramSink.
 SendResult SendWithTools(const config::Auth& auth, const std::string& model,
                          int max_tokens, json& messages,
-                         const std::string& custom_system);
+                         const std::string& custom_system,
+                         OutputSink* sink_in = nullptr);
 
 // Drain and return the list of file paths whose claude:summary BFS
 // attribute was written by WriteAttr tool calls during the most recent
@@ -139,6 +129,13 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 // on each call so subsequent calls return only new additions.
 // No-op (returns empty vector) on non-Haiku platforms.
 std::vector<std::string> DrainWrittenSummaryPaths();
+
+// Initialise libcurl's global state once, before any worker thread can
+// call curl_easy_init(). libcurl's implicit global init (triggered by the
+// first curl_easy_init) is NOT thread-safe; the GUI runs SendWithTools on
+// a worker thread, so this must be called once from main() at startup.
+// Safe to call multiple times; only the first call has effect.
+void GlobalInit();
 
 } // namespace api
 

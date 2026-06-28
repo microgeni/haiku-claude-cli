@@ -241,26 +241,15 @@ std::optional<OAuthTokens> RefreshTokens(const OAuthTokens& existing) {
 	return post_token_json(body.dump());
 }
 
-int DoLogin() {
-	if (auto existing = LoadTokens(); existing) {
-		std::cout << "Already logged in. Run 'claude logout' to re-authenticate.\n";
-		return 0;
-	}
-
+bool BuildAuthUrl(std::string& outUrl, std::string& outVerifier,
+                  std::string& outState) {
 	const std::string verifier  = random_base64url(32);
 	const std::string challenge = sha256_base64url(verifier);
 	const std::string state     = random_base64url(32);
-
-	if (verifier.empty() || state.empty()) {
-		std::cerr << "error: failed to generate PKCE parameters\n";
-		return 1;
-	}
+	if (verifier.empty() || state.empty()) return false;
 
 	CURL* curl = curl_easy_init();
-	if (!curl) {
-		std::cerr << "error: curl_easy_init failed\n";
-		return 1;
-	}
+	if (!curl) return false;
 
 	std::ostringstream url;
 	url << kAuthEndpoint
@@ -273,7 +262,52 @@ int DoLogin() {
 		<< "&state="                 << url_encode(curl, state);
 	curl_easy_cleanup(curl);
 
-	const std::string fAuthurl = url.str();
+	outUrl      = url.str();
+	outVerifier = verifier;
+	outState    = state;
+	return true;
+}
+
+std::optional<OAuthTokens> ExchangeCode(const std::string& pastedCode,
+                                        const std::string& verifier,
+                                        const std::string& state) {
+	std::string pasted = trim(pastedCode);
+	if (pasted.empty()) return std::nullopt;
+
+	std::string code = pasted;
+	std::string returned_state;
+	if (const auto pos = pasted.find('#'); pos != std::string::npos) {
+		code           = pasted.substr(0, pos);
+		returned_state = pasted.substr(pos + 1);
+	}
+	if (!returned_state.empty() && returned_state != state)
+		return std::nullopt;   // state mismatch (possible CSRF)
+
+	const json body = {
+		{"grant_type",    "authorization_code"},
+		{"client_id",     kClientId},
+		{"code",          code},
+		{"redirect_uri",  kRedirectUri},
+		{"code_verifier", verifier},
+		{"state",         state},
+	};
+	auto tokens = post_token_json(body.dump());
+	if (!tokens) return std::nullopt;
+	if (!SaveTokens(*tokens)) return std::nullopt;
+	return tokens;
+}
+
+int DoLogin() {
+	if (auto existing = LoadTokens(); existing) {
+		std::cout << "Already logged in. Run 'claude logout' to re-authenticate.\n";
+		return 0;
+	}
+
+	std::string fAuthurl, verifier, state;
+	if (!BuildAuthUrl(fAuthurl, verifier, state)) {
+		std::cerr << "error: failed to generate PKCE parameters\n";
+		return 1;
+	}
 
 	std::cout << "Open this URL in your browser to authorize:\n\n  "
 			  << fAuthurl << "\n\n";
@@ -294,38 +328,12 @@ int DoLogin() {
 		std::cerr << "error: no input\n";
 		return 1;
 	}
-	pasted = trim(pasted);
-	if (pasted.empty()) {
-		std::cerr << "error: empty code\n";
-		return 1;
-	}
 
-	std::string code = pasted;
-	std::string returned_state;
-	if (const auto pos = pasted.find('#'); pos != std::string::npos) {
-		code           = pasted.substr(0, pos);
-		returned_state = pasted.substr(pos + 1);
-	}
-	if (!returned_state.empty() && returned_state != state) {
-		std::cerr << "error: state mismatch (possible CSRF)\n";
-		return 1;
-	}
-
-	const json body = {
-		{"grant_type",    "authorization_code"},
-		{"client_id",     kClientId},
-		{"code",          code},
-		{"redirect_uri",  kRedirectUri},
-		{"code_verifier", verifier},
-		{"state",         state},
-	};
-
-	auto tokens = post_token_json(body.dump());
+	auto tokens = ExchangeCode(pasted, verifier, state);
 	if (!tokens) {
-		std::cerr << "error: token exchange failed\n";
+		std::cerr << "error: token exchange failed (or empty/invalid code)\n";
 		return 1;
 	}
-	if (!SaveTokens(*tokens)) return 1;
 
 	std::cout << "Logged in. Credentials saved to " << CredentialsPath() << "\n";
 	return 0;

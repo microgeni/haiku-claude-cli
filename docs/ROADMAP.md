@@ -865,7 +865,7 @@ as they stream in and launch them with one slash command.
       and both the interactive REPL and the Telegram bridge's
       local prompt.
 
-### v1.4 — True async input (type while Claude thinks)
+### v1.4 — True async input (type while Claude thinks) ✓
 
 The `LocalWorker` thread introduced in v1.6.3 moves
 `SendWithTools` off the main thread, but the main thread still
@@ -902,7 +902,7 @@ scratch.
       Ctrl+X is detected; `repl::RestoreInput` then seeds the edit buffer.
       The amended re-submission becomes the canonical history entry.
 
-#### True non-blocking prompt (type-ahead)
+#### True non-blocking prompt (type-ahead) ✓
 
 Return to `ReadMessage()` immediately after enqueuing, so the
 user can compose the next message while the current one streams.
@@ -910,18 +910,27 @@ The incoming keystrokes are buffered by libedit; the turn is
 submitted only after the worker signals completion (or the user
 explicitly queues it).
 
-- [ ] **`fWorkerOwnsDisplay` as a tri-state** — idle / streaming
-      / done. When streaming, libedit still shows the prompt but
-      keypresses are buffered rather than echoed over the stream.
-      When done, the buffer is flushed into the active line.
-- [ ] **Double-Enter to queue** — if the user finishes typing
-      and presses Enter while a turn is still running, the new
-      prompt is held in `fQueuedInput` on `LocalWorker`. As soon
-      as the current result is drained the next job is enqueued
-      without returning to `ReadMessage()`.
-- [ ] **Visual separation** — a dim `[queued]` annotation on the
-      input row while the previous turn is still streaming so the
-      user knows their input is staged, not submitted yet.
+- [x] **`fWorkerOwnsDisplay` as a tri-state** — added an explicit
+      `DisplayState { Idle, Streaming, Done }` on `LocalWorker`
+      alongside the existing `fWorkerOwnsDisplay` terminal-ownership
+      bool. The worker sets `Streaming` on dispatch and `Done` on
+      completion; `drain_turn()` returns it to `Idle`. The main loop
+      reads `Streaming` vs `Done` to decide whether to stage input or
+      drain.
+- [x] **Double-Enter to queue** — a line submitted while
+      `fDisplayState == Streaming` is stashed in
+      `LocalWorker::fQueuedInput` instead of blocking on
+      `fDisplayCv.wait`. The loop returns to the prompt; when the
+      top-of-loop drain fires after the turn completes, the queued
+      line is moved into the next iteration's `queuedLine` and
+      dispatched through the normal path-drop / slash / hooks /
+      `dispatch_turn` flow without re-entering `ReadMessage()`.
+      Queue depth is 1 — a second queued line replaces the first with
+      a `[queued (replaced previous)]` notice.
+- [x] **Visual separation** — a dim `[queued: …]` annotation is
+      printed to the scroll history and a `[queued] next prompt` hint
+      is shown on the status row while the input is staged, so the
+      user knows it is staged, not yet submitted.
 
 **Deferred within this milestone**:
 - Streaming the worker's output interleaved with user keystrokes
@@ -964,6 +973,102 @@ earlier without restarting.
 
 ---
 
+### v1.9 — Native GUI (`Claude`) ✓
+
+A first-class BeAPI desktop client built from the same core logic
+modules as the CLI (`api`, `tools`, `config`, `hooks`, `mcp`,
+`oauth`, `models`, `notify`), with the terminal front-end swapped
+for a native Haiku GUI (`chat_window`, `gui_sink`, `app_main_gui`).
+Built via `make gui` → `build/Claude` (capitalized per Haiku app
+naming convention; the CLI binary stays lowercase `claude`).
+Installed via `make install-gui` (→ `PREFIX/apps/Claude` + style
+data under `PREFIX/data/claude-gui/`). Shipped in the **same**
+`claude_cli` HPKG as the CLI (`make package` bundles both
+`bin/claude` and `apps/Claude`, providing `cmd:claude` +
+`app:Claude`). Haiku-only (links `libbe`, `libtracker`,
+`libnetwork`).
+
+The window streams responses into a styled `BTextView` with the
+shared markdown renderer and syntax highlighter, drives tools
+through a `GuiSink` that marshals every worker-thread event to the
+window thread via `BMessenger`, and persists conversations as BFS
+session files (browsable in Tracker).
+
+Architecture:
+- [x] **Worker thread + `GuiSink`** — `api::SendWithTools` runs on a
+      background `std::thread`; the sink posts `MSG_CHUNK` /
+      `MSG_TOOL_*` / `MSG_ASK_*` / `MSG_STATUS` / `MSG_ERR` BMessages
+      to the window (non-blocking). The worker is **joined** (never
+      detached) in `MSG_WORKER_DONE` / `QuitRequested` / dtor before
+      `delete fSink`, so it can never touch a freed sink.
+- [x] **Tool-context history** — the worker mutates a member
+      `fWorkerMessages` in place (not a discarded copy); on a clean
+      turn the main thread adopts it via `std::move`, so
+      `tool_use` / `tool_result` blocks survive into the next turn.
+- [x] **Permission dialog** — `BAlert` with Deny / Allow Once /
+      Always allow `<tool>`. "Always" inserts into
+      `api::AlwaysAllowed()` (the shared session allowlist) so the
+      tool is never re-prompted. Blanket auto-approve lives in
+      Tools ▸ Ludicrous Mode.
+- [x] **`AskChoice` modal** — numbered tool choices render as a
+      native `BAlert` (≤ 3) or a self-contained `ChoiceModal` window
+      (> 3) with a sem handshake; default button + Esc-cancel a11y.
+      (No active caller in the tool loop yet — forward-looking.)
+- [x] **Image attachments** — dropped JPEG / PNG / GIF / WebP
+      (≤ 5 MB) are base64-encoded and sent as `image` content blocks
+      in an array-form user message. Non-image files keep the
+      inline-text-fence behavior.
+
+Quality-of-life (the GUI counterpart to v0.2/v0.3):
+- [x] **Export Transcript** (File ▸ Export…, Cmd-E) — `BFilePanel`
+      → Markdown serializer handling text / array / image /
+      tool_use / tool_result content.
+- [x] **Find in conversation** (Cmd-F) — case-insensitive search bar
+      with live-search, prev/next wraparound, `n / total` counter.
+- [x] **Font zoom** (Cmd +/-/0) — rescales output runs
+      multiplicatively, preserving the renderer's heading/body
+      proportions; re-applied after each turn, replay, and clear.
+- [x] **Session sidebar** (View ▸ Sessions, Cmd-B) — left-docked
+      session list in a draggable `BSplitView` (Genio-style resizable
+      divider, width persisted) with New / Open / Rename / Delete.
+      Multi-select (Shift/Cmd-click) supports bulk delete; right-click
+      a row for a Rename / Open / Delete context menu. Rename updates
+      only the `claude:title` attribute. `session::Delete` /
+      `session::Rename` added to the store.
+- [x] **Three-pane `BSplitView`** — sidebar, chat, and Settings panel
+      share one horizontal split so *both* the left (sessions) and
+      right (settings) dividers are draggable (Genio-style); both side
+      panes are collapsible and their widths persist.
+- [x] **Welcome splash**, model picker, token bar, slide-in
+      Settings panel, slash-command autocomplete popup, desktop
+      notifications, and the shared HVIF app icon.
+- [x] **In-app sign-in** — an `AuthWindow` modal shown when no
+      credentials are found, instead of a dead-end "use the terminal"
+      alert. Two paths: paste an API key (saved 0600 via
+      `config::SaveApiKey`) or OAuth (opens the browser via
+      `oauth::BuildAuthUrl`, then `ExchangeCode` on the pasted redirect
+      code). `ResolveAuth` gained a stored-API-key fallback that also
+      benefits the CLI.
+
+Also shipped:
+- [x] **Per-session settings** — each saved session remembers the
+      model, system prompt, working directory, and max-tokens it was
+      created with (stored in the session-file envelope) and restores
+      them on load, so continuing an old conversation keeps its
+      context.
+- [x] **Persisted GUI preferences** — window frame, chat zoom level,
+      and last-used model are saved to `<ConfigDir>/gui_prefs.msg` on
+      quit and restored on launch.
+
+Deferred:
+- CLI feature parity: hooks/MCP status surface. (Running cost estimate
+  and `/compact` now in the GUI.)
+- Wiring an actual caller for `AskChoice` in the tool loop.
+- Streaming-markdown intra-line rendering (currently line-by-line;
+  partial lines complete on the next chunk).
+
+---
+
 ## Haiku-native extras
 
 Features that don't exist in Claude Code but would make this CLI feel
@@ -978,8 +1083,10 @@ Things explicitly excluded from this roadmap:
 - **IDE integrations** (VS Code, JetBrains). Haiku users mostly live
   in Pe, Koder, or the terminal; an IDE extension would be a separate
   project.
-- **Image input**. The Messages API supports it, but there's no good
-  terminal workflow for attaching images on Haiku without a GUI surface.
+- **Image input in the terminal**. The Messages API supports it, but
+  there's no good terminal workflow for attaching images on Haiku.
+  (The native GUI *does* support image attachments as of v1.9 — the
+  exclusion is specifically the CLI/Terminal front-end.)
 - **Windows and Linux ports**. macOS builds via nix exist only as a
   development convenience for prototyping before building on Taurus.
 - **Plugin marketplace**. The user config directory is the plugin

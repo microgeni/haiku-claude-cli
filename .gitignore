@@ -37,3 +37,8 @@ build/
 build-release/
 .claude/
 
+# Genio IDE workspace files
+.genio.yaml
+.genio-claude-selection.txt
+
+*.tar

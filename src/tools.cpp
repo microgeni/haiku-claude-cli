@@ -176,16 +176,18 @@ static std::string make_preview_block(
 		auto it = diff_marks.find(ln);
 		if (it != diff_marks.end()) {
 			if (it->second.is_remove) {
-				// Marker: line number + " - ", content: raw source line.
-				// DiffRemoved colors them differently (red marker, white content).
-				const std::string marker  = std::string(num) + " - ";
-				const std::string content = line;
-				body << tui::DiffRemoved(marker, content) << "\n";
+				// Marker: line number + " - ", content: syntax-highlighted.
+				// DiffRemoved renders with a dark-red background; the content
+				// gets the near-white fg so it stays readable, but we still
+				// apply syntax highlighting so type / keyword colours show.
+				const std::string marker      = std::string(num) + " - ";
+				const std::string highlighted = tui::HighlightCode(lang, line);
+				body << tui::DiffRemoved(marker, highlighted) << "\n";
 			} else {
 				// Marker: line number + " + ", content: syntax-highlighted.
-				const std::string marker  = std::string(num) + " + ";
-				const std::string content = tui::HighlightCode(lang, line);
-				body << tui::DiffAdded(marker, content) << "\n";
+				const std::string marker      = std::string(num) + " + ";
+				const std::string highlighted = tui::HighlightCode(lang, line);
+				body << tui::DiffAdded(marker, highlighted) << "\n";
 			}
 		} else {
 			// Unchanged context line: dim number, space, plain content.
@@ -901,11 +903,15 @@ json builtin_definitions() {
 			{"name", "Task"},
 			{"description",
 				"Spawn a focused sub-agent to answer a self-contained question. "
-				"The sub-agent runs as a fresh Claude turn with no tools and does "
-				"not share the parent's conversation history — useful for "
+				"The sub-agent runs as a fresh Claude turn in its own context and "
+				"does not share the parent's conversation history — useful for "
 				"delegating work that would otherwise pollute the main context "
-				"(summarization, translation, expansion, etc.). The final "
-				"assistant text is returned as this tool's result."},
+				"(summarization, translation, codebase exploration, etc.). The "
+				"final assistant text is returned as this tool's result. Set "
+				"`subagent_type` to the name of a configured subagent (see the "
+				"system prompt's subagent list) to run with that agent's "
+				"specialized system prompt and model; omit it for a generic "
+				"sub-agent."},
 			{"input_schema", {
 				{"type", "object"},
 				{"properties", {
@@ -916,6 +922,10 @@ json builtin_definitions() {
 					{"prompt", {
 						{"type", "string"},
 						{"description", "Full task prompt sent to the sub-agent."},
+					}},
+					{"subagent_type", {
+						{"type", "string"},
+						{"description", "Optional name of a configured subagent to delegate to."},
 					}},
 				}},
 				{"required", json::array({"prompt"})},
@@ -1446,6 +1456,33 @@ ToolResult Run(const std::string& name, const json& input) {
 	return {"error: unknown tool " + name, true};
 }
 
+int EditedLine(const std::string& name, const json& input) {
+	if (name == "Write")
+		return 1; // top of the new/overwritten file
+
+	if (name == "Edit") {
+		const std::string path  = input.value("path",       std::string{});
+		const std::string old_s = input.value("old_string", std::string{});
+		if (path.empty() || old_s.empty())
+			return 0;
+
+		// Recompute the first match position from the *current* file. Called
+		// after run_edit has written, but old_string no longer exists in the
+		// new content, so read what's on disk and locate where new_string
+		// landed instead; fall back to line 1 if anything is off.
+		const std::string content = read_file_all(path);
+		const std::string new_s   = input.value("new_string", std::string{});
+		const size_t match = new_s.empty() ? std::string::npos
+		                                   : content.find(new_s);
+		if (match == std::string::npos)
+			return 1;
+		return static_cast<int>(
+			std::count(content.begin(), content.begin() + match, '\n')) + 1;
+	}
+
+	return 0;
+}
+
 bool RequiresPermission(const std::string& name) {
 	if (name == "Bash" || name == "Write" || name == "Edit") return true;
 #ifdef __HAIKU__
@@ -1467,6 +1504,168 @@ std::string Preview(const std::string& name, const json& input) {
 	if (name == "IndexAttr") return preview_index_attr(input);
 #endif
 	return {};
+}
+
+// ---------------------------------------------------------------------------
+// GuiDiff — structured diff for the GUI chat output
+// ---------------------------------------------------------------------------
+
+// Returns a header block followed by per-line diff records, each prefixed
+// with '+' (addition), '-' (removal), or ' ' (context space). The header
+// itself uses '!' as the sigil so the GUI can colour it distinctly.
+// Lines are newline-terminated. Returns empty when the tool carries no diff.
+std::string GuiDiff(const std::string& name, const json& input)
+{
+	if (name == "Edit") {
+		const std::string path  = input.value("path",       std::string{});
+		const std::string old_s = input.value("old_string", std::string{});
+		const std::string new_s = input.value("new_string", std::string{});
+		const bool replace_all  = input.value("replace_all", false);
+
+		const std::string content = read_file_all(path);
+		if (content.empty() && !std::ifstream(path).is_open())
+			return {};
+
+		const size_t count = count_occurrences(content, old_s);
+		if (count == 0 || (count > 1 && !replace_all))
+			return {};
+
+		// Find match position and line numbers.
+		const size_t match_pos = content.find(old_s);
+		int old_start_ln = 1;
+		for (size_t i = 0; i < match_pos; ++i)
+			if (content[i] == '\n') ++old_start_ln;
+		const int old_nlines = static_cast<int>(
+			std::count(old_s.begin(), old_s.end(), '\n')) + 1;
+
+		// Split the file into before / old / after line vectors.
+		std::vector<std::string> before_lines, old_lines_v, after_lines;
+		{
+			std::istringstream iss(content);
+			std::string l;
+			int ln = 1;
+			while (std::getline(iss, l)) {
+				if (ln < old_start_ln)
+					before_lines.push_back(l);
+				else if (ln < old_start_ln + old_nlines)
+					old_lines_v.push_back(l);
+				else
+					after_lines.push_back(l);
+				++ln;
+			}
+		}
+		std::vector<std::string> new_lines_v;
+		{
+			std::istringstream iss(new_s);
+			std::string l;
+			while (std::getline(iss, l)) new_lines_v.push_back(l);
+			if (!new_s.empty() && new_s.back() != '\n' && new_lines_v.empty())
+				new_lines_v.push_back(new_s);
+		}
+
+		// Compute context window: 3 lines before and after the change.
+		constexpr int kContext = 3;
+		const int before_start = std::max(0,
+			static_cast<int>(before_lines.size()) - kContext);
+		const int after_end = std::min(kContext,
+			static_cast<int>(after_lines.size()));
+
+		std::ostringstream out;
+		// Header line (sigil '!').
+		out << "!Edit " << path << "\n";
+
+		// Before-context.
+		for (int i = before_start; i < static_cast<int>(before_lines.size()); ++i)
+			out << " " << before_lines[i] << "\n";
+		// Removed lines.
+		for (const auto& l : old_lines_v)
+			out << "-" << l << "\n";
+		// Added lines.
+		for (const auto& l : new_lines_v)
+			out << "+" << l << "\n";
+		// After-context.
+		for (int i = 0; i < after_end; ++i)
+			out << " " << after_lines[i] << "\n";
+
+		return out.str();
+	}
+
+	if (name == "Write") {
+		const std::string path    = input.value("path",    std::string{});
+		const std::string content = input.value("content", std::string{});
+		if (path.empty()) return {};
+
+		std::ostringstream out;
+		out << "!Write " << path << "\n";
+		std::istringstream iss(content);
+		std::string l;
+		int shown = 0;
+		constexpr int kMaxLines = 40;
+		while (shown < kMaxLines && std::getline(iss, l)) {
+			out << "+" << l << "\n";
+			++shown;
+		}
+		// Count remaining lines.
+		int remaining = 0;
+		while (std::getline(iss, l)) ++remaining;
+		if (remaining > 0)
+			out << "!... (" << remaining << " more lines)\n";
+		return out.str();
+	}
+
+	return {};
+}
+
+std::string ArgSummary(const std::string& name, const json& input,
+                       size_t maxLen) {
+	// Helper: fetch a string field if present, else empty.
+	auto str = [&input](const char* key) -> std::string {
+		if (input.contains(key) && input[key].is_string())
+			return input[key].get<std::string>();
+		return {};
+	};
+
+	std::string out;
+	if (name == "Bash") {
+		out = str("command");
+	} else if (name == "Read" || name == "Write" || name == "Edit") {
+		out = str("path");
+	} else if (name == "Glob") {
+		out = str("pattern");
+	} else if (name == "Grep") {
+		const std::string pat = str("pattern");
+		const std::string in  = str("path");
+		out = '"' + pat + '"';
+		if (!in.empty()) out += " in " + in;
+	} else if (name == "Query") {
+		out = str("expression");
+	} else if (name == "WebFetch") {
+		out = str("url");
+	} else if (name == "ReadAttr" || name == "WriteAttr"
+	        || name == "IndexAttr") {
+		out = str("path");
+		const std::string attr = str("name");
+		if (!attr.empty()) out += out.empty() ? attr : (" [" + attr + "]");
+	} else if (name == "Task") {
+		out = str("description");
+	}
+
+	// Fall back to a compact JSON dump when no field matched.
+	if (out.empty()) {
+		out = input.dump(-1, ' ', false,
+			nlohmann::json::error_handler_t::replace);
+	}
+
+	// Collapse newlines to spaces so the summary stays a single logical
+	// line. Only clamp the length when a positive maxLen was given; the GUI
+	// passes 0 because its tool log can display the whole command.
+	for (char& c : out)
+		if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+	if (maxLen > 0 && out.size() > maxLen) {
+		out.resize(maxLen - 1);
+		out += "\xE2\x80\xA6"; // …
+	}
+	return out;
 }
 
 } // namespace tools

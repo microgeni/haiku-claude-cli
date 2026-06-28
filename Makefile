@@ -2,6 +2,20 @@ CXX      ?= c++
 CXXSTD   ?= -std=c++17
 WARN     ?= -Wall -Wextra -Wpedantic
 
+# ── Parallel build ──────────────────────────────────────────────────────────
+# Default to one compile job per CPU so a plain `make` uses all cores. The
+# user can still override with an explicit `-jN` on the command line (that
+# wins because command-line flags take precedence) or pin the count with
+# `make JOBS=8`. NPROCS is detected on Haiku/Linux (nproc), macOS/BSD
+# (sysctl), then getconf, falling back to 1.
+NPROCS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+JOBS   ?= $(NPROCS)
+# Only inject -j when the invoking make wasn't already given a job count
+# (avoids the "-jN forced in submake" warning and respects an explicit -j).
+ifeq ($(filter -j%,$(MAKEFLAGS)),)
+    MAKEFLAGS += -j$(JOBS)
+endif
+
 # Build mode. `make` is a fast unoptimized-ish dev build; `make release` is
 # a separate target below that reinvokes make with MODE=release. Each mode
 # gets its own BUILDDIR so switching between them doesn't force a rebuild.
@@ -37,19 +51,37 @@ LIBEDIT_CFLAGS := $(shell $(PKG_CONFIG) --cflags libedit     2>/dev/null)
 LIBEDIT_LIBS   := $(shell $(PKG_CONFIG) --libs   libedit     2>/dev/null || echo -ledit)
 
 CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) $(LIBEDIT_CFLAGS) -pthread -D_DEFAULT_SOURCE
-LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread
+HAIKU_LIBS := $(shell uname -s 2>/dev/null | grep -q Haiku && echo "-lbe" || echo "")
+LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread $(HAIKU_LIBS)
 
 SRCDIR   := src
 BIN      := $(BUILDDIR)/claude
 
-SRCS := $(wildcard $(SRCDIR)/*.cpp)
+# GUI-only sources must be excluded from the CLI wildcard so BeAPI
+# headers and symbols don't bleed into the terminal build.
+GUI_ONLY_SRCS := \
+    $(SRCDIR)/gui_sink.cpp          \
+    $(SRCDIR)/gui_stubs.cpp         \
+    $(SRCDIR)/code_styler.cpp       \
+    $(SRCDIR)/md_renderer.cpp       \
+    $(SRCDIR)/syntax_highlight.cpp  \
+    $(SRCDIR)/tool_bar.cpp          \
+    $(SRCDIR)/chat_window.cpp       \
+    $(SRCDIR)/app_main_gui.cpp
+
+_ALL_SRCS := $(wildcard $(SRCDIR)/*.cpp)
+SRCS := $(filter-out $(GUI_ONLY_SRCS), $(_ALL_SRCS))
 OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
 PREFIX  ?= /boot/system/non-packaged
 BINDIR  ?= $(PREFIX)/bin
+APPSDIR ?= $(PREFIX)/apps
 MANDIR  ?= $(PREFIX)/documentation/man/man1
 DATADIR ?= $(PREFIX)/data/claude-cli
+# The GUI reads syntax-highlight styles/languages from here at runtime
+# (see code_styler.cpp FindDefaultTheme / FindLanguagesDir).
+GUI_DATADIR ?= $(PREFIX)/data/claude-gui
 
 # Haiku vector icon stamped onto the installed binary via
 # `addattr … BEOS:ICON`. Optional: if the file is missing or
@@ -60,15 +92,123 @@ ICON_HVIF ?= assets/claude-icon.hvif
 APP_SIG   ?= application/x-vnd.Microgeni-claude-cli
 
 PKG_NAME    ?= claude_cli
-PKG_VERSION ?= 1.8.1
+PKG_VERSION ?= 1.9.0
 PKG_BUILD   ?= 1
 PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all clean install package release lint security check
+.PHONY: all gui clean install install-gui package release lint security check
 
 all: $(BIN)
+
+# GUI target (Haiku only — links libbe) ────────────────────────────────────
+# The GUI reuses all the core logic modules from src/ but substitutes the
+# terminal-specific files (main, session, repl, tui, commands, stats,
+# terminal_sink, telegram) for the BeAPI front-end files.
+#
+# The binary is named "Claude" (capitalized, no hyphen) to follow Haiku's
+# application naming convention (StyledEdit, Terminal, Tracker). The CLI
+# binary stays lowercase "claude". The app signature is an internal MIME
+# identifier and is intentionally left stable across the rename.
+GUI_BIN     := $(BUILDDIR)/Claude
+GUI_APP_SIG ?= application/x-vnd.Microgeni-claude-gui
+
+# Modules shared between CLI and GUI (core logic, no terminal UI).
+GUI_CORE_SRCS := \
+    $(SRCDIR)/api.cpp         \
+    $(SRCDIR)/agents.cpp      \
+    $(SRCDIR)/commands.cpp    \
+    $(SRCDIR)/config.cpp      \
+    $(SRCDIR)/editor_integration.cpp \
+    $(SRCDIR)/hooks.cpp       \
+    $(SRCDIR)/mcp.cpp         \
+    $(SRCDIR)/models.cpp      \
+    $(SRCDIR)/notify.cpp      \
+    $(SRCDIR)/oauth.cpp       \
+    $(SRCDIR)/paths.cpp       \
+    $(SRCDIR)/skills.cpp      \
+    $(SRCDIR)/stats.cpp       \
+    $(SRCDIR)/tools.cpp
+
+# GUI-specific front-end files.
+GUI_FRONT_SRCS := \
+    $(SRCDIR)/tui.cpp               \
+    $(SRCDIR)/code_styler.cpp       \
+    $(SRCDIR)/md_renderer.cpp       \
+    $(SRCDIR)/syntax_highlight.cpp  \
+    $(SRCDIR)/gui_stubs.cpp         \
+    $(SRCDIR)/gui_sink.cpp          \
+    $(SRCDIR)/session_store.cpp     \
+    $(SRCDIR)/telegram.cpp          \
+    $(SRCDIR)/tool_bar.cpp          \
+    $(SRCDIR)/chat_window.cpp       \
+    $(SRCDIR)/app_main_gui.cpp
+
+GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
+GUI_OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/gui_%.o,$(GUI_SRCS))
+GUI_DEPS := $(GUI_OBJS:.o=.d)
+
+YAMLCPP_CFLAGS := $(shell $(PKG_CONFIG) --cflags yaml-cpp 2>/dev/null)
+YAMLCPP_LIBS   := $(shell $(PKG_CONFIG) --libs   yaml-cpp 2>/dev/null || echo -lyaml-cpp)
+
+# Same compile flags as the CLI + libbe headers + yaml-cpp.
+# Private Haiku headers (BPrivate::BToolBar lives in private/shared) are
+# added so the Genio-style ToolBar compiles; libshared provides the symbol.
+GUI_PRIVATE_INCLUDES := $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/shared 2>/dev/null | sed 's/^/-I/') \
+                        $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/interface 2>/dev/null | sed 's/^/-I/')
+GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS) $(GUI_PRIVATE_INCLUDES)
+GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
+                -pthread -lbe -lshared -lnetwork -ltracker
+
+$(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
+	@mkdir -p $(@D)
+	$(CXX) $(GUI_CXXFLAGS) -MMD -MP -MF $(@:.o=.d) -c -o $@ $<
+
+$(GUI_BIN): $(GUI_OBJS) | $(BUILDDIR)
+	$(CXX) $(LDFLAGS) -o $@ $^ $(GUI_LIBS)
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON on $(GUI_BIN)"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$@"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(GUI_APP_SIG)"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$@"; \
+	fi
+
+-include $(GUI_DEPS)
+
+.PHONY: gui
+gui: $(GUI_BIN)
+
+# Install the GUI as a native Haiku application. The binary goes into
+# the apps directory (so the Deskbar's app menu and Tracker pick it up),
+# and the syntax-highlight style/language data is copied to the runtime
+# location code_styler.cpp looks for. Haiku-only — the GUI itself only
+# builds there. Run `make gui` first (or it builds via the dependency).
+install-gui: $(GUI_BIN)
+	install -d "$(DESTDIR)$(APPSDIR)"
+	install -m 755 "$(GUI_BIN)" "$(DESTDIR)$(APPSDIR)/Claude"
+	@echo "  installing GUI style data to $(GUI_DATADIR)"
+	install -d "$(DESTDIR)$(GUI_DATADIR)/styles"
+	install -d "$(DESTDIR)$(GUI_DATADIR)/languages"
+	@if [ -d assets/data/styles ]; then \
+	    install -m 644 assets/data/styles/* "$(DESTDIR)$(GUI_DATADIR)/styles/" 2>/dev/null || true; \
+	fi
+	@if [ -d assets/data/languages ]; then \
+	    install -m 644 assets/data/languages/* "$(DESTDIR)$(GUI_DATADIR)/languages/" 2>/dev/null || true; \
+	fi
+	@if command -v addattr >/dev/null 2>&1; then \
+	    if [ -f "$(ICON_HVIF)" ]; then \
+	        echo "  stamping BEOS:ICON on $(APPSDIR)/Claude"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(DESTDIR)$(APPSDIR)/Claude"; \
+	    fi; \
+	    echo "  stamping BEOS:APP_SIG = $(GUI_APP_SIG)"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(DESTDIR)$(APPSDIR)/Claude"; \
+	else \
+	    echo "  (skipping icon/sig stamp — no addattr)"; \
+	fi
+	@echo "  installed: $(APPSDIR)/Claude"
 
 # Optimized build in a separate directory so it doesn't invalidate
 # incremental dev builds. Reinvokes make with MODE=release.
@@ -87,6 +227,7 @@ $(BIN): $(OBJS) | $(BUILDDIR)
 	fi
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
+	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 $(BUILDDIR):
@@ -119,19 +260,33 @@ install: $(BIN)
 # Build a Haiku HPKG. Requires Haiku's `package` tool.
 package: $(PKG_FILE)
 
-$(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
+# One HPKG ships both front-ends: the CLI binary (bin/claude) and the
+# GUI app (apps/Claude) plus the GUI's syntax-highlight data. The GUI is
+# Haiku-only, so its binary is a prerequisite here too.
+$(PKG_FILE): $(BIN) $(GUI_BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@command -v package >/dev/null 2>&1 || { \
 	    echo "error: 'package' command not found — HPKG build requires Haiku."; \
 	    exit 1; \
 	}
 	rm -rf "$(PKG_STAGE)"
 	mkdir -p "$(PKG_STAGE)/bin" \
+	         "$(PKG_STAGE)/apps" \
+	         "$(PKG_STAGE)/data/claude-gui/styles" \
+	         "$(PKG_STAGE)/data/claude-gui/languages" \
 	         "$(PKG_STAGE)/documentation/man/man1" \
 	         "$(PKG_STAGE)/documentation/packages/claude-cli"
-	cp "$(BIN)" "$(PKG_STAGE)/bin/claude"
+	cp "$(BIN)"      "$(PKG_STAGE)/bin/claude"
+	cp "$(GUI_BIN)"  "$(PKG_STAGE)/apps/Claude"
 	cp docs/claude.1  "$(PKG_STAGE)/documentation/man/man1/claude.1"
 	cp CHANGELOG.md   "$(PKG_STAGE)/documentation/packages/claude-cli/CHANGELOG.md"
 	cp README.md      "$(PKG_STAGE)/documentation/packages/claude-cli/ReadMe.md"
+	@# GUI syntax-highlight data (styles + languages).
+	@if [ -d assets/data/styles ]; then \
+	    cp assets/data/styles/*    "$(PKG_STAGE)/data/claude-gui/styles/"    2>/dev/null || true; \
+	fi
+	@if [ -d assets/data/languages ]; then \
+	    cp assets/data/languages/* "$(PKG_STAGE)/data/claude-gui/languages/" 2>/dev/null || true; \
+	fi
 	@if [ -f "$(ICON_HVIF)" ]; then \
 	    echo "  staging icon to data/claude-cli/icon.hvif"; \
 	    mkdir -p "$(PKG_STAGE)/data/claude-cli"; \
@@ -139,11 +294,13 @@ $(PKG_FILE): $(BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	fi
 	@if command -v addattr >/dev/null 2>&1; then \
 	    if [ -f "$(ICON_HVIF)" ]; then \
-	        echo "  stamping BEOS:ICON from $(ICON_HVIF) onto staged binary"; \
+	        echo "  stamping BEOS:ICON onto staged binaries"; \
 	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
+	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/apps/Claude"; \
 	    fi; \
-	    echo "  stamping BEOS:APP_SIG = $(APP_SIG) onto staged binary"; \
-	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)" "$(PKG_STAGE)/bin/claude"; \
+	    echo "  stamping BEOS:APP_SIG (cli=$(APP_SIG), gui=$(GUI_APP_SIG))"; \
+	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)"     "$(PKG_STAGE)/bin/claude"; \
+	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(PKG_STAGE)/apps/Claude"; \
 	fi
 	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
 	    -e 's/@BUILD@/$(PKG_BUILD)/g' \

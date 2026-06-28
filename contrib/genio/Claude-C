@@ -1,0 +1,63 @@
+#!/bin/sh
+# Genio extension: launch the haiku-claude-cli GUI scoped to the current
+# project, and enable the Claude <-> Genio round-trip.
+#
+# INSTALL
+#   Copy this file (named exactly "Claude-C") into Genio's user extension
+#   directory and make it executable:
+#
+#     cp contrib/genio/Claude-C ~/config/settings/Genio/extensions/Claude-C
+#     chmod +x ~/config/settings/Genio/extensions/Claude-C
+#
+#   The trailing "-C" makes Genio show it under Tools as "Claude" with the
+#   Alt+C shortcut. Restart Genio (or reopen the Tools menu) to pick it up.
+#
+# OPTIONAL visibility gating via BFS attributes on this file:
+#   addattr genio:scope      "editor,project"   Claude-C
+#   addattr genio:file_types "cpp,h,c,cxx,hpp"  Claude-C
+#
+# Genio passes context as arguments (already chdir'd into --project-dir):
+#   --project-dir <path>    active project root
+#   --file        <path>    focused editor's file
+#   --line        <n>       caret line
+#   --selection   <s:c-s:c> selection range
+#   --selection-file <path> temp file with highlighted text (only if selected)
+#
+# The Claude GUI (application/x-vnd.Microgeni-claude-gui) understands Genio's
+# launch contract natively: it treats --project-dir as the working directory
+# AND uses the presence of --project-dir/--file as the signal that it was
+# started from Genio. That provenance is what enables the round-trip — files
+# Claude writes or edits are opened back in the live Genio editor at the
+# edited line. So we must forward Genio's arguments VERBATIM; rewriting
+# --project-dir to --working-dir strips the provenance and disables the
+# integration.
+
+# Path to the installed Claude GUI binary. The default is the system
+# non-packaged install location; override here if you run a dev build, e.g.
+#   CLAUDE_BIN="/Data/Code/Projects/haiku-claude-cli/build/Claude"
+CLAUDE_BIN="/boot/system/non-packaged/apps/Claude"
+
+# Pull out the project dir (for chdir) and the selection temp file (which we
+# persist for the session), but DO NOT consume the other flags — they are
+# forwarded to the GUI untouched via "$@".
+PROJECT_DIR="$PWD"
+SELECTION_FILE=""
+for arg in "$@"; do
+	case "$prev" in
+		--project-dir)    PROJECT_DIR="$arg" ;;
+		--selection-file) SELECTION_FILE="$arg" ;;
+	esac
+	prev="$arg"
+done
+
+cd "$PROJECT_DIR" || exit 1
+
+# Stash the highlighted selection where the GUI session can pick it up,
+# then drop the transient temp file Genio created.
+if [ -n "$SELECTION_FILE" ] && [ -f "$SELECTION_FILE" ]; then
+	cp "$SELECTION_FILE" "$PROJECT_DIR/.genio-claude-selection.txt" 2>/dev/null
+fi
+
+# Forward Genio's arguments verbatim: --project-dir, --file, --line, etc.
+# The GUI parses these directly (see app_main_gui.cpp ArgvReceived).
+exec "$CLAUDE_BIN" "$@"

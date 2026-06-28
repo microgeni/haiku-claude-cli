@@ -19,6 +19,8 @@
 #include "api.h"
 #include "models.h"
 #include "paths.h"
+#include "skills.h"
+#include "agents.h"
 #include "stats.h"
 #include "tools.h"
 #include "tui.h"
@@ -129,10 +131,12 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 			"  /todos             show the current in-session todo list\n"
 			"  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
 			"  /stats             lifetime token usage and tool stats\n"
+			"  /skills            list Agent Skills (invoke one with /skill-name)\n"
+			"  /agents            list subagents Claude can delegate to via Task\n"
 			"  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
 			"  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
 			"  /remote-control    toggle Telegram remote control on/off\n"
-			"  /ludicrous         toggle ludicrous mode (auto-approve all tool permissions)\n"
+			"  /ludicrous         menu to enable/disable ludicrous mode (auto-approve all tool permissions)\n"
 			"  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
 				  << "\n";
 		const auto custom = Names();
@@ -265,19 +269,74 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 		}
 		return SlashAction::Continue;
 	}
+	if (cmd == "/skills") {
+		const auto& all = skills::All();
+		if (all.empty()) {
+			std::cout << tui::Meta("[no skills loaded — add one under "
+				+ paths::UserSkillsDir() + "/<name>/SKILL.md or "
+				+ paths::ProjectSkillsDir() + "/<name>/SKILL.md]") << "\n";
+			return SlashAction::Continue;
+		}
+		std::string body = "skills (invoke with /<name>):\n";
+		for (const auto& s : all) {
+			body += "  /" + s.name;
+			if (s.disableModelInvocation) body += "  (manual)";
+			if (!s.description.empty()) body += "  \xE2\x80\x94 " + s.description;
+			body += "\n";
+		}
+		std::cout << tui::Meta(body) << "\n";
+		return SlashAction::Continue;
+	}
+	if (cmd == "/agents") {
+		const auto& all = agents::All();
+		if (all.empty()) {
+			std::cout << tui::Meta("[no subagents loaded — add one under "
+				+ paths::UserAgentsDir() + "/<name>.md or "
+				+ paths::ProjectAgentsDir() + "/<name>.md]") << "\n";
+			return SlashAction::Continue;
+		}
+		std::string body = "subagents (Claude delegates via the Task tool):\n";
+		for (const auto& a : all) {
+			body += "  " + a.name;
+			if (!a.model.empty()) body += "  [" + a.model + "]";
+			if (!a.description.empty()) body += "  \xE2\x80\x94 " + a.description;
+			body += "\n";
+		}
+		std::cout << tui::Meta(body) << "\n";
+		return SlashAction::Continue;
+	}
 	if (cmd == "/exit" || cmd == "/quit") {
 		return SlashAction::Quit;
 	}
 	if (cmd == "/ludicrous") {
-		const bool now = !api::g_ludicrous_mode.load();
-		api::g_ludicrous_mode.store(now);
-		if (now) {
+		const bool current = api::g_ludicrous_mode.load();
+		const std::string heading = std::string("tool permission mode: ")
+		    + (current
+		        ? tui::Yellow("\xE2\x9A\xA1 LUDICROUS (auto-approve all)")
+		        : tui::Dim("normal (prompt per tool)"));
+		const std::vector<std::string> options = {
+			"\xE2\x9A\xA1 Enable ludicrous mode  \xe2\x80\x94 auto-approve all tool permissions",
+			"\xE2\x9C\x94  Normal mode  \xe2\x80\x94 prompt for permission each time",
+			"Cancel",
+		};
+		const int picked = tui::SelectOption(options, heading);
+		if (picked == 0 && !current) {
+			api::g_ludicrous_mode.store(true);
 			std::cout << tui::Yellow("\xE2\x9A\xA1 LUDICROUS MODE ENGAGED")
 					  << tui::Dim(" \xe2\x80\x94 all tool permissions auto-approved") << "\n";
-		} else {
+			if (ctx.redraw_status) ctx.redraw_status();
+		} else if (picked == 1 && current) {
+			api::g_ludicrous_mode.store(false);
 			std::cout << tui::Dim("\xE2\x9A\xA1 Ludicrous mode off \xe2\x80\x94 permission prompts restored") << "\n";
+			if (ctx.redraw_status) ctx.redraw_status();
+		} else if (picked == 0 || picked == 1) {
+			// Already in the requested state.
+			const std::string state = current
+			    ? "\xE2\x9A\xA1 Ludicrous mode already enabled"
+			    : "Normal mode already active";
+			std::cout << tui::Dim("[" + state + "]") << "\n";
 		}
-		if (ctx.redraw_status) ctx.redraw_status();
+		// picked == 2 (Cancel) or -1: do nothing.
 		return SlashAction::Continue;
 	}
 	if (cmd == "/clear") {
@@ -495,6 +554,17 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 	if (auto expanded = Expand(cmd_name, args); expanded) {
 		passthrough_out = std::move(*expanded);
 		return SlashAction::Passthrough;
+	}
+
+	// Then user-defined skills (.claude/skills/<name>/SKILL.md). A skill
+	// body is expanded with {{args}} substitution plus !`cmd` dynamic
+	// context injection, then sent as a normal user message.
+	if (bool found = false; true) {
+		std::string skill_expanded = skills::Expand(cmd_name, args, found);
+		if (found) {
+			passthrough_out = std::move(skill_expanded);
+			return SlashAction::Passthrough;
+		}
 	}
 
 	std::cout << tui::Meta("[unknown command: " + cmd + " — try /help]") << "\n";

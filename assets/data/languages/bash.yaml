@@ -1,0 +1,19 @@
+# Shell / Bash
+lexer: bash
+keywords:
+    0: if then else elif fi for while do done case esac in break continue return exit function
+    1: echo printf read cd ls cp mv rm mkdir rmdir cat grep sed awk find xargs curl wget
+styles:
+    0: 32
+    1: 101
+    2: 101
+    3: 103
+    4: 104
+    5: 105
+    6: 106
+    7: 106
+    8: 106
+    9: 106
+    10: 110
+    11: 109
+    12: 151

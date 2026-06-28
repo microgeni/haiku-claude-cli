@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,11 +18,12 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "output_sink.h"
+#include "structured_sink.h"
 
-// Forward declaration so the StartThinkingUpdater signature can
-// reference api::StreamProgress without pulling in all of api.h
-// (which would create a circular include with api.h → telegram.h).
-namespace api { struct StreamProgress; }
+// StreamProgress is still used by api.h for the local-mirror stub.
+// No longer needed directly in telegram.h after Step 5.
+
 
 // Tiny Telegram Bot API client over libcurl. Enough for the v1.1
 // remote-control bridge: long-polling getUpdates and sending text
@@ -75,8 +77,17 @@ public:
 	// HTTP request as soon as `*keep_running` becomes false. This
 	// lets callers (e.g. RemoteControl::stop) cut a blocking
 	// long-poll short without waiting for the full timeout.
+	//
+	// If `out_error` is non-null it is set to true when the call failed
+	// for a reason the caller should back off on (transport error, HTTP
+	// error, a non-ok Telegram response such as a 409 Conflict, or a
+	// parse failure) and false when the call succeeded — even if it
+	// returned zero updates. A clean empty result (timeout with no new
+	// messages) is NOT an error. Lets the poll loop distinguish "nothing
+	// happened" from "something is wrong" and apply exponential backoff.
 	std::vector<Update> poll(int timeout_sec = 25,
-							 std::atomic<bool>* keep_running = nullptr);
+							 std::atomic<bool>* keep_running = nullptr,
+							 bool* out_error = nullptr);
 
 	// POST sendMessage to the given chat. Long messages are chunked
 	// into ~4000-char pieces to stay under Telegram's 4096-char
@@ -122,6 +133,19 @@ public:
 
 	const std::string& token() const { return fToken; }
 
+	// Synchronous health check: calls getMe and returns true when the bot
+	// token authenticates. On failure, *reason (if non-null) is set to a
+	// human-readable explanation (network error, invalid token, etc.).
+	// Used as a preflight before starting the poll loop so problems surface
+	// immediately instead of failing silently inside getUpdates.
+	bool Preflight(std::string* reason = nullptr);
+
+	// One short getUpdates probe. Returns true when polling is available;
+	// on failure *reason is set. Crucially this catches the HTTP 409
+	// "Conflict: terminated by other getUpdates request" that getMe cannot
+	// see — i.e. another bot instance already long-polling the same token.
+	bool CheckPollAvailable(std::string* reason = nullptr);
+
 private:
 	std::string ApiUrl(const std::string& method) const;
 	bool PostJson(const std::string& method,
@@ -132,6 +156,196 @@ private:
 
 	std::string fToken;
 	int64_t     fNextOffset = 0;
+};
+
+// TelegramSink — implements both OutputSink (Step 2 interface, so it can
+// be passed to api::SendWithTools unchanged) and sink::StructuredSink (the
+// Step 3 lean-Telegram model). The OutputSink methods are a thin adapter
+// layer that delegates to the StructuredSink methods; they will be removed
+// when api::SendWithTools is upgraded to take StructuredSink* directly
+// (Step 4).
+//
+// One instance per user turn. Stack-allocated inside ProcessUpdate() for
+// the lifetime of the SendWithTools call.
+//
+// Lean rules enforced structurally (empty method bodies, not flags):
+//   OnMeta / OnDiag → suppressed (no chat message sent)
+//   SetStatus       → sendChatAction("typing"), ephemeral, no history
+//   ToolFinished    → collapsed "🔧 bash ✓" line, detail hidden
+//   OnError         → edits the current message in place (or sends new)
+class TelegramSink : public OutputSink, public sink::StructuredSink {
+public:
+	// `client` must outlive this object (owned by RemoteControl).
+	// `chatId` is the chat to send replies to.
+	// `allowDestructive` controls whether AskPermission auto-approves.
+	// `allowedSet` is the session-scoped always-allow tool set.
+	// `permQueue` / `permMu` / `permCv` are the shared queues that
+	// PollLoop pushes perm:* callback taps into.
+	struct PermQueue {
+		std::deque<std::string>  callbacks; // callback_data values
+		std::mutex               mu;
+		std::condition_variable  cv;
+	};
+
+	TelegramSink(Client& client, int64_t chatId, bool allowDestructive,
+	             std::unordered_set<std::string>& allowedSet,
+	             PermQueue& permQueue);
+	~TelegramSink() override = default;
+
+	TelegramSink(const TelegramSink&)            = delete;
+	TelegramSink& operator=(const TelegramSink&) = delete;
+
+	// ── sink::StructuredSink ──────────────────────────────────────────────
+	void BeginMessage(const std::string& role) override;
+	void AppendText(const std::string& chunk)  override;
+	void EndMessage()                          override;
+	void ToolStarted(const std::string& name,
+	                 const std::string& summary) override;
+	void ToolFinished(const std::string& name,
+	                  bool ok,
+	                  const std::string& detail) override;
+	int  AskChoice(const std::string& prompt,
+	               const std::vector<std::string>& options) override;
+	sink::Permission AskPermission(const std::string& tool,
+	                               const std::string& preview) override;
+	void SetStatus(sink::StatusKind kind) override;
+	void OnError(const std::string& message) override; // StructuredSink version
+
+	// ── OutputSink (adapter, removed in Step 4) ───────────────────────────
+	void OnText(const std::string& chunk) override;
+	void OnMeta(const std::string&)       override {} // suppressed by design
+	void OnDiag(const std::string&)       override {} // suppressed by design
+	void OnToolStatus(const std::string& phase) override;
+	api::Permission AskPermission(const std::string& tool,
+	                              const nlohmann::json& input,
+	                              std::string* denial_reason) override;
+
+private:
+	static constexpr int64_t kEditThrottleMs = 500; // max ~2 edits/sec
+
+	Client&                          fClient;
+	int64_t                          fChatId;
+	bool                             fAllowDestructive;
+	std::unordered_set<std::string>& fAllowedSet;
+	PermQueue&                       fPermQueue;
+
+	// Streaming state for the current assistant message.
+	std::string fBuffer;           // accumulated text
+	int64_t     fCurrentMsgId{0}; // Telegram message_id being live-edited
+	int64_t     fLastEditMs{0};   // epoch-ms of last editMessageText call
+	bool        fInMessage{false};
+
+	// Collapsed tool cards appended to the current message.
+	struct ToolCard {
+		std::string name;
+		std::string summary;
+		bool        started{false};
+		bool        finished{false};
+		bool        ok{false};
+	};
+	std::vector<ToolCard> fToolCards;
+
+	// Internal helpers.
+	int64_t        SentPlaceholder(const std::string& text = "\xE2\x80\xA6"); // "…"
+	bool           EditCurrent(bool final = false);
+	std::string    BuildDisplayText() const;
+	static int64_t NowMs();
+};
+
+// Process-wide registry of live remote-control sessions. Phase 1 of the
+// multi-session design (docs/MULTI_SESSION_REMOTE.md): the Telegram bot
+// can only have one getUpdates poller per token, so all live sessions
+// share one poller and the phone routes to a session by an explicit
+// switch. The registry assigns a small, stable integer ID to each
+// registered RemoteControl and remembers, per Telegram chat, which
+// session that chat is currently "attached" to.
+//
+// Thread-safe: the poll loop (registry reads on every update) and the
+// window/REPL thread (register / unregister) touch it concurrently.
+//
+// In Phase 1 the GUI hosts a single live conversation, so exactly one
+// session is registered; the registry still provides /sessions,
+// /session N, and /whoami end to end so the routing machinery is real
+// and exercised. Phase 2 lights up multiple live sessions.
+class RemoteControl; // forward declaration for the registry.
+
+class SessionRegistry {
+public:
+	// A registered live session. `title` is a snapshot description shown
+	// by /sessions (e.g. the model or the window title); it is captured
+	// at registration and may be refreshed via UpdateTitle.
+	//
+	// The three callbacks form the routing seam (Phase 2a): when a prompt
+	// is routed to this session, the poll worker uses them to fetch the
+	// session's conversation history, append the exchanged turn back, and
+	// build a front-end sink (e.g. a window-bound GuiSink) to stream the
+	// reply into. They are deliberately type-erased std::functions — not
+	// BeAPI types — so this header stays portable to the CLI build; the
+	// GUI captures its BMessenger inside the sinkFactory lambda. Any may
+	// be null: a null sinkFactory means "no local mirror, phone only"
+	// (the legacy single-surface behaviour).
+	struct Entry {
+		int            id = 0;
+		RemoteControl* session = nullptr;
+		std::string    title;
+		std::string    model;
+		// Returns a read-only snapshot of this session's message history.
+		std::function<nlohmann::json()> historyProvider;
+		// Appends (userMsg, assistantMsg) back into the session history.
+		std::function<void(nlohmann::json, nlohmann::json)> historyAppender;
+		// Constructs a fresh OutputSink to mirror the reply into this
+		// session's local surface (window). Owned by the caller.
+		std::function<std::unique_ptr<OutputSink>()> sinkFactory;
+	};
+
+	// The single process-wide instance. Created on first use.
+	static SessionRegistry& Instance();
+
+	// Register a live session and return its unique ID (>= 1). The
+	// caller must Unregister with the same ID before the RemoteControl
+	// is destroyed. The callback overload wires the Phase 2a routing
+	// seam (history provider/appender + sink factory); the legacy
+	// overload registers a phone-only session with no local mirror.
+	int Register(RemoteControl* session, const std::string& title,
+				 const std::string& model);
+	int Register(RemoteControl* session, const std::string& title,
+				 const std::string& model,
+				 std::function<nlohmann::json()> historyProvider,
+				 std::function<void(nlohmann::json, nlohmann::json)> historyAppender,
+				 std::function<std::unique_ptr<OutputSink>()> sinkFactory);
+	void Unregister(int id);
+
+	// Refresh the human-readable title shown by /sessions.
+	void UpdateTitle(int id, const std::string& title);
+
+	// Snapshot of all registered sessions, ordered by ascending ID.
+	std::vector<Entry> List() const;
+
+	// Resolve the full Entry (including routing callbacks) that a chat is
+	// currently attached to. Returns true and fills *out when an active
+	// session exists; false when the chat has no attachment and there is
+	// no single-session default. Used by the poll worker to route a
+	// prompt to the right session's history and surface.
+	bool Resolve(int64_t chat_id, Entry* out) const;
+
+	// Look up the session a chat is currently attached to. Returns
+	// nullptr when the chat has no attachment yet (caller should hint
+	// /sessions). out_id, when non-null, receives the resolved ID.
+	RemoteControl* ActiveFor(int64_t chat_id, int* out_id = nullptr) const;
+
+	// Attach a chat to a session ID. Returns false when no such ID is
+	// registered. On success the chat's subsequent prompts route there.
+	bool Attach(int64_t chat_id, int id);
+
+	// Convenience: number of registered sessions.
+	size_t Count() const;
+
+private:
+	SessionRegistry() = default;
+	mutable std::mutex          fMu;
+	int                         fNextId = 1;
+	std::vector<Entry>          fEntries;          // ordered by id
+	std::map<int64_t, int>      fActiveByChat;     // chat_id -> session id
 };
 
 // Self-contained background Telegram poller spawned on demand by
@@ -167,6 +381,13 @@ public:
 	void Stop();
 	bool Running() const;
 
+	// Synchronous preflight: verifies the token authenticates (getMe) and
+	// that polling is available (a short getUpdates that catches the 409
+	// Conflict from a second poller). Returns true when the bridge is safe
+	// to start; otherwise *reason explains why. Call before Start() so the
+	// GUI/CLI can report a clear failure instead of a silent dead poller.
+	bool Preflight(std::string* reason = nullptr);
+
 	// Serialise turns between the local REPL and the Telegram
 	// worker. AcquireTurn() blocks until no other turn is in
 	// progress; ReleaseTurn() clears the token.
@@ -195,34 +416,43 @@ public:
 	void SetSharedHistoryAppender(
 		std::function<void(nlohmann::json, nlohmann::json)> appender);
 
-	// Mirror a locally-initiated turn to the primary Telegram chat.
-	// Call order (all called from the local REPL turn, after
-	// AcquireTurn() so the turn lock is already held):
-	//   1. MirrorPrompt()  — sends "> text" + placeholder to Telegram.
-	//   2. StartThinkingUpdater(progress) — starts the animated
-	//      placeholder thread, pinned to the caller's StreamProgress.
-	//   3. api::SendWithTools(…)
-	//   4. StopThinkingUpdater() — joins the updater thread.
-	//   5. ReleaseTurn()   — MUST be after StopThinkingUpdater.
-	//   6. MirrorToPrimary() or MirrorCancel().
-	void MirrorPrompt(const std::string& user_text);
-	void MirrorToPrimary(const std::string& assistant_text);
-	void MirrorCancel();
+	// Accessors used by session.cpp LocalWorker to construct a
+	// TelegramSink for local turns that should stream to the primary chat.
+	int64_t                          PrimaryUserId()    const { return fPrimaryUserId; }
+	Client&                          GetClient()              { return fClient; }
+	bool                             AllowDestructive() const { return fAllowDestructive; }
+	std::unordered_set<std::string>& AllowedToolsRef()        { return fAllowedTools; }
+	TelegramSink::PermQueue&         PermQueueRef()           { return fPermQueue; }
 
-	// Animate the primary chat's "thinking" placeholder while a
-	// local turn is in progress. `progress` must remain valid for
-	// the lifetime of the updater thread — pass the StreamProgress
-	// that lives on the same stack frame as api::SendWithTools so
-	// the pointer is guaranteed live until StopThinkingUpdater()
-	// returns. Pass nullptr to suppress streaming-text updates (dot
-	// animation only).
-	// StopThinkingUpdater() must be called before ReleaseTurn().
-	void StartThinkingUpdater(api::StreamProgress* progress);
-	void StopThinkingUpdater();
+	// Send a "> user_text" preamble to the primary chat before a local
+	// turn starts streaming. Called by LocalWorker under the turn lock.
+	void SendPromptNotice(const std::string& user_text);
+
+	// Register/refresh this session's descriptive title in the global
+	// SessionRegistry so /sessions shows something meaningful (the GUI
+	// window title or the CLI's "REPL"). Safe to call before or after
+	// Start(); registration happens in Start() and this just updates the
+	// stored label. `model` is shown in parentheses by /sessions.
+	void SetSessionTitle(const std::string& title);
+
+	// The registry ID assigned to this session in Start(), or 0 when the
+	// poller is not running. Lets the GUI surface the number.
+	int SessionId() const { return fSessionId; }
+
+	// Control whether Start() registers this RemoteControl as its own
+	// session in the SessionRegistry. The CLI leaves this on (the poller
+	// IS the session). The GUI turns it off because each ChatWindow
+	// registers itself as a session; the poller is only the transport.
+	void SetSelfRegister(bool enable) { fSelfRegister = enable; }
 
 private:
 	void PollLoop();
 	void WorkLoop();
+	// Handle the built-in session commands (/sessions, /session N,
+	// /whoami) that the SessionRegistry owns. Runs before any per-session
+	// routing so a phone can list and switch even mid-turn. Returns true
+	// when the update was a session command and was fully serviced.
+	bool TryHandleSessionCommand(const Update& u);
 	// Try to handle a slash command immediately, without waiting for
 	// AcquireTurn().  Returns true if the command was fully serviced
 	// (so the caller can skip AcquireTurn / ProcessUpdate).  Returns
@@ -235,31 +465,28 @@ private:
 	Client                       fClient;
 	std::unordered_set<int64_t>  fAllowed;
 	int64_t                      fPrimaryUserId = 0;
-	int64_t                      fPrimaryThinkingMsgId = 0;
-	// Chat ID that the persistent permission/status hooks target.
-	// Set to the sender's chat_id at the start of each Telegram-
-	// origin turn; reset to fPrimaryUserId when that turn ends.
+	// Registry ID assigned in Start() (0 while not running) and the
+	// human-readable title shown by /sessions.
+	int                          fSessionId = 0;
+	bool                         fSelfRegister = true;
+	std::string                  fSessionTitle;
+	std::string                  fSessionModel;
+	// Chat ID of the turn currently running. Set by ProcessUpdate.
 	std::atomic<int64_t>         fActiveChatId { 0 };
-	std::atomic<bool>            fUpdaterRunning { false };
-	std::thread                  fUpdaterThread;
 	bool                         fAllowDestructive = false;
+	// Session-scoped always-allow set. Shared between TelegramSink
+	// instances (one per turn) so "allow always" persists across turns.
+	std::unordered_set<std::string> fAllowedTools;
 	std::function<config::Auth()> fAuthGetter;
 	std::string                  fCustomSystem;
 	std::string                  fCfgModel;
 	int                          fCfgMaxTokens;
-	// Optional provider for the local REPL's shared message history.
-	// Set via SetSharedHistory(); null means each Telegram user has
-	// independent context (the original silo behaviour).
 	std::function<nlohmann::json()> fSharedHistory;
-	// Optional write-back: called after each successful Telegram turn
-	// to append the user+assistant pair to the local REPL messages[].
-	// Set via SetSharedHistoryAppender().
 	std::function<void(nlohmann::json, nlohmann::json)> fSharedHistoryAppend;
 	std::map<int64_t, nlohmann::json> fUserMessages;
 	std::atomic<bool>            fRunning { false };
 	std::thread                  fPoller;
-	// Turn-token: serialises local and Telegram-origin turns
-	// without holding a mutex across SendWithTools.
+	// Turn-token: serialises local and Telegram-origin turns.
 	std::mutex                   fTurnMu;
 	std::condition_variable      fTurnCv;
 	bool                         fTurnInProgress = false;
@@ -269,10 +496,9 @@ private:
 	std::condition_variable      fWorkCv;
 	std::atomic<bool>            fWorkerRunning { false };
 	std::thread                  fWorker;
-	// Shared queue for perm:* callback taps.
-	std::deque<Update>           fPermQueue;
-	std::mutex                   fPermMu;
-	std::condition_variable      fPermCv;
+	// Shared permission callback queue. PollLoop pushes perm:* taps
+	// here; TelegramSink::AskPermission drains it.
+	TelegramSink::PermQueue      fPermQueue;
 };
 
 } // namespace telegram

@@ -519,16 +519,27 @@ BETWEEN=$(awk -v s="$LINE_DISPATCH_LAMBDA" -v e="$LINE_DRAIN_LAMBDA" \
     || fail "unconditional fDisplayCv.wait found in dispatch path — main thread should not block"
 pass
 
-# ── C14: Input while turn active waits for turn completion ────────────────────
-step "C14: input while turn active blocks on fDisplayCv.wait until worker finishes"
-grep -q 'fDisplayCv\.wait' "$SESS" \
-    || fail "fDisplayCv.wait not found in $SESS"
-# The blocking wait in the turn_active block ensures drain happens before dispatch.
+# ── C14: Input while turn active is queued (type-ahead, not a block) ──────────
+step "C14: input while turn active is staged in fQueuedInput (type-ahead)"
+# The new design does NOT block on fDisplayCv.wait in the dispatch path.
+# Instead, a line submitted while the turn is Streaming is stashed in
+# worker.fQueuedInput and the loop returns to the prompt.
+grep -q 'fQueuedInput' "$SESS" \
+    || fail "fQueuedInput not found in $SESS (type-ahead queue missing)"
+# The tri-state DisplayState must distinguish Streaming from Done.
+grep -q 'DisplayState::Streaming' "$SESS" \
+    || fail "DisplayState::Streaming not found in $SESS"
+grep -q 'DisplayState::Done' "$SESS" \
+    || fail "DisplayState::Done not found in $SESS"
+# The turn_active block must stage the line and continue, not wait.
 LINE_ACTIVE=$(grep -n 'If a turn is still active' "$SESS" | head -1 | cut -d: -f1)
-LINE_WAIT=$(awk -v after="${LINE_ACTIVE:-0}" \
-    'NR > after && NR <= after+80 && /fDisplayCv\.wait/ {print NR; exit}' "$SESS")
 [ -n "$LINE_ACTIVE" ] || fail "'If a turn is still active' comment not found in $SESS"
-[ -n "$LINE_WAIT"   ] || fail "fDisplayCv.wait not found within 80 lines of turn_active block"
+LINE_QUEUE=$(awk -v after="${LINE_ACTIVE:-0}" \
+    'NR > after && NR <= after+40 && /fQueuedInput = line/ {print NR; exit}' "$SESS")
+[ -n "$LINE_QUEUE" ] || fail "fQueuedInput assignment not found within 40 lines of turn_active block"
+# A dim "[queued" annotation must be shown to the user.
+grep -q '\[queued' "$SESS" \
+    || fail "[queued] annotation not found in $SESS"
 pass
 
 # ── C15: EOF / Ctrl+D drains active turn before breaking ──────────────────────

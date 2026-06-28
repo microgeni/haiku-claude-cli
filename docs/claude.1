@@ -106,6 +106,18 @@ Session token cost estimate based on the config's price table.
 .B /todos
 Show the current in-session todo list.
 .TP
+.B /skills
+List loaded Agent Skills. Each skill can be invoked directly by
+typing
+.BR /skill-name .
+.TP
+.B /agents
+List loaded subagents that Claude can delegate to via the
+.B Task
+tool's
+.I subagent_type
+argument.
+.TP
 .BR /memory " [user]"
 Open the project or user
 .I CLAUDE.md
@@ -172,6 +184,44 @@ User-defined slash commands may live in
 becomes the command name; the body is a prompt template with
 .I {{args}}
 substituted from the text following the command invocation.
+.PP
+.B Agent Skills
+extend the command idea with a directory per skill. A skill lives in
+.I .claude/skills/<name>/SKILL.md
+(project) or
+.I ~/config/settings/claude-cli/skills/<name>/SKILL.md
+(user); project skills override user skills of the same name.
+.I SKILL.md
+holds optional YAML frontmatter
+.RB ( name ", " description ", " disable-model-invocation ", " allowed-tools )
+followed by a markdown body. The body supports
+.I {{args}}
+substitution and dynamic context injection: a line of the form
+.RB \(lq !`shell command` \(rq
+is replaced by the command's standard output before Claude sees it.
+Invoke a skill directly with
+.BR /skill-name ;
+unless
+.I disable-model-invocation
+is set, the skill's description is advertised to the model so it can
+invoke the skill automatically when a request matches.
+.PP
+.B Subagents
+are specialized agents defined as markdown files in
+.I .claude/agents/<name>.md
+(project) or
+.I ~/config/settings/claude-cli/agents/<name>.md
+(user). Frontmatter fields are
+.RB ( name ", " description ", " tools ", " model ", " color );
+the body becomes the agent's system prompt. The
+.B Task
+tool accepts a
+.I subagent_type
+argument: when it names a loaded subagent, the sub-turn runs with that
+agent's prompt and model override (the
+.IR haiku ", " sonnet ", and " opus
+aliases resolve to current model ids). Available subagents are listed
+to the model so it can delegate appropriately.
 .SH CONFIGURATION
 .B claude
 reads an optional JSON config file at

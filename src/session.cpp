@@ -20,12 +20,14 @@
 #include <nlohmann/json.hpp>
 
 #include "api.h"
+#include "agents.h"
 #include "commands.h"
 #include "hooks.h"
 #include "models.h"
 #include "notify.h"
 #include "paths.h"
 #include "repl.h"
+#include "skills.h"
 #include "stats.h"
 #include "telegram.h"
 #include "tui.h"
@@ -136,7 +138,11 @@ struct TurnJob {
 	int             maxTokens;
 	config::Auth    auth;
 	std::string     systemPrompt;
-	bool            hasTelegram;    // true → call Mirror*/Acquire/Release
+	// When true the worker constructs a TelegramSink and passes it to
+	// SendWithTools so the local turn streams live to the primary chat.
+	bool            hasTelegram = false;
+	// The primary chat ID to stream to (fPrimaryUserId from RemoteControl).
+	int64_t         telegramChatId = 0;
 };
 
 struct TurnResult {
@@ -158,6 +164,20 @@ struct TurnResult {
 	std::string     cancelledInput;
 };
 
+// Tri-state display ownership for the type-ahead workflow:
+//   • Idle      → no turn in flight; main thread owns stdout and may
+//                 print, show menus, or block in ReadMessage().
+//   • Streaming → worker is actively writing the response to stdout;
+//                 the main thread must route output through the
+//                 pending buffer (BeginTurn) and must not show menus.
+//   • Done      → worker finished but the main thread has not yet
+//                 drained the result. Transient; cleared by drain_turn.
+//
+// fWorkerOwnsDisplay is kept as the existing terminal-ownership
+// contract (true for both Streaming and during the brief Done window
+// until drain). It maps to fDisplayState != Idle.
+enum class DisplayState { Idle, Streaming, Done };
+
 // All fields accessed from both threads are protected by fMu except
 // fWorkerOwnsDisplay which has its own mutex so the main thread can
 // wait on it without holding fMu.
@@ -172,11 +192,20 @@ struct LocalWorker {
 	std::condition_variable fResultCv;
 	std::optional<TurnResult> fResult;
 
+	// ── type-ahead queue (main → main) ────────────────────────────
+	// A prompt the user typed and submitted (double-Enter) while the
+	// current turn was still streaming. Held until the active turn
+	// drains, then dispatched without returning to ReadMessage().
+	// Guarded by fDisplayMu (only ever touched on the main thread,
+	// but kept under the same mutex as fDisplayState for clarity).
+	std::optional<std::string> fQueuedInput;
+
 	// ── display ownership ─────────────────────────────────────────
 	// Separate mutex so the main thread can do a clean wait without
 	// holding fMu (which the worker also needs).
 	std::mutex              fDisplayMu;
 	std::condition_variable fDisplayCv;
+	DisplayState            fDisplayState = DisplayState::Idle;
 	bool                    fWorkerOwnsDisplay = false;
 
 	// ── back-pointers set before thread starts ────────────────────
@@ -224,13 +253,29 @@ static void LocalWorkerFunc(LocalWorker& w)
 		TurnResult result;
 		const auto turn_start = std::chrono::steady_clock::now();
 
-		api::StreamProgress stream_progress;
+		// Build the sink: when remote-control is active, construct a
+		// TelegramSink for the primary chat so the local turn streams
+		// live to the phone. The TelegramSink implements OutputSink and
+		// is passed to SendWithTools; it handles BeginMessage/AppendText/
+		// EndMessage/ToolStarted/ToolFinished/AskPermission directly.
+		// No more MirrorPrompt / StartThinkingUpdater globals needed.
+		std::unique_ptr<telegram::TelegramSink> tg_sink;
+		OutputSink* active_sink = nullptr;
 
-		if (job.hasTelegram && w.fRemote) {
+		if (job.hasTelegram && w.fRemote && job.telegramChatId != 0) {
 			w.fRemote->AcquireTurn();
-			api::g_stream_progress = &stream_progress;
-			w.fRemote->MirrorPrompt(job.userText);
-			w.fRemote->StartThinkingUpdater(&stream_progress);
+			// Send the user prompt as a "> text" preamble so the phone
+			// sees what is being asked before the reply starts.
+			w.fRemote->SendPromptNotice(job.userText);
+			// Create a TelegramSink for the primary chat.
+			tg_sink = std::make_unique<telegram::TelegramSink>(
+				w.fRemote->GetClient(),
+				job.telegramChatId,
+				w.fRemote->AllowDestructive(),
+				w.fRemote->AllowedToolsRef(),
+				w.fRemote->PermQueueRef());
+			tg_sink->BeginMessage("assistant");
+			active_sink = tg_sink.get();
 		}
 
 		// Append user turn to the shared messages array.
@@ -240,11 +285,13 @@ static void LocalWorkerFunc(LocalWorker& w)
 
 		const api::SendResult api_result = api::SendWithTools(
 			job.auth, job.model, job.maxTokens,
-			*w.fMessages, job.systemPrompt);
+			*w.fMessages, job.systemPrompt, active_sink);
 
 		if (job.hasTelegram && w.fRemote) {
-			w.fRemote->StopThinkingUpdater();
-			api::g_stream_progress = nullptr;
+			if (tg_sink) {
+				tg_sink->EndMessage();
+				tg_sink.reset();
+			}
 			w.fRemote->ReleaseTurn();
 		}
 
@@ -293,6 +340,9 @@ static void LocalWorkerFunc(LocalWorker& w)
 		{
 			std::lock_guard<std::mutex> lk(w.fDisplayMu);
 			w.fWorkerOwnsDisplay = false;
+			// Done, not Idle: signals the main thread there is a
+			// result to drain. drain_turn() moves it back to Idle.
+			w.fDisplayState = DisplayState::Done;
 		}
 		w.fDisplayCv.notify_all();
 	}
@@ -331,12 +381,16 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	repl::Init(paths::ReplHistoryPath());
 
 	commands::Load(paths::ConfigDir() + "/commands");
+	skills::Load(paths::UserSkillsDir(), paths::ProjectSkillsDir());
+	agents::Load(paths::UserAgentsDir(), paths::ProjectAgentsDir());
 	std::vector<std::string> all_slash = {
 		"/help", "/clear", "/model", "/compact", "/usage",
-		"/todos", "/memory", "/stats", "/open", "/notify",
+		"/todos", "/memory", "/stats", "/skills", "/agents",
+		"/open", "/notify",
 		"/remote-control", "/ludicrous", "/exit", "/quit",
 	};
 	for (const auto& c : commands::Names()) all_slash.push_back("/" + c);
+	for (const auto& c : skills::Names())   all_slash.push_back("/" + c);
 	repl::SetSlashCommands(all_slash);
 
 	// Mutable copy of the initial auth so we can refresh tokens
@@ -506,6 +560,11 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// already typed new input or is exiting — they are clearly aware
 	// the turn is done, so a desktop notification would be spurious.
 	auto drain_turn = [&](bool allowNotify = true) -> bool {
+		// Mark the worker idle now that we own the display again.
+		{
+			std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+			worker.fDisplayState = DisplayState::Idle;
+		}
 		// Restore stdout to direct mode; flush any buffered output
 		// the worker left in the pending buffer.
 		tui::EndTurn();
@@ -524,8 +583,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		tui::SetStatusBar(compose_status());
 
 		if (!result.ok) {
-			if (remote && remote->Running())
-				remote->MirrorCancel();
 			if (!result.cancelledInput.empty()) {
 				repl::RemoveLastRecord();
 				repl::RestoreInput(result.cancelledInput);
@@ -583,9 +640,6 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 		tui::SetStatusBar(compose_status());
 
-		if (remote && remote->Running())
-			remote->MirrorToPrimary(result.assistantText);
-
 		config::SaveHistory(messages, model, resume_name);
 		hooks::Fire(hooks::Event::Stop, json{{"assistant_text", result.assistantText}});
 		// Discard any keystrokes typed during the turn (e.g. menu
@@ -608,7 +662,9 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		job.maxTokens    = max_tokens;
 		job.auth         = auth;
 		job.systemPrompt = std::move(system_for_turn);
-		job.hasTelegram  = (remote && remote->Running());
+		job.hasTelegram      = (remote && remote->Running());
+		job.telegramChatId   = (remote && remote->Running())
+		                     ? remote->PrimaryUserId() : 0;
 
 		// Install the stdout interceptor before waking the worker so
 		// the very first byte it writes goes into the pending buffer.
@@ -626,6 +682,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		{
 			std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
 			worker.fWorkerOwnsDisplay = true;
+			worker.fDisplayState = DisplayState::Streaming;
 		}
 		{
 			std::lock_guard<std::mutex> lk(worker.fMu);
@@ -634,10 +691,16 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		worker.fJobCv.notify_one();
 
 		tui::SetStatusBar(compose_status()
-			+ "  " + tui::Dim("ctrl+x: amend · enter waits"));
+			+ "  " + tui::Dim("ctrl+x: amend · enter: queue next"));
 	};
 
 	while (true) {
+		// queuedLine, when set, is a prompt the user typed (and
+		// double-Enter'd) while the previous turn was still streaming.
+		// It is processed exactly like a freshly-read line but bypasses
+		// ReadMessage().
+		std::optional<std::string> queuedLine;
+
 		// ── Check whether the active turn has finished ────────────────
 		// Do this at the top of every iteration so we drain the result
 		// whether we return from ReadMessage (user typed) or loop back
@@ -651,6 +714,14 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			if (done) {
 				turn_active = false;
 				if (!drain_turn()) break; // session exit
+				// Pick up any input the user staged while streaming.
+				{
+					std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+					if (worker.fQueuedInput.has_value()) {
+						queuedLine = std::move(*worker.fQueuedInput);
+						worker.fQueuedInput.reset();
+					}
+				}
 			}
 		}
 
@@ -675,7 +746,22 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 		std::string line;
 
-		if (!pending.empty()) {
+		if (queuedLine.has_value()) {
+			// A type-ahead prompt staged during the previous turn.
+			// Echo it like a freshly-submitted line and process it
+			// through the normal path-drop / slash / dispatch flow.
+			line = std::move(*queuedLine);
+			queuedLine.reset();
+			while (!line.empty() && (line.back() == '\r' || line.back() == '\n'
+									|| line.back() == ' ' || line.back() == '\t')) {
+				line.pop_back();
+			}
+			if (line.empty()) continue;
+			tui::ClearInputRow();
+			tui::PositionCursorForChat();
+			std::cout << tui::UserPrompt() << line << "\n" << std::flush;
+			tui::PositionCursorForChat();
+		} else if (!pending.empty()) {
 			line    = std::move(pending);
 			pending.clear();
 			tui::ClearInputRow();
@@ -734,24 +820,50 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		}
 		if (line.empty()) continue;
 
-		// ── If a turn is still active, wait for it to finish ────────
-		// We must drain before doing anything — slash commands need
-		// stdout restored (EndTurn) before they can print or show menus,
-		// and normal prompts need the conversation to be sequential.
+		// ── If a turn is still active, queue this input (type-ahead) ──
+		// Rather than blocking the whole loop until the turn finishes,
+		// stage the line on the worker and return to the prompt. The
+		// flush timer wakes ReadMessage() when the turn completes; the
+		// top-of-loop drain then dispatches the queued input as the
+		// next turn. Slash commands and path drops are also staged —
+		// they need stdout restored (EndTurn) first, which only happens
+		// in drain_turn(), so they must wait their turn too.
 		if (turn_active) {
+			bool stillStreaming;
 			{
-				std::unique_lock<std::mutex> dlk(worker.fDisplayMu);
-				worker.fDisplayCv.wait(dlk, [&]{
-					return !worker.fWorkerOwnsDisplay;
-				});
+				std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+				stillStreaming =
+					(worker.fDisplayState == DisplayState::Streaming);
 			}
+			if (stillStreaming) {
+				bool replaced;
+				{
+					std::lock_guard<std::mutex> dlk(worker.fDisplayMu);
+					replaced = worker.fQueuedInput.has_value();
+					worker.fQueuedInput = line;
+				}
+				// Dim "[queued]" annotation so the user knows their
+				// input is staged, not yet submitted — both in the
+				// scroll history and on the status row. Queue depth is
+				// 1: a second queued line replaces the first.
+				std::cout << tui::Meta(
+						(replaced ? "[queued (replaced previous): "
+								  : "[queued: ") + line + "]")
+						  << "\n" << std::flush;
+				tui::SetStatusBar(compose_status()
+					+ "  " + tui::Dim("ctrl+x: amend · [queued] next prompt"));
+				tui::PositionCursorForChat();
+				continue;
+			}
+			// Turn finished between the top-of-loop check and now:
+			// drain it, then fall through to process `line` normally.
 			turn_active = false;
 			// User actively typed new input, so no notification — they
 			// are clearly already watching the terminal.
 			if (!drain_turn(/*allowNotify=*/false)) break;
 			// The user's input was already echoed into the TurnOutputBuf
-			// above (line 690); EndTurn() flushed it in drain_turn().
-			// No second echo needed.
+			// above; EndTurn() flushed it in drain_turn(). No second
+			// echo needed.
 		}
 
 		// Drag-and-drop from Tracker: if libedit hands back a line

@@ -69,6 +69,30 @@ automatically when you quit.
 Use it when you trust the task completely and the approval rhythm is
 getting in the way. Don't use it when you don't.
 
+### Desktop app — Claude with a Haiku-native GUI
+
+Alongside the terminal `claude`, the package ships **Claude**, a BeAPI
+desktop app. It's the same agent and tools behind a native window: a
+scrollable chat transcript with markdown and syntax-highlighted code
+blocks (rendered in your live Genio theme), a tool bar, drag-and-drop
+image and file attachments, a token/cost bar, and a Settings dialog for
+model, working directory, and notification thresholds. **File ▸ New
+Session** opens additional independent windows.
+
+The same Telegram remote control is available from **Tools ▸ Remote
+Control**, and **Tools ▸ Ludicrous Mode** mirrors the CLI's auto-approve
+toggle (both surface a badge in the token bar while active).
+
+### Genio IDE integration — edits land back in your editor
+
+Launch the desktop app from [Genio](https://github.com/Genio-The-Haiku-IDE/Genio)'s
+**Tools ▸ Claude** menu and the two apps round-trip: Genio hands Claude
+the active project and file, and every file Claude then writes or edits
+opens (or refreshes) in the live Genio editor with the cursor jumped to
+the edited line. It activates only when launched from Genio — a directly
+launched GUI and the CLI are unaffected. Setup is one wrapper script; see
+[`contrib/genio/`](contrib/genio/).
+
 ---
 
 ## Features

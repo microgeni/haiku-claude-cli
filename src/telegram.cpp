@@ -1,10 +1,12 @@
 #include "telegram.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -12,12 +14,284 @@
 #include "api.h"
 #include "commands.h"
 #include "models.h"
+#include "tee_sink.h"
 #include "tools.h"
 #include "tui.h"
 
 namespace telegram {
 
 using json = nlohmann::json;
+
+// ── TelegramSink ────────────────────────────────────────────────────────────
+
+int64_t TelegramSink::NowMs() {
+	using namespace std::chrono;
+	return duration_cast<milliseconds>(
+		steady_clock::now().time_since_epoch()).count();
+}
+
+TelegramSink::TelegramSink(Client& client, int64_t chatId,
+                            bool allowDestructive,
+                            std::unordered_set<std::string>& allowedSet,
+                            PermQueue& permQueue)
+	: fClient(client)
+	, fChatId(chatId)
+	, fAllowDestructive(allowDestructive)
+	, fAllowedSet(allowedSet)
+	, fPermQueue(permQueue)
+{
+}
+
+int64_t TelegramSink::SentPlaceholder(const std::string& text) {
+	return fClient.SendMessageWithId(fChatId, text);
+}
+
+// Build the full display text: assistant text followed by any
+// collapsed tool cards.
+std::string TelegramSink::BuildDisplayText() const {
+	std::string out = fBuffer;
+	for (const auto& card : fToolCards) {
+		if (!card.started) continue;
+		if (!out.empty() && out.back() != '\n') out += '\n';
+		if (!card.finished) {
+			// Tool still running.
+			out += "\xF0\x9F\x94\xA7 " + card.name  // 🔧
+			    + ": " + card.summary + "\xE2\x80\xA6"; // …
+		} else {
+			out += (card.ok ? "\xE2\x9C\x85" : "\xE2\x9C\x8B") // ✅ / ✋
+			    + std::string(" ") + card.name + " "
+			    + (card.ok ? "\xE2\x9C\x93" : "\xE2\x9C\x97"); // ✓ / ✗
+		}
+	}
+	return out;
+}
+
+bool TelegramSink::EditCurrent(bool final) {
+	if (fCurrentMsgId == 0) return false;
+	const int64_t now = NowMs();
+	if (!final && (now - fLastEditMs) < kEditThrottleMs) return true; // throttled
+	const std::string text = BuildDisplayText();
+	const std::string display = (!final && fInMessage)
+		? text + " \xE2\x96\x8C"   // append streaming cursor ▌
+		: text;
+	const bool ok = fClient.EditMessageText(fChatId, fCurrentMsgId, display);
+	if (ok) fLastEditMs = now;
+	return ok;
+}
+
+// ── StructuredSink methods ───────────────────────────────────────────────────
+
+void TelegramSink::BeginMessage(const std::string& /*role*/) {
+	fBuffer.clear();
+	fToolCards.clear();
+	fInMessage = true;
+	fCurrentMsgId = SentPlaceholder("\xE2\x8F\xB3 thinking\xE2\x80\xA6"); // ⏳ thinking…
+	fLastEditMs   = NowMs();
+}
+
+void TelegramSink::AppendText(const std::string& chunk) {
+	if (!fInMessage) return;
+	fBuffer += chunk;
+	EditCurrent(/*final=*/false);
+}
+
+void TelegramSink::EndMessage() {
+	if (!fInMessage) return;
+	fInMessage = false;
+	EditCurrent(/*final=*/true);
+	fCurrentMsgId = 0;
+}
+
+void TelegramSink::ToolStarted(const std::string& name,
+                                const std::string& summary) {
+	ToolCard card;
+	card.name    = name;
+	card.summary = summary;
+	card.started = true;
+	fToolCards.push_back(std::move(card));
+	EditCurrent(/*final=*/false); // show "🔧 bash: …" immediately
+}
+
+void TelegramSink::ToolFinished(const std::string& name,
+                                 bool ok,
+                                 const std::string& detail) {
+	for (auto& card : fToolCards) {
+		if (card.name == name && card.started && !card.finished) {
+			card.finished = true;
+			card.ok       = ok;
+			(void)detail; // stored implicitly; not displayed by default
+			break;
+		}
+	}
+	EditCurrent(/*final=*/false); // update ✅ / ✋
+}
+
+int TelegramSink::AskChoice(const std::string& prompt,
+                             const std::vector<std::string>& options) {
+	if (options.empty()) return -1;
+
+	// Build an inline keyboard — one button per option.
+	std::vector<std::vector<Button>> kb;
+	for (size_t i = 0; i < options.size(); ++i) {
+		Button b;
+		b.text          = std::to_string(i + 1) + ". " + options[i];
+		b.callback_data = "choice:" + std::to_string(i);
+		kb.push_back({ std::move(b) });
+	}
+	const int64_t msg_id = fClient.SendMessageWithId(fChatId, prompt, kb);
+	if (msg_id == 0) return -1;
+
+	// Block waiting for a callback tap.
+	std::unique_lock<std::mutex> lk(fPermQueue.mu);
+	fPermQueue.cv.wait_for(lk, std::chrono::seconds(120),
+		[&]{ return !fPermQueue.callbacks.empty(); });
+	if (fPermQueue.callbacks.empty()) return -1;
+	const std::string cb = fPermQueue.callbacks.front();
+	fPermQueue.callbacks.pop_front();
+	lk.unlock();
+
+	if (cb.rfind("choice:", 0) == 0) {
+		try { return std::stoi(cb.substr(7)); } catch (...) {}
+	}
+	return -1;
+}
+
+sink::Permission TelegramSink::AskPermission(const std::string& tool,
+                                              const std::string& preview) {
+	// Already session-approved.
+	if (fAllowedSet.count(tool)) return sink::Permission::kAllow;
+
+	// Non-interactive mode with blanket allow.
+	if (fAllowDestructive) return sink::Permission::kAllow;
+
+	// Send an inline-keyboard permission prompt.
+	const std::string question =
+		"\xF0\x9F\x94\x90 Allow " + tool + "?\n\n" + preview; // 🔐
+	const std::vector<std::vector<Button>> kb = {
+		{{ "✅ Yes, once",            "perm:yes"    }},
+		{{ "🔓 Yes, always this session", "perm:always" }},
+		{{ "🚫 No, deny",             "perm:no"     }},
+	};
+	const int64_t msg_id = fClient.SendMessageWithId(fChatId, question, kb);
+
+	// Block waiting for a perm:* callback tap.
+	std::unique_lock<std::mutex> lk(fPermQueue.mu);
+	fPermQueue.cv.wait_for(lk, std::chrono::seconds(120),
+		[&]{ return !fPermQueue.callbacks.empty() || g_interrupted != 0; });
+
+	if (fPermQueue.callbacks.empty() || g_interrupted) {
+		if (msg_id)
+			fClient.EditMessageText(fChatId, msg_id,
+				"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xF0\x9F\x9A\xAB timed out / cancelled");
+		return sink::Permission::kDeny;
+	}
+	const std::string cb = fPermQueue.callbacks.front();
+	fPermQueue.callbacks.pop_front();
+	lk.unlock();
+
+	if (cb == "perm:always") {
+		fAllowedSet.insert(tool);
+		if (msg_id)
+			fClient.EditMessageText(fChatId, msg_id,
+				"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xE2\x9C\x85 always allowed this session");
+		return sink::Permission::kAllowAlways;
+	}
+	if (cb == "perm:yes") {
+		if (msg_id)
+			fClient.EditMessageText(fChatId, msg_id,
+				"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xE2\x9C\x85 allowed once");
+		return sink::Permission::kAllow;
+	}
+	// perm:no or anything else.
+	if (msg_id)
+		fClient.EditMessageText(fChatId, msg_id,
+			"\xF0\x9F\x94\x90 " + tool + " \xE2\x86\x92 \xF0\x9F\x9A\xAB denied");
+	return sink::Permission::kDeny;
+}
+
+void TelegramSink::SetStatus(sink::StatusKind kind) {
+	// Sends a transient "typing…" action — never a persistent message.
+	if (kind == sink::StatusKind::kIdle) return;
+	fClient.SendChatAction(fChatId, "typing");
+}
+
+void TelegramSink::OnError(const std::string& message) {
+	const std::string text = "\xE2\x9D\x8C Error: " + message; // ❌
+	if (fCurrentMsgId != 0) {
+		fClient.EditMessageText(fChatId, fCurrentMsgId, text);
+		fCurrentMsgId = 0;
+		fInMessage    = false;
+	} else {
+		fClient.SendMessage(fChatId, text);
+	}
+}
+
+// ── OutputSink adapter methods (removed when SendWithTools takes StructuredSink*) ──
+
+void TelegramSink::OnText(const std::string& chunk) {
+	AppendText(chunk);
+}
+
+void TelegramSink::OnToolStatus(const std::string& phase) {
+	if (phase.empty()) {
+		// Tool finished — find the last unfinished card and mark it done.
+		for (auto it = fToolCards.rbegin(); it != fToolCards.rend(); ++it) {
+			if (it->started && !it->finished) {
+				it->finished = true;
+				it->ok       = true;
+				break;
+			}
+		}
+		EditCurrent(/*final=*/false);
+	} else {
+		// Tool started. Extract name (and optional ": args") from the
+		// "🔧 running <Name>: <args>…" format produced by SendWithTools.
+		const std::string prefix = " running ";
+		std::string name = phase;
+		std::string args;
+		const auto p = phase.find(prefix);
+		if (p != std::string::npos) {
+			name = phase.substr(p + prefix.size());
+			// Strip the trailing UTF-8 ellipsis (… == \xE2\x80\xA6) exactly,
+			// so a command ending in a multibyte char isn't corrupted.
+			const std::string kEllipsis = "\xE2\x80\xA6";
+			if (name.size() >= kEllipsis.size()
+			    && name.compare(name.size() - kEllipsis.size(),
+			                    kEllipsis.size(), kEllipsis) == 0)
+				name.resize(name.size() - kEllipsis.size());
+			const auto colon = name.find(": ");
+			if (colon != std::string::npos) {
+				args = name.substr(colon + 2);
+				name.resize(colon);
+			}
+		}
+		ToolStarted(name, args.empty() ? "running" : args);
+	}
+}
+
+api::Permission TelegramSink::AskPermission(const std::string& tool,
+                                             const nlohmann::json& input,
+                                             std::string* denial_reason) {
+	// Build a brief preview from the tool input.
+	std::string preview;
+	if (input.contains("command") && input["command"].is_string())
+		preview = input["command"].get<std::string>();
+	else
+		preview = input.dump(-1, ' ', false,
+		    nlohmann::json::error_handler_t::replace).substr(0, 200);
+
+	const sink::Permission p = AskPermission(tool, preview);
+	switch (p) {
+		case sink::Permission::kAllow:
+		case sink::Permission::kAllowAlways:
+			return api::Permission::Allow;
+		case sink::Permission::kDeny:
+			if (denial_reason)
+				*denial_reason = "user denied permission via Telegram";
+			return api::Permission::Deny;
+	}
+	return api::Permission::Deny;
+}
 
 namespace {
 
@@ -86,25 +360,115 @@ bool Client::PostJson(const std::string& method, const std::string& body,
 	return true;
 }
 
-std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_running) {
+// Synchronous getMe health check. Returns true and the bot is reachable
+// and the token valid; otherwise sets *reason. Note: getMe does NOT detect
+// a getUpdates Conflict (another poller) — that only shows up on the first
+// getUpdates call, which the poll loop now logs.
+bool Client::Preflight(std::string* reason) {
+	if (fToken.empty()) {
+		if (reason) *reason = "no bot_token configured";
+		return false;
+	}
+	std::string response;
+	if (!PostJson("getMe", json::object().dump(), &response, 15)) {
+		if (reason) *reason = "network error contacting api.telegram.org";
+		return false;
+	}
+	try {
+		const json j = json::parse(response);
+		if (!j.value("ok", false)) {
+			if (reason)
+				*reason = "Telegram rejected the token: "
+					+ j.value("description", std::string("unknown error"));
+			return false;
+		}
+	} catch (const std::exception& e) {
+		if (reason) *reason = std::string("bad response from Telegram: ") + e.what();
+		return false;
+	}
+	return true;
+}
+
+// One short getUpdates probe to detect the 409 Conflict that getMe cannot
+// see. timeout=0 makes Telegram return immediately. Does not advance the
+// offset meaningfully (a fresh poll loop will re-fetch). Returns true when
+// polling is available.
+bool Client::CheckPollAvailable(std::string* reason) {
+	const json body = {
+		{"offset",          fNextOffset},
+		{"timeout",         0},
+		{"allowed_updates", json::array({"message", "callback_query"})},
+	};
+	std::string response;
+	if (!PostJson("getUpdates", body.dump(), &response, 15)) {
+		if (reason) *reason = "network error contacting api.telegram.org";
+		return false;
+	}
+	try {
+		const json j = json::parse(response);
+		if (!j.value("ok", false)) {
+			const std::string desc = j.value("description", std::string{});
+			if (desc.find("Conflict") != std::string::npos) {
+				if (reason)
+					*reason = "another bot instance is already polling this "
+						"token (close any other Claude session or app using the "
+						"same Telegram bot, then try again)";
+			} else if (reason) {
+				*reason = desc.empty() ? "getUpdates failed" : desc;
+			}
+			return false;
+		}
+	} catch (const std::exception& e) {
+		if (reason) *reason = std::string("bad response from Telegram: ") + e.what();
+		return false;
+	}
+	return true;
+}
+
+std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_running,
+								 bool* out_error) {
+	// Assume failure until we successfully parse an ok response; every
+	// early-return below is a failure the caller should back off on.
+	if (out_error) *out_error = true;
+
 	const json body = {
 		{"offset",          fNextOffset},
 		{"timeout",         timeout_sec},
-		{"fAllowedupdates", json::array({"message", "callback_query"})},
+		{"allowed_updates", json::array({"message", "callback_query"})},
 	};
 
 	std::string response;
 	if (!PostJson("getUpdates", body.dump(), &response,
 				   static_cast<long>(timeout_sec + 10),
 				   keep_running)) {
+		// A caller-requested cancel (keep_running flipped) trips the curl
+		// progress callback and looks like a transport failure, but it is
+		// an orderly shutdown, not an error to back off on.
+		if (keep_running && !keep_running->load() && out_error)
+			*out_error = false;
 		return {};
 	}
 
 	std::vector<Update> out;
 	try {
 		const json j = json::parse(response);
-		if (!j.value("ok", false)) return out;
+		if (!j.value("ok", false)) {
+			// Surface Telegram's error so failures aren't silent. The most
+			// common one is HTTP 409 "Conflict: terminated by other
+			// getUpdates request" — another bot instance (a CLI session or a
+			// second app) is already long-polling the same token. Only one
+			// getUpdates consumer per bot is allowed.
+			const std::string desc = j.value("description", std::string{});
+			config::LogLine("telegram getUpdates not ok: "
+				+ (desc.empty() ? response.substr(0, 200) : desc));
+			return out;
+		}
 		if (!j.contains("result") || !j["result"].is_array()) return out;
+
+		// Got a well-formed ok response. Even if it carries zero updates
+		// (a plain long-poll timeout), the call succeeded — clear the
+		// error flag so the loop does not back off on quiet periods.
+		if (out_error) *out_error = false;
 
 		for (const auto& entry : j["result"]) {
 			const int64_t id = entry.value("update_id", int64_t{0});
@@ -327,6 +691,120 @@ bool Client::DeleteMessage(int64_t chat_id, int64_t message_id) {
 
 std::atomic<bool> g_muted { false };
 
+// ── SessionRegistry ───────────────────────────────────────────
+
+SessionRegistry& SessionRegistry::Instance() {
+	static SessionRegistry instance;
+	return instance;
+}
+
+int SessionRegistry::Register(RemoteControl* session, const std::string& title,
+							  const std::string& model) {
+	return Register(session, title, model, nullptr, nullptr, nullptr);
+}
+
+int SessionRegistry::Register(RemoteControl* session, const std::string& title,
+							  const std::string& model,
+							  std::function<nlohmann::json()> historyProvider,
+							  std::function<void(nlohmann::json, nlohmann::json)> historyAppender,
+							  std::function<std::unique_ptr<OutputSink>()> sinkFactory) {
+	std::lock_guard<std::mutex> lk(fMu);
+	const int id = fNextId++;
+	Entry e;
+	e.id              = id;
+	e.session         = session;
+	e.title           = title;
+	e.model           = model;
+	e.historyProvider = std::move(historyProvider);
+	e.historyAppender = std::move(historyAppender);
+	e.sinkFactory     = std::move(sinkFactory);
+	fEntries.push_back(std::move(e));
+	return id;
+}
+
+void SessionRegistry::Unregister(int id) {
+	std::lock_guard<std::mutex> lk(fMu);
+	for (auto it = fEntries.begin(); it != fEntries.end(); ++it) {
+		if (it->id == id) { fEntries.erase(it); break; }
+	}
+	// Drop any chat attachments that pointed at this session so a stale
+	// ID never routes to a freed RemoteControl.
+	for (auto it = fActiveByChat.begin(); it != fActiveByChat.end();) {
+		if (it->second == id) it = fActiveByChat.erase(it);
+		else ++it;
+	}
+}
+
+void SessionRegistry::UpdateTitle(int id, const std::string& title) {
+	std::lock_guard<std::mutex> lk(fMu);
+	for (auto& e : fEntries) {
+		if (e.id == id) { e.title = title; break; }
+	}
+}
+
+std::vector<SessionRegistry::Entry> SessionRegistry::List() const {
+	std::lock_guard<std::mutex> lk(fMu);
+	return fEntries; // already kept in ascending-id insertion order.
+}
+
+RemoteControl* SessionRegistry::ActiveFor(int64_t chat_id, int* out_id) const {
+	std::lock_guard<std::mutex> lk(fMu);
+	auto it = fActiveByChat.find(chat_id);
+	int wantId = 0;
+	if (it != fActiveByChat.end()) {
+		wantId = it->second;
+	} else if (fEntries.size() == 1) {
+		// With a single live session, default the chat to it so the
+		// common case "just talk to the one session" needs no /session.
+		wantId = fEntries.front().id;
+	}
+	if (wantId == 0) return nullptr;
+	for (const auto& e : fEntries) {
+		if (e.id == wantId) {
+			if (out_id) *out_id = e.id;
+			return e.session;
+		}
+	}
+	return nullptr;
+}
+
+bool SessionRegistry::Resolve(int64_t chat_id, Entry* out) const {
+	std::lock_guard<std::mutex> lk(fMu);
+	auto it = fActiveByChat.find(chat_id);
+	int wantId = 0;
+	if (it != fActiveByChat.end()) {
+		wantId = it->second;
+	} else if (fEntries.size() == 1) {
+		// Single-session default: a chat with no explicit /session still
+		// routes to the only live session.
+		wantId = fEntries.front().id;
+	}
+	if (wantId == 0) return false;
+	for (const auto& e : fEntries) {
+		if (e.id == wantId) {
+			if (out) *out = e; // copies the std::function callbacks.
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SessionRegistry::Attach(int64_t chat_id, int id) {
+	std::lock_guard<std::mutex> lk(fMu);
+	for (const auto& e : fEntries) {
+		if (e.id == id) {
+			fActiveByChat[chat_id] = id;
+			return true;
+		}
+	}
+	return false;
+}
+
+size_t SessionRegistry::Count() const {
+	std::lock_guard<std::mutex> lk(fMu);
+	return fEntries.size();
+}
+
 // ── RemoteControl ─────────────────────────────────────────────
 
 bool RemoteControl::ConfigIsValid(const config::Config& cfg, std::string* reason) {
@@ -366,6 +844,12 @@ RemoteControl::~RemoteControl() { Stop(); }
 
 bool RemoteControl::Running() const { return fRunning.load(); }
 
+bool RemoteControl::Preflight(std::string* reason) {
+	if (!fClient.Preflight(reason)) return false;
+	if (!fClient.CheckPollAvailable(reason)) return false;
+	return true;
+}
+
 bool RemoteControl::Start() {
 	if (fRunning.load()) return false;
 	// Determine the primary user for local mirroring —
@@ -374,102 +858,39 @@ bool RemoteControl::Start() {
 	for (const auto& id : fAllowed) {
 		if (fPrimaryUserId == 0 || id < fPrimaryUserId) fPrimaryUserId = id;
 	}
-	// Default the active perm chat to the primary user so that a
-	// locally-initiated turn can send permission prompts to Telegram
-	// before any Telegram message has arrived.
 	fActiveChatId = fPrimaryUserId;
-	// Clear the always-allowed tool set so approvals from a previous
-	// session don't silently carry over.
-	api::AlwaysAllowed().clear();
+	// Clear the session-scoped always-allow set so approvals from a
+	// previous session don't silently carry over.
+	fAllowedTools.clear();
 	fRunning.store(true);
 	fWorkerRunning.store(true);
+	// Register with the process-wide session registry so /sessions and
+	// /session N can see and route to this live session. The GUI registers
+	// its own windows as sessions and disables this self-registration
+	// (SetSelfRegister(false)) so the poller does not add a duplicate.
+	if (fSelfRegister) {
+		const std::string title = fSessionTitle.empty()
+			? std::string("session") : fSessionTitle;
+		fSessionId = SessionRegistry::Instance().Register(
+			this, title, fSessionModel.empty() ? fCfgModel : fSessionModel);
+	}
 	fWorker = std::thread(&RemoteControl::WorkLoop, this);
 	fPoller = std::thread(&RemoteControl::PollLoop, this);
-
-	// Install global hooks once for the lifetime of this
-	// RemoteControl session. Both local REPL turns and Telegram-
-	// origin turns will share these hooks; fActiveChatId is
-	// updated by ProcessUpdate() before each Telegram-origin
-	// SendWithTools call, and reset to fPrimaryUserId for local
-	// turns so permission prompts always reach the right chat.
-	api::g_telegram_permission_hook = [this](const std::string& tool_name,
-	                                          const std::string& preview,
-	                                          std::atomic<bool>* local_answered) -> api::Permission {
-		const int64_t chat = fActiveChatId.load();
-		if (chat == 0) return api::Permission::Deny;
-		const std::string question =
-			"\xF0\x9F\x94\x90 allow " + tool_name + "?\n\n" + preview;
-		const std::vector<std::vector<Button>> kb = {
-			{{ "1. Yes, allow once",          "perm:yes"    }},
-			{{ "2. Always allow this session", "perm:always" }},
-			{{ "3. No, deny",                 "perm:no"     }},
-		};
-		api::g_telegram_updater_paused.store(true);
-		const int64_t perm_msg_id = fClient.SendMessageWithId(chat, question, kb);
-		while (!g_interrupted) {
-			if (local_answered && local_answered->load()) {
-				api::g_telegram_updater_paused.store(false);
-				return api::Permission::Deny; // result ignored by the race winner path
-			}
-			std::unique_lock<std::mutex> lk(fPermMu);
-			fPermCv.wait_for(lk, std::chrono::seconds(2),
-				[&]{ return !fPermQueue.empty() || g_interrupted
-					|| (local_answered && local_answered->load()); });
-			if (local_answered && local_answered->load()) {
-				api::g_telegram_updater_paused.store(false);
-				return api::Permission::Deny;
-			}
-			while (!fPermQueue.empty()) {
-				const Update upd = fPermQueue.front();
-				fPermQueue.pop_front();
-				lk.unlock();
-				api::g_telegram_updater_paused.store(false);
-				fClient.AnswerCallback(upd.callback_query_id);
-				if (upd.text == "perm:always") {
-					api::AlwaysAllowed().insert(tool_name);
-					fClient.EditMessageText(chat, perm_msg_id,
-						"\xF0\x9F\x94\x90 allow " + tool_name
-						+ "? \xE2\x86\x92 \xE2\x9C\x85 always allowed this session", {});
-					return api::Permission::Allow;
-				}
-				if (upd.text == "perm:yes") {
-					fClient.EditMessageText(chat, perm_msg_id,
-						"\xF0\x9F\x94\x90 allow " + tool_name
-						+ "? \xE2\x86\x92 \xE2\x9C\x85 allowed once", {});
-					return api::Permission::Allow;
-				}
-				if (upd.text == "perm:no") {
-					fClient.EditMessageText(chat, perm_msg_id,
-						"\xF0\x9F\x94\x90 allow " + tool_name
-						+ "? \xE2\x86\x92 \xF0\x9F\x9A\xAB denied", {});
-					return api::Permission::Deny;
-				}
-				lk.lock();
-			}
-		}
-		api::g_telegram_updater_paused.store(false);
-		return api::Permission::Deny;
-	};
-
-	api::g_tool_status_hook = [this](const std::string& notice) {
-		const int64_t chat = fActiveChatId.load();
-		if (chat != 0 && !g_muted.load())
-			fClient.SendMessage(chat, notice);
-	};
-
 	return true;
 }
 
 void RemoteControl::Stop() {
 	if (!fRunning.exchange(false)) return;
-	api::g_telegram_permission_hook = nullptr;
-	api::g_tool_status_hook         = nullptr;
+	// Unregister first so no incoming update routes to a session that is
+	// tearing down.
+	if (fSessionId != 0) {
+		SessionRegistry::Instance().Unregister(fSessionId);
+		fSessionId = 0;
+	}
 	// Wake any thread blocked in AcquireTurn() so it sees
 	// fRunning == false and unblocks cleanly.
 	fTurnCv.notify_all();
 	if (fPoller.joinable()) fPoller.join();
-	// Stop the worker thread so it doesn't dangle after the
-	// poller exits.
 	fWorkerRunning.store(false);
 	fWorkCv.notify_one();
 	if (fWorker.joinable()) fWorker.join();
@@ -498,137 +919,85 @@ void RemoteControl::SetSharedHistoryAppender(
 	fSharedHistoryAppend = std::move(appender);
 }
 
-// Send the user's local prompt to the primary Telegram chat
-// immediately — before Claude starts working — so the phone side
-// sees what is being asked in real time. Caller must then call
-// StartThinkingUpdater(progress) to animate the placeholder, and
-// StopThinkingUpdater() before ReleaseTurn().
-void RemoteControl::MirrorPrompt(const std::string& user_text) {
-	if (!fRunning.load()) return;
-	if (fPrimaryUserId == 0) return;
-	if (g_muted.load()) return;
+// Send a "> user_text" preamble to the primary chat before a local turn
+// starts streaming. Called by LocalWorker under the turn lock.
+void RemoteControl::SendPromptNotice(const std::string& user_text) {
+	if (!fRunning.load() || fPrimaryUserId == 0 || g_muted.load()) return;
 	fClient.SendMessage(fPrimaryUserId, "> " + user_text);
-	fPrimaryThinkingMsgId = fClient.SendMessageWithId(
-		fPrimaryUserId,
-		"\xE2\x8F\xB3 thinking\xE2\x80\xA6"); // ⏳ thinking…
-	// NOTE: StartThinkingUpdater() is NOT called here. The caller
-	// (session.cpp InteractiveLoop) calls it explicitly after
-	// AcquireTurn() so the updater thread is never alive concurrently
-	// with a Telegram-origin turn.
 }
 
-void RemoteControl::MirrorToPrimary(const std::string& assistant_text) {
-	StopThinkingUpdater();
-	if (!fRunning.load()) return;
-	if (fPrimaryUserId == 0) return;
-	if (g_muted.load()) {
-		fPrimaryThinkingMsgId = 0;
-		return;
-	}
-
-	// Build an inline keyboard for any numbered options in the
-	// response so the Telegram user can tap to reply — same logic
-	// as ProcessUpdate uses for Telegram-origin turns.
-	std::vector<std::vector<Button>> keyboard;
-	const auto options = models::ExtractNumberedOptions(assistant_text);
-	for (const auto& opt : options) {
-		Button b;
-		b.text          = opt.first + ". " + opt.second;
-		b.callback_data = opt.first;
-		keyboard.push_back({ std::move(b) });
-	}
-
-	const int64_t ph = fPrimaryThinkingMsgId;
-	fPrimaryThinkingMsgId = 0;
-	if (!assistant_text.empty()) {
-		if (ph != 0) {
-			if (!fClient.EditMessageText(fPrimaryUserId, ph, assistant_text, keyboard))
-				fClient.SendMessage(fPrimaryUserId, assistant_text, keyboard);
-		} else {
-			fClient.SendMessage(fPrimaryUserId, assistant_text, keyboard);
-		}
-	} else if (ph != 0) {
-		fClient.EditMessageText(fPrimaryUserId, ph, "(no response)");
-	}
-}
-
-void RemoteControl::MirrorCancel() {
-	StopThinkingUpdater();
-	if (fPrimaryUserId == 0 || fPrimaryThinkingMsgId == 0) return;
-	fClient.EditMessageText(fPrimaryUserId, fPrimaryThinkingMsgId,
-							"\xE2\x9D\x8C error \xE2\x80\x94 turn aborted"); // ❌ error — turn aborted
-	fPrimaryThinkingMsgId = 0;
-}
-
-void RemoteControl::StartThinkingUpdater(api::StreamProgress* progress) {
-	if (fPrimaryThinkingMsgId == 0) return;
-	// progress is captured by value (it's a pointer) so the thread
-	// holds exactly the StreamProgress that belongs to the current
-	// turn's stack frame. It must remain valid until
-	// StopThinkingUpdater() returns — callers guarantee this by
-	// stopping the thread before the stack frame unwinds.
-	fUpdaterRunning.store(true);
-	fUpdaterThread = std::thread([this, progress]() {
-		int  dot_phase    = 0;
-		int  last_version = 0;
-		static const char* kDots[] = {
-			"\xE2\x8F\xB3 thinking\xE2\x80\xA6",                      // ⏳ thinking…
-			"\xE2\x8F\xB3 thinking\xE2\x80\xA4",                      // ⏳ thinking.
-			"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",          // ⏳ thinking..
-			"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4", // ⏳ thinking...
-		};
-		while (fUpdaterRunning.load()) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-			if (!fUpdaterRunning.load()) break;
-			if (api::g_telegram_updater_paused.load()) continue;
-			const int64_t ph = fPrimaryThinkingMsgId;
-			if (ph == 0) break;
-			if (progress) {
-				const int v = progress->version.load(std::memory_order_relaxed);
-				if (v != last_version) {
-					last_version = v;
-					std::string snap;
-					{
-						std::lock_guard<std::mutex> lk(progress->mu);
-						snap = progress->text;
-					}
-					if (!snap.empty()) {
-						fClient.EditMessageText(fPrimaryUserId, ph,
-							snap + " \xE2\x96\x8C"); // ▌ streaming cursor
-						continue;
-					}
-				}
-			}
-			fClient.EditMessageText(fPrimaryUserId, ph,
-				kDots[dot_phase % 4]);
-			++dot_phase;
-		}
-	});
-}
-
-void RemoteControl::StopThinkingUpdater() {
-	fUpdaterRunning.store(false);
-	if (fUpdaterThread.joinable()) fUpdaterThread.join();
+// Set or refresh this session's title for /sessions. When the poller is
+// already running, push the new label straight into the registry; before
+// Start() it is just stored and applied at registration time.
+void RemoteControl::SetSessionTitle(const std::string& title) {
+	fSessionTitle = title;
+	if (fSessionId != 0)
+		SessionRegistry::Instance().UpdateTitle(fSessionId, title);
 }
 
 void RemoteControl::PollLoop() {
-	while (fRunning.load() && !g_interrupted) {
-		const auto updates = fClient.poll(10, &fRunning);
-		if (!fRunning.load() || g_interrupted) break;
+	// Gate solely on fRunning, not the global g_interrupted: in the GUI
+	// g_interrupted is repurposed as a per-turn cancel flag, so consulting
+	// it here would stop the poller the moment any chat turn is cancelled.
+	// Stop() flips fRunning and aborts the in-flight long-poll via the
+	// keep_running pointer handed to Client::poll.
+	//
+	// Consecutive failures (transport errors, HTTP 5xx, or a 409 Conflict
+	// from a second poller) trigger exponential backoff so a flaky network
+	// or a transient conflict does not tight-spin the loop or flood the log
+	// — and the loop self-heals once the condition clears. A clean poll
+	// (even one with zero updates) resets the backoff immediately.
+	constexpr int kBackoffMaxSec = 60;
+	int consecutiveFailures = 0;
+
+	while (fRunning.load()) {
+		bool pollError = false;
+		const auto updates = fClient.poll(10, &fRunning, &pollError);
+		if (!fRunning.load()) break;
+
+		if (pollError) {
+			// Cap the exponent so backoffSec maxes out at kBackoffMaxSec:
+			// 1, 2, 4, 8, 16, 32, 60, 60, ...
+			++consecutiveFailures;
+			int backoffSec = 1;
+			for (int i = 1; i < consecutiveFailures && backoffSec < kBackoffMaxSec; ++i)
+				backoffSec = std::min(backoffSec * 2, kBackoffMaxSec);
+
+			if (consecutiveFailures == 1 || consecutiveFailures % 5 == 0) {
+				config::LogLine("remote-control poll failing (attempt "
+					+ std::to_string(consecutiveFailures) + "), backing off "
+					+ std::to_string(backoffSec) + "s");
+			}
+
+			// Sleep in short slices so Stop() takes effect promptly.
+			for (int slept = 0; slept < backoffSec && fRunning.load(); ++slept)
+				std::this_thread::sleep_for(std::chrono::seconds(1));
+			continue;
+		}
+
+		if (consecutiveFailures > 0) {
+			config::LogLine("remote-control poll recovered after "
+				+ std::to_string(consecutiveFailures) + " failure(s)");
+			consecutiveFailures = 0;
+		}
+
 		for (const auto& u : updates) {
-			if (!fRunning.load() || g_interrupted) break;
+			if (!fRunning.load()) break;
 			if (!fAllowed.count(u.user_id)) {
 				config::LogLine("remote-control reject user=" + std::to_string(u.user_id));
 				continue;
 			}
-			// Route perm:* button taps to the permission queue so
-			// the hook's wait loop sees them.
-			if (u.is_callback && u.text.rfind("perm:", 0) == 0) {
+			// Route perm:* and choice:* button taps to the permission
+			// queue so TelegramSink::AskPermission / AskChoice can drain it.
+			if (u.is_callback && (u.text.rfind("perm:", 0) == 0
+			                      || u.text.rfind("choice:", 0) == 0)) {
+				// Answer the callback query to dismiss the loading spinner.
+				fClient.AnswerCallback(u.callback_query_id);
 				{
-					std::lock_guard<std::mutex> lk(fPermMu);
-					fPermQueue.push_back(u);
+					std::lock_guard<std::mutex> lk(fPermQueue.mu);
+					fPermQueue.callbacks.push_back(u.text);
 				}
-				fPermCv.notify_one();
+				fPermQueue.cv.notify_one();
 				continue;
 			}
 			{
@@ -638,6 +1007,105 @@ void RemoteControl::PollLoop() {
 			fWorkCv.notify_one();
 		}
 	}
+}
+
+// Handle the built-in session commands owned by the SessionRegistry:
+//   /sessions      — list all live sessions with their IDs
+//   /session N     — attach this chat to session N
+//   /whoami        — show which session this chat is attached to
+// These run before any per-session routing or turn acquisition so a
+// phone can list/switch even while a Claude turn is in progress. Returns
+// true when the update was one of these commands and was fully serviced.
+bool RemoteControl::TryHandleSessionCommand(const Update& u) {
+	if (u.is_callback || u.text.empty() || u.text.front() != '/')
+		return false;
+
+	const std::string cmd = u.text.substr(0, u.text.find(' '));
+	auto& reg = SessionRegistry::Instance();
+
+	if (cmd == "/sessions") {
+		const auto entries = reg.List();
+		int activeId = 0;
+		reg.ActiveFor(u.chat_id, &activeId);
+		std::string out = "Live sessions:\n";
+		if (entries.empty()) {
+			out += "(none)";
+		} else {
+			for (const auto& e : entries) {
+				out += "#" + std::to_string(e.id) + "  " + e.title;
+				if (!e.model.empty()) out += "  (" + e.model + ")";
+				if (e.id == activeId) out += "  [active]";
+				out += "\n";
+			}
+			out += "\nUse /session N to switch.";
+		}
+		fClient.SendMessage(u.chat_id, out);
+		config::LogLine("remote-control /sessions chat=" + std::to_string(u.chat_id));
+		return true;
+	}
+
+	if (cmd == "/session") {
+		// Parse the numeric argument after "/session ".
+		std::string arg;
+		const auto sp = u.text.find(' ');
+		if (sp != std::string::npos) arg = u.text.substr(sp + 1);
+		// Trim surrounding whitespace.
+		while (!arg.empty() && (arg.front() == ' ' || arg.front() == '\t'))
+			arg.erase(arg.begin());
+		while (!arg.empty() && (arg.back() == ' ' || arg.back() == '\t'))
+			arg.pop_back();
+
+		if (arg.empty()) {
+			fClient.SendMessage(u.chat_id,
+				"Usage: /session N  (see /sessions for IDs)");
+			return true;
+		}
+		int id = 0;
+		try {
+			id = std::stoi(arg);
+		} catch (const std::exception&) {
+			fClient.SendMessage(u.chat_id,
+				"Not a number: '" + arg + "'. Usage: /session N");
+			return true;
+		}
+		if (reg.Attach(u.chat_id, id)) {
+			int resolvedId = 0;
+			reg.ActiveFor(u.chat_id, &resolvedId);
+			std::string label;
+			for (const auto& e : reg.List())
+				if (e.id == resolvedId) label = e.title;
+			fClient.SendMessage(u.chat_id,
+				"Attached to session #" + std::to_string(id)
+				+ (label.empty() ? "" : " (" + label + ")")
+				+ ". Your messages now go there.");
+			config::LogLine("remote-control /session attach chat="
+				+ std::to_string(u.chat_id) + " id=" + std::to_string(id));
+		} else {
+			fClient.SendMessage(u.chat_id,
+				"No session #" + std::to_string(id)
+				+ ". Use /sessions to list.");
+		}
+		return true;
+	}
+
+	if (cmd == "/whoami") {
+		int activeId = 0;
+		reg.ActiveFor(u.chat_id, &activeId);
+		if (activeId == 0) {
+			fClient.SendMessage(u.chat_id,
+				"Not attached to any session. Use /sessions then /session N.");
+		} else {
+			std::string label;
+			for (const auto& e : reg.List())
+				if (e.id == activeId) label = e.title;
+			fClient.SendMessage(u.chat_id,
+				"Attached to session #" + std::to_string(activeId)
+				+ (label.empty() ? "" : " (" + label + ")") + ".");
+		}
+		return true;
+	}
+
+	return false;
 }
 
 // Handle slash commands that do NOT require a Claude turn — i.e. every
@@ -779,6 +1247,10 @@ void RemoteControl::WorkLoop() {
 			job = fWorkQueue.front();
 			fWorkQueue.pop_front();
 		}
+		// Session registry commands (/sessions, /session N, /whoami) are
+		// handled first and never block on a turn, so a phone can list and
+		// switch sessions even while a Claude turn is running.
+		if (TryHandleSessionCommand(job)) continue;
 		// Slash commands that don't invoke Claude are handled here
 		// immediately — without waiting for AcquireTurn() — so the
 		// Telegram user can always use /help, /mute, /new, etc. even
@@ -804,21 +1276,17 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	const std::string who = u.username.empty()
 		? std::to_string(u.user_id) : u.username;
 
-	// The poller thread runs while libedit has the cursor parked on
-	// the fixed input row. Save cursor, blank the input row so the
-	// "> " prompt doesn't sit there while we process the remote turn,
-	// then move to the scroll-region bottom for chat output.
-	// The RAII guard restores the cursor and repaints the prompt on
-	// every exit path so libedit's input row is always visible again.
-	std::cout << "\x1b""7";          // save cursor
-	tui::ClearInputRow();            // hide libedit's "> " prompt
+	// Save cursor, blank the input row, move to scroll-region bottom.
+	// RAII guard restores on every exit path so libedit stays clean.
+	std::cout << "\x1b""7";
+	tui::ClearInputRow();
 	tui::PositionCursorForChat();
 	const std::string user_prompt = tui::UserPrompt();
 	struct CursorGuard {
 		const std::string& prompt;
 		~CursorGuard() {
-			tui::RepaintInputRow(prompt);  // restore "> " on the input row
-			std::cout << "\x1b""8" << std::flush; // restore saved cursor pos
+			tui::RepaintInputRow(prompt);
+			std::cout << "\x1b""8" << std::flush;
 		}
 	} _guard{user_prompt};
 
@@ -827,27 +1295,20 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 			 + " text=" + u.text);
 
 	if (u.text == "/mute") {
-		if (!g_muted.exchange(true)) {
-			fClient.SendMessage(u.chat_id,
-				"Remote muted. No replies until /unmute.");
-		}
+		if (!g_muted.exchange(true))
+			fClient.SendMessage(u.chat_id, "Remote muted. No replies until /unmute.");
 		return;
 	}
 	if (u.text == "/unmute") {
-		if (g_muted.exchange(false)) {
-			fClient.SendMessage(u.chat_id,
-				"Remote unmuted. Replies will be sent again.");
-		}
+		if (g_muted.exchange(false))
+			fClient.SendMessage(u.chat_id, "Remote unmuted. Replies will be sent again.");
 		return;
 	}
-	// /new is a Telegram-friendly alias for /clear.
 	if (u.text == "/new") {
 		fUserMessages.erase(u.user_id);
 		TgSend(u.chat_id, "(history cleared)");
 		return;
 	}
-	// All other slash commands go through commands::Dispatch.
-	// /exit, /quit, and /remote-control are not meaningful here.
 	if (!u.text.empty() && u.text.front() == '/') {
 		const std::string cmd_word = u.text.substr(0, u.text.find(' '));
 		if (cmd_word == "/exit" || cmd_word == "/quit"
@@ -862,27 +1323,20 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 
 		json& messages_ref = fUserMessages[u.user_id];
 		if (!messages_ref.is_array()) messages_ref = json::array();
-		// Throwaway locals for the LoopCtx fields that Dispatch may
-		// update (/model, /compact, etc.) — RemoteControl doesn't
-		// track session totals per user.
-		int    rc_turn   = 0;
-		int    rc_in     = 0;
-		int    rc_out    = 0;
+		int    rc_turn = 0, rc_in = 0, rc_out = 0;
 		bool   rc_notify = false;
 		double rc_thresh = 60.0;
 		std::vector<std::string> rc_urls;
-		json   rc_prices = json::object();
+		json rc_prices = json::object();
 		commands::LoopCtx ctx{fAuthGetter(), fCfgMaxTokens, fCustomSystem, rc_prices,
 		                      fCfgModel, rc_turn, rc_in, rc_out,
-		                      messages_ref, rc_urls, rc_notify, rc_thresh,
-		                      {}};
+		                      messages_ref, rc_urls, rc_notify, rc_thresh, {}};
 		std::string passthrough;
 		const commands::SlashAction action = commands::Dispatch(dispatched, ctx, passthrough);
-
 		std::cout.rdbuf(old_buf);
 		const std::string output = capture.str();
 
-		// Strip ANSI escape sequences before sending to Telegram.
+		// Strip ANSI before sending to Telegram.
 		std::string plain;
 		plain.reserve(output.size());
 		for (size_t i = 0; i < output.size(); ) {
@@ -893,9 +1347,7 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 						&& output[i] != 'H' && output[i] != 'A'
 						&& output[i] != 'B' && output[i] != 'J') ++i;
 				if (i < output.size()) ++i;
-			} else {
-				plain += output[i++];
-			}
+			} else { plain += output[i++]; }
 		}
 		while (!plain.empty() && (plain.front() == '\n' || plain.front() == ' '))
 			plain.erase(plain.begin());
@@ -904,178 +1356,109 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 
 		if (action == commands::SlashAction::Passthrough) {
 			u.text = passthrough;
-			// Fall through to normal prompt handling below.
+			// Fall through to normal Claude turn below.
 		} else {
 			if (!plain.empty()) TgSend(u.chat_id, plain);
 			return;
 		}
 	}
 
+	// ── Claude turn via TelegramSink ──────────────────────────────────────
 	json& msgs = fUserMessages[u.user_id];
 	if (!msgs.is_array()) msgs = json::array();
 
 	fActiveChatId.store(u.chat_id);
 
-	// Post a placeholder and start a streaming-edit updater thread.
-	const int64_t placeholder_id = [&]() -> int64_t {
-		if (g_muted.load()) return 0;
-		return fClient.SendMessageWithId(u.chat_id, "\xE2\x80\xA6"); // …
-	}();
+	// Resolve which live session this chat is attached to (Phase 2a). The
+	// resolved entry supplies the conversation history and a factory for a
+	// window-bound mirror sink so the reply streams into the target
+	// window's GUI as well as the phone. Falls back to the legacy
+	// fSharedHistory* members when no entry resolves (single-surface CLI
+	// or an unrouted chat), preserving the original behaviour.
+	SessionRegistry::Entry routed;
+	const bool haveRoute = SessionRegistry::Instance().Resolve(u.chat_id, &routed);
 
-	api::StreamProgress progress;
-	api::g_stream_progress = &progress;
-	std::atomic<bool> updater_running { true };
-	int               last_version = 0;
-	int               dot_phase    = 0;
-	std::thread updater([&]() {
-		while (updater_running.load()) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-			if (!updater_running.load()) break;
-			if (api::g_telegram_updater_paused.load()) continue;
-			if (placeholder_id == 0) continue;
-
-			// While a tool is actively running, show its name.
-			std::string tool_ph;
-			{
-				std::lock_guard<std::mutex> lk(progress.mu);
-				tool_ph = progress.tool_phase;
-			}
-			if (!tool_ph.empty()) {
-				fClient.EditMessageText(u.chat_id, placeholder_id, tool_ph);
-				continue;
-			}
-
-			const int v = progress.version.load(std::memory_order_relaxed);
-			if (v == last_version) {
-				static const char* kDots[] = {
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA6",
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA4",
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4",
-					"\xE2\x8F\xB3 thinking\xE2\x80\xA4\xE2\x80\xA4\xE2\x80\xA4",
-				};
-				fClient.EditMessageText(u.chat_id, placeholder_id,
-										kDots[dot_phase % 4]);
-				++dot_phase;
-			} else {
-				last_version = v;
-				std::string snap;
-				{ std::lock_guard<std::mutex> lk(progress.mu); snap = progress.text; }
-				if (!snap.empty())
-					fClient.EditMessageText(u.chat_id, placeholder_id,
-											snap + " \xE2\x96\x8C"); // ▌
-			}
-		}
-	});
+	auto historyProvider = (haveRoute && routed.historyProvider)
+		? routed.historyProvider : fSharedHistory;
+	auto historyAppender = (haveRoute && routed.historyAppender)
+		? routed.historyAppender : fSharedHistoryAppend;
 
 	const json snapshot = msgs;
 	msgs.push_back({{"role", "user"}, {"content", u.text}});
 
-	// Build the call array passed to SendWithTools. When a shared-
-	// history provider is registered (the common interactive case),
-	// prepend a snapshot of the local REPL's messages so Claude sees
-	// the full conversation from both sides. The snapshot is taken
-	// here, under the turn lock, so it is always consistent with the
-	// most recently completed local turn. The Telegram user's own
-	// thread (fUserMessages) is appended after the shared prefix so
-	// their prior remote exchanges are preserved too.
-	//
-	// When no provider is set (standalone bridge or explicitly
-	// disabled), fall back to the original per-user silo behaviour.
+	// Build the messages array: routed session's shared history (if any) +
+	// this user's per-chat thread.
 	json call_msgs;
-	if (fSharedHistory) {
-		call_msgs = fSharedHistory(); // snapshot of local messages[]
-		// Append this user's Telegram-side thread on top.
+	if (historyProvider) {
+		call_msgs = historyProvider();
 		for (const auto& m : msgs) call_msgs.push_back(m);
 	} else {
 		call_msgs = msgs;
 	}
 
-	api::g_non_interactive_tools             = true;
-	api::g_non_interactive_allow_destructive = fAllowDestructive;
-
-	// Piggyback on the REPL session's auth — the interactive loop
-	// already calls ResolveAuth() before every turn, so fAuthGetter
-	// returns a token that is always live and never needs refreshing
-	// here. If for some reason it comes back None (e.g. standalone
-	// bridge mode with a dead API key), bail with a clear error.
 	const config::Auth auth = fAuthGetter();
 	if (auth.kind == config::AuthKind::None) {
-		updater_running.store(false);
-		if (updater.joinable()) updater.join();
-		api::g_stream_progress = nullptr;
-		msgs = snapshot;
 		const std::string err =
-			"(error: authentication expired \xE2\x80\x94 run `claude logout && claude login` on the server)";
-		if (!g_muted.load()) {
-			if (placeholder_id)
-				fClient.EditMessageText(u.chat_id, placeholder_id, err);
-			else
-				fClient.SendMessage(u.chat_id, err);
-		}
-		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> auth expired");
+			"(error: authentication expired \xE2\x80\x94 "
+			"run `claude logout && claude login` on the server)";
+		if (!g_muted.load()) fClient.SendMessage(u.chat_id, err);
+		msgs = snapshot;
+		config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
+				 + " -> auth expired");
 		fActiveChatId.store(fPrimaryUserId);
 		return;
+	}
+
+	// Stack-allocate TelegramSink for the lifetime of this one turn.
+	// No globals needed — the sink carries all state internally.
+	TelegramSink tg_sink(fClient, u.chat_id, fAllowDestructive,
+	                     fAllowedTools, fPermQueue);
+
+	if (!g_muted.load())
+		tg_sink.BeginMessage("assistant");
+
+	// When the routed session offers a window-bound mirror, build it and
+	// tee the reply into both the phone and that window's GUI. The phone
+	// (TelegramSink) is the PRIMARY sink so permission prompts go to the
+	// person who sent the prompt; the window GuiSink is a passive mirror.
+	std::unique_ptr<OutputSink> mirror;
+	std::unique_ptr<TeeSink>    tee;
+	OutputSink* active = &tg_sink;
+	if (haveRoute && routed.sinkFactory) {
+		mirror = routed.sinkFactory();
+		if (mirror) {
+			tee = std::make_unique<TeeSink>(&tg_sink, mirror.get());
+			active = tee.get();
+		}
 	}
 
 	std::cout << tui::ClaudePrompt();
 	const std::string effective_system = config::ComposeSystem(fCustomSystem);
 	const auto result = api::SendWithTools(auth, fCfgModel, fCfgMaxTokens,
-										    call_msgs, effective_system);
+	                                       call_msgs, effective_system,
+	                                       g_muted.load() ? nullptr : active);
 	std::cout << "\n";
-	api::g_non_interactive_tools = false;
-	// Restore active chat to primary so any local-turn permission
-	// prompts (after this Telegram turn) go to the right place.
 	fActiveChatId.store(fPrimaryUserId);
 
-	updater_running.store(false);
-	if (updater.joinable()) updater.join();
-	api::g_stream_progress = nullptr;
+	if (!g_muted.load())
+		tg_sink.EndMessage();
 
 	if (result.exit_code != 0 || result.assistant_text.empty()) {
 		msgs = snapshot;
-		const std::string err = "(error: Claude did not return a response)";
-		if (placeholder_id)
-			fClient.EditMessageText(u.chat_id, placeholder_id, err);
-		else if (!g_muted.load())
-			fClient.SendMessage(u.chat_id, err);
-		config::LogLine("remote-control tx user=" + std::to_string(u.user_id) + " -> error");
+		config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
+				 + " -> error");
 		return;
 	}
 
-	// Numbered options → inline keyboard buttons.
-	std::vector<std::vector<Button>> keyboard;
-	const auto options = models::ExtractNumberedOptions(result.assistant_text);
-	for (const auto& opt : options) {
-		Button b;
-		b.text          = opt.first + ". " + opt.second;
-		b.callback_data = opt.first;
-		keyboard.push_back({ std::move(b) });
-	}
-
-	if (!g_muted.load()) {
-		if (placeholder_id) {
-			if (!fClient.EditMessageText(u.chat_id, placeholder_id,
-											result.assistant_text, keyboard)) {
-				fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
-			}
-		} else {
-			fClient.SendMessage(u.chat_id, result.assistant_text, keyboard);
-		}
-	}
-
-	// Append the assistant reply to this user's Telegram message
-	// silo so their subsequent turns have full context.
-	const json assistant_msg = {{"role", "assistant"}, {"content", result.assistant_text}};
+	// Append to this user's Telegram thread for context on next turn.
+	const json assistant_msg = {{"role", "assistant"},
+	                             {"content", result.assistant_text}};
 	msgs.push_back(assistant_msg);
 
-	// Write the user+assistant pair back into the local REPL's
-	// shared messages[] so the exchange appears in the local scroll
-	// history and is saved to history.json. The user message was
-	// already pushed onto msgs above (before SendWithTools); we
-	// retrieve it as the last-but-one element of msgs.
-	if (fSharedHistoryAppend) {
-		const json user_msg = msgs[msgs.size() - 2]; // the user turn we pushed
-		fSharedHistoryAppend(user_msg, assistant_msg);
+	// Write-back to the routed session's local history (REPL/GUI).
+	if (historyAppender) {
+		const json user_msg = msgs[msgs.size() - 2];
+		historyAppender(user_msg, assistant_msg);
 	}
 
 	config::LogLine("remote-control tx user=" + std::to_string(u.user_id)
