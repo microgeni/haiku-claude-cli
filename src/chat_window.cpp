@@ -919,7 +919,7 @@ void TokenBar::Draw(BRect updateRect)
 	}
 	if (fRemote) {
 		const std::string badge = "\xF0\x9F\x93\xA1 REMOTE"; // 📡
-		SetHighColor(60, 180, 200, 255); // cyan, distinct from the amber ludicrous tone
+		SetHighColor(80, 200, 80, 255); // green, matching the CLI's "Remote Control active"
 		MovePenTo(statsLeft, baseline);
 		DrawString(badge.c_str());
 		statsLeft += f.StringWidth(badge.c_str()) + f.StringWidth(sep.c_str());

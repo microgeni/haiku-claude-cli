@@ -17,7 +17,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   turn is synced back into the local history and auto-saved. Invalid or
   missing `telegram` config produces a clear in-chat explanation instead
   of failing silently. While active, the Tools menu item shows a checkmark
-  and the token bar displays a cyan **📡 REMOTE** badge.
+  and the token bar displays a green **📡 REMOTE** badge.
 - **GUI: Ludicrous-mode indicator** — when Tools ▸ Ludicrous Mode is
   enabled, the token bar now shows an amber **⚡ LUDICROUS** badge so the
   auto-approve state is always visible, matching the CLI's status-bar
