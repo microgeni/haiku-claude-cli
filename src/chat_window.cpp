@@ -3446,6 +3446,20 @@ void ChatWindow::_ToggleRemote()
 			cfg,
 			[this] { return fAuth; },
 			fSystemPrompt);
+
+		// Preflight before starting threads: catch an invalid token or a
+		// 409 Conflict (another instance polling the same bot) up front, so
+		// we report a clear reason instead of a badge that lies.
+		std::string preflightWhy;
+		if (!fRemote->Preflight(&preflightWhy)) {
+			fRemote.reset();
+			if (fRemoteItem) fRemoteItem->SetMarked(false);
+			if (fTokenBar)   fTokenBar->SetRemote(false);
+			_AppendToolLine("\xF0\x9F\x93\xA1 Remote control: "
+				+ preflightWhy + "\n");
+			return;
+		}
+
 		if (fRemote->Start()) {
 			// Share the GUI's conversation so remote turns see both sides of
 			// the dialogue (mirrors the CLI). The provider snapshots fMessages
@@ -4009,8 +4023,42 @@ void ChatWindow::_LoadSession(const std::string& path)
 
 	// Replay the conversation into the output view so the user can see it.
 	for (const auto& turn : fMessages) {
-		const std::string role    = turn.value("role", "");
-		const std::string content = turn.value("content", "");
+		if (!turn.is_object()) continue;
+		const std::string role = turn.value("role", "");
+
+		// Sessions that used tools store "content" as an array of
+		// content blocks (text / tool_use / tool_result), not a plain
+		// string. Flatten it to displayable text; calling
+		// turn.value("content", "") on an array throws type_error.302
+		// and aborts the whole app.
+		std::string content;
+		if (turn.contains("content")) {
+			const nlohmann::json& c = turn["content"];
+			if (c.is_string()) {
+				content = c.get<std::string>();
+			} else if (c.is_array()) {
+				for (const auto& block : c) {
+					if (!block.is_object()) continue;
+					const std::string type = block.value("type", "");
+					if (type == "text") {
+						content += block.value("text", "");
+					} else if (type == "tool_use") {
+						content += "\n> \xF0\x9F\x94\xA7 tool call: "
+						         + block.value("name", "?") + "\n";
+					} else if (type == "tool_result") {
+						const auto& rc = block.contains("content")
+							? block["content"] : nlohmann::json();
+						if (rc.is_string())
+							content += rc.get<std::string>();
+						else if (rc.is_array())
+							for (const auto& cb : rc)
+								if (cb.is_object()
+								    && cb.value("type", "") == "text")
+									content += cb.value("text", "");
+					}
+				}
+			}
+		}
 		if (content.empty()) continue;
 
 		if (role == "user") {

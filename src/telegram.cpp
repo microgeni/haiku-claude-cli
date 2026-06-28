@@ -357,11 +357,76 @@ bool Client::PostJson(const std::string& method, const std::string& body,
 	return true;
 }
 
+// Synchronous getMe health check. Returns true and the bot is reachable
+// and the token valid; otherwise sets *reason. Note: getMe does NOT detect
+// a getUpdates Conflict (another poller) — that only shows up on the first
+// getUpdates call, which the poll loop now logs.
+bool Client::Preflight(std::string* reason) {
+	if (fToken.empty()) {
+		if (reason) *reason = "no bot_token configured";
+		return false;
+	}
+	std::string response;
+	if (!PostJson("getMe", json::object().dump(), &response, 15)) {
+		if (reason) *reason = "network error contacting api.telegram.org";
+		return false;
+	}
+	try {
+		const json j = json::parse(response);
+		if (!j.value("ok", false)) {
+			if (reason)
+				*reason = "Telegram rejected the token: "
+					+ j.value("description", std::string("unknown error"));
+			return false;
+		}
+	} catch (const std::exception& e) {
+		if (reason) *reason = std::string("bad response from Telegram: ") + e.what();
+		return false;
+	}
+	return true;
+}
+
+// One short getUpdates probe to detect the 409 Conflict that getMe cannot
+// see. timeout=0 makes Telegram return immediately. Does not advance the
+// offset meaningfully (a fresh poll loop will re-fetch). Returns true when
+// polling is available.
+bool Client::CheckPollAvailable(std::string* reason) {
+	const json body = {
+		{"offset",          fNextOffset},
+		{"timeout",         0},
+		{"allowed_updates", json::array({"message", "callback_query"})},
+	};
+	std::string response;
+	if (!PostJson("getUpdates", body.dump(), &response, 15)) {
+		if (reason) *reason = "network error contacting api.telegram.org";
+		return false;
+	}
+	try {
+		const json j = json::parse(response);
+		if (!j.value("ok", false)) {
+			const std::string desc = j.value("description", std::string{});
+			if (desc.find("Conflict") != std::string::npos) {
+				if (reason)
+					*reason = "another bot instance is already polling this "
+						"token (close any other Claude session or app using the "
+						"same Telegram bot, then try again)";
+			} else if (reason) {
+				*reason = desc.empty() ? "getUpdates failed" : desc;
+			}
+			return false;
+		}
+	} catch (const std::exception& e) {
+		if (reason) *reason = std::string("bad response from Telegram: ") + e.what();
+		return false;
+	}
+	return true;
+}
+
 std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_running) {
 	const json body = {
 		{"offset",          fNextOffset},
 		{"timeout",         timeout_sec},
-		{"fAllowedupdates", json::array({"message", "callback_query"})},
+		{"allowed_updates", json::array({"message", "callback_query"})},
 	};
 
 	std::string response;
@@ -374,7 +439,17 @@ std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_runnin
 	std::vector<Update> out;
 	try {
 		const json j = json::parse(response);
-		if (!j.value("ok", false)) return out;
+		if (!j.value("ok", false)) {
+			// Surface Telegram's error so failures aren't silent. The most
+			// common one is HTTP 409 "Conflict: terminated by other
+			// getUpdates request" — another bot instance (a CLI session or a
+			// second app) is already long-polling the same token. Only one
+			// getUpdates consumer per bot is allowed.
+			const std::string desc = j.value("description", std::string{});
+			config::LogLine("telegram getUpdates not ok: "
+				+ (desc.empty() ? response.substr(0, 200) : desc));
+			return out;
+		}
 		if (!j.contains("result") || !j["result"].is_array()) return out;
 
 		for (const auto& entry : j["result"]) {
@@ -637,6 +712,12 @@ RemoteControl::~RemoteControl() { Stop(); }
 
 bool RemoteControl::Running() const { return fRunning.load(); }
 
+bool RemoteControl::Preflight(std::string* reason) {
+	if (!fClient.Preflight(reason)) return false;
+	if (!fClient.CheckPollAvailable(reason)) return false;
+	return true;
+}
+
 bool RemoteControl::Start() {
 	if (fRunning.load()) return false;
 	// Determine the primary user for local mirroring —
@@ -698,11 +779,16 @@ void RemoteControl::SendPromptNotice(const std::string& user_text) {
 }
 
 void RemoteControl::PollLoop() {
-	while (fRunning.load() && !g_interrupted) {
+	// Gate solely on fRunning, not the global g_interrupted: in the GUI
+	// g_interrupted is repurposed as a per-turn cancel flag, so consulting
+	// it here would stop the poller the moment any chat turn is cancelled.
+	// Stop() flips fRunning and aborts the in-flight long-poll via the
+	// keep_running pointer handed to Client::poll.
+	while (fRunning.load()) {
 		const auto updates = fClient.poll(10, &fRunning);
-		if (!fRunning.load() || g_interrupted) break;
+		if (!fRunning.load()) break;
 		for (const auto& u : updates) {
-			if (!fRunning.load() || g_interrupted) break;
+			if (!fRunning.load()) break;
 			if (!fAllowed.count(u.user_id)) {
 				config::LogLine("remote-control reject user=" + std::to_string(u.user_id));
 				continue;

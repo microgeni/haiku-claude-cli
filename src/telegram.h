@@ -124,6 +124,19 @@ public:
 
 	const std::string& token() const { return fToken; }
 
+	// Synchronous health check: calls getMe and returns true when the bot
+	// token authenticates. On failure, *reason (if non-null) is set to a
+	// human-readable explanation (network error, invalid token, etc.).
+	// Used as a preflight before starting the poll loop so problems surface
+	// immediately instead of failing silently inside getUpdates.
+	bool Preflight(std::string* reason = nullptr);
+
+	// One short getUpdates probe. Returns true when polling is available;
+	// on failure *reason is set. Crucially this catches the HTTP 409
+	// "Conflict: terminated by other getUpdates request" that getMe cannot
+	// see — i.e. another bot instance already long-polling the same token.
+	bool CheckPollAvailable(std::string* reason = nullptr);
+
 private:
 	std::string ApiUrl(const std::string& method) const;
 	bool PostJson(const std::string& method,
@@ -262,6 +275,13 @@ public:
 	bool Start();
 	void Stop();
 	bool Running() const;
+
+	// Synchronous preflight: verifies the token authenticates (getMe) and
+	// that polling is available (a short getUpdates that catches the 409
+	// Conflict from a second poller). Returns true when the bridge is safe
+	// to start; otherwise *reason explains why. Call before Start() so the
+	// GUI/CLI can report a clear failure instead of a silent dead poller.
+	bool Preflight(std::string* reason = nullptr);
 
 	// Serialise turns between the local REPL and the Telegram
 	// worker. AcquireTurn() blocks until no other turn is in
