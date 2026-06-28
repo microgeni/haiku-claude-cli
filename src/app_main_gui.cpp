@@ -244,6 +244,21 @@ public:
 				if (arg == "--line") next(i);
 			}
 		}
+
+		// Diagnostic: stash the raw argv so ReadyToRun can log it once
+		// logging is initialized (LogLine is a no-op before InitLogging,
+		// which runs after ArgvReceived).
+		fRawArgv.clear();
+		for (int32 i = 0; i < argc; i++) {
+			if (i) fRawArgv += ' ';
+			fRawArgv += argv[i];
+		}
+
+		// Apply the flag here as well as in ReadyToRun: on a re-launch into
+		// an already-running instance ReadyToRun does not run again, so
+		// setting it only there would miss the Genio provenance.
+		if (fFromGenio)
+			editor::SetLaunchedFromGenio(true);
 	}
 
 	void ReadyToRun() override
@@ -252,6 +267,9 @@ public:
 		// max_tokens, system prompt, hooks, and MCP servers.
 		const config::Config cfg = config::Load();
 		config::InitLogging(cfg.logging_enabled);
+		config::LogLine("gui ReadyToRun fromGenio="
+			+ std::string(fFromGenio ? "yes" : "no")
+			+ " argv=[" + fRawArgv + "]");
 		hooks::Load(cfg.hooks);
 		mcp::Init(cfg.mcp_servers);
 
@@ -333,6 +351,7 @@ public:
 private:
 	std::string    fWorkingDir; // resolved from -w / --working-dir or env.
 	bool           fFromGenio = false; // launched via Genio Tools ▸ Claude.
+	std::string    fRawArgv;    // joined argv, logged once in ReadyToRun.
 	config::Auth   fAuth;       // spawn parameters captured in ReadyToRun.
 	std::string    fModel;
 	int            fMaxTokens = 0;

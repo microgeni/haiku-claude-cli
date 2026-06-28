@@ -69,8 +69,12 @@ OpenInGenio(const std::string& path, int line)
 		// ref straight to the live instance instead of starting a new one.
 		BMessenger genio(kGenioSignature);
 		status = genio.SendMessage(&refs);
+		config::LogLine("OpenInGenio: sent ref to running Genio for '" + path
+			+ "' status=" + strerror(status));
 	} else {
 		status = roster.Launch(kGenioSignature, &refs);
+		config::LogLine("OpenInGenio: launched Genio for '" + path
+			+ "' status=" + strerror(status));
 	}
 
 	if (status != B_OK && status != B_ALREADY_RUNNING) {
@@ -93,10 +97,15 @@ OpenInGenio(const std::string&, int)
 void
 NotifyFileChanged(const std::string& toolName, const std::string& path, int line)
 {
-	if (!LaunchedFromGenio())
-		return;
 	if (toolName != "Write" && toolName != "Edit")
 		return;
+	if (!LaunchedFromGenio()) {
+		config::LogLine("NotifyFileChanged: skipped (" + toolName + " " + path
+			+ ") — not launched from Genio");
+		return;
+	}
+	config::LogLine("NotifyFileChanged: " + toolName + " -> opening in Genio: "
+		+ path + " line=" + std::to_string(line));
 	OpenInGenio(path, line);
 }
 
