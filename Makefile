@@ -120,6 +120,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/agents.cpp      \
     $(SRCDIR)/commands.cpp    \
     $(SRCDIR)/config.cpp      \
+    $(SRCDIR)/editor_integration.cpp \
     $(SRCDIR)/hooks.cpp       \
     $(SRCDIR)/mcp.cpp         \
     $(SRCDIR)/models.cpp      \

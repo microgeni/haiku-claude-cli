@@ -17,6 +17,7 @@
 #include "api.h"
 #include "commands.h"
 #include "config.h"
+#include "editor_integration.h"
 #include "hooks.h"
 #include "mcp.h"
 #include "oauth.h"
@@ -210,14 +211,37 @@ public:
 
 	// Called by the app server when the binary is launched with arguments.
 	// Parses -w / --working-dir <path> and stores it for ReadyToRun().
+	//
+	// Genio's Tools ▸ Claude extension launcher also passes the active
+	// project and file: --project-dir <path>, --file <path>, --line <n>.
+	// Their presence means we were started by Genio, so we mark the editor
+	// integration live (Claude's file writes/edits open back in Genio) and
+	// adopt --project-dir as the working directory.
 	void ArgvReceived(int32 argc, char** argv) override
 	{
+		auto next = [&](int32& i) -> std::string {
+			return (i + 1 < argc) ? std::string(argv[++i]) : std::string();
+		};
+
 		for (int32 i = 1; i < argc; i++) {
 			std::string arg = argv[i];
 			if ((arg == "-w" || arg == "--working-dir") && i + 1 < argc) {
 				fWorkingDir = argv[++i];
 			} else if (arg.rfind("--working-dir=", 0) == 0) {
 				fWorkingDir = arg.substr(14);
+			} else if (arg == "--project-dir") {
+				fWorkingDir = next(i);
+				fFromGenio  = true;
+			} else if (arg.rfind("--project-dir=", 0) == 0) {
+				fWorkingDir = arg.substr(14);
+				fFromGenio  = true;
+			} else if (arg == "--file" || arg.rfind("--file=", 0) == 0) {
+				// We don't seed the file as context yet, but its presence is
+				// part of Genio's launch contract — treat it as provenance.
+				if (arg == "--file") next(i);
+				fFromGenio = true;
+			} else if (arg == "--line" || arg.rfind("--line=", 0) == 0) {
+				if (arg == "--line") next(i);
 			}
 		}
 	}
@@ -267,6 +291,11 @@ public:
 				fWorkingDir = env;
 		}
 
+		// Activate the Genio round-trip if we were launched from its
+		// Tools ▸ Claude menu. From here on, files Claude writes or edits
+		// are opened back in the live Genio editor.
+		editor::SetLaunchedFromGenio(fFromGenio);
+
 		// Remember the spawn parameters so File ▸ New Session can create
 		// additional windows with the same auth/config.
 		fAuth      = auth;
@@ -303,6 +332,7 @@ public:
 
 private:
 	std::string    fWorkingDir; // resolved from -w / --working-dir or env.
+	bool           fFromGenio = false; // launched via Genio Tools ▸ Claude.
 	config::Auth   fAuth;       // spawn parameters captured in ReadyToRun.
 	std::string    fModel;
 	int            fMaxTokens = 0;

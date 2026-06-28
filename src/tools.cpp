@@ -1456,6 +1456,33 @@ ToolResult Run(const std::string& name, const json& input) {
 	return {"error: unknown tool " + name, true};
 }
 
+int EditedLine(const std::string& name, const json& input) {
+	if (name == "Write")
+		return 1; // top of the new/overwritten file
+
+	if (name == "Edit") {
+		const std::string path  = input.value("path",       std::string{});
+		const std::string old_s = input.value("old_string", std::string{});
+		if (path.empty() || old_s.empty())
+			return 0;
+
+		// Recompute the first match position from the *current* file. Called
+		// after run_edit has written, but old_string no longer exists in the
+		// new content, so read what's on disk and locate where new_string
+		// landed instead; fall back to line 1 if anything is off.
+		const std::string content = read_file_all(path);
+		const std::string new_s   = input.value("new_string", std::string{});
+		const size_t match = new_s.empty() ? std::string::npos
+		                                   : content.find(new_s);
+		if (match == std::string::npos)
+			return 1;
+		return static_cast<int>(
+			std::count(content.begin(), content.begin() + match, '\n')) + 1;
+	}
+
+	return 0;
+}
+
 bool RequiresPermission(const std::string& name) {
 	if (name == "Bash" || name == "Write" || name == "Edit") return true;
 #ifdef __HAIKU__

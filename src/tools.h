@@ -52,6 +52,13 @@ std::string ArgSummary(const std::string& name, const json& input,
 // (file not found). Currently supports Edit and Write.
 std::string GuiDiff(const std::string& name, const json& input);
 
+// The 1-based line number an editor should jump to after a Write or Edit,
+// computed from the same input the tool ran with. For Edit it is the line of
+// the first replaced occurrence of old_string; for Write it is line 1 (top of
+// the new/overwritten file). Returns 0 for tools with no meaningful position.
+// Used to drive cursor placement when reopening edited files in the IDE.
+int EditedLine(const std::string& name, const json& input);
+
 } // namespace tools
 
 #endif

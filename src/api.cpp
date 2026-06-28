@@ -21,6 +21,7 @@
 #include <curl/curl.h>
 
 #include "agents.h"
+#include "editor_integration.h"
 #include "hooks.h"
 #include "output_sink.h"
 #include "repl.h"
@@ -979,6 +980,14 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 
 			if (tname == "Read" && !tres.is_error)
 				config::AutoWriteSummaryIfMissing(tinput.value("path", std::string{}), tres.content);
+
+			// When launched from Genio (Tools ▸ Claude), open each file
+			// Claude writes or edits in the live Genio editor, jumping the
+			// cursor to the edited line. Inert otherwise, so the CLI and a
+			// directly-launched GUI are unaffected.
+			if (!tres.is_error)
+				editor::NotifyFileChanged(tname, tinput.value("path", std::string{}),
+				                          tools::EditedLine(tname, tinput));
 
 #ifdef __HAIKU__
 			if (tname == "WriteAttr" && !tres.is_error) {
