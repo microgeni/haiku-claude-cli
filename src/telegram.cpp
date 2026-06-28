@@ -241,18 +241,23 @@ void TelegramSink::OnToolStatus(const std::string& phase) {
 		}
 		EditCurrent(/*final=*/false);
 	} else {
-		// Tool started. Extract name from "🔧 running Name…" format.
-		// OnToolStatus phase strings come from SendWithTools as
-		// "\xF0\x9F\x94\xA7 running <name>\xE2\x80\xA6" — extract the name.
+		// Tool started. Extract name (and optional ": args") from the
+		// "🔧 running <Name>: <args>…" format produced by SendWithTools.
 		const std::string prefix = " running ";
 		std::string name = phase;
+		std::string args;
 		const auto p = phase.find(prefix);
 		if (p != std::string::npos) {
 			name = phase.substr(p + prefix.size());
 			// Strip trailing …
 			while (!name.empty() && (unsigned char)name.back() > 127) name.pop_back();
+			const auto colon = name.find(": ");
+			if (colon != std::string::npos) {
+				args = name.substr(colon + 2);
+				name.resize(colon);
+			}
 		}
-		ToolStarted(name, "running");
+		ToolStarted(name, args.empty() ? "running" : args);
 	}
 }
 

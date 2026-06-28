@@ -352,7 +352,7 @@ std::string FindDefaultTheme()
 	if (readlink("/proc/self/exe", exe, sizeof(exe) - 1) > 0) {
 		std::string dir(exe);
 		auto sl = dir.rfind('/');
-		if (sl != std::string::npos) dir = dir.substr(0, sl);
+		if (sl != std::string::npos) dir.resize(sl);
 		// Walk up to project root (binary is in build/).
 		std::string p = dir + "/../assets/data/styles/dark.yaml";
 		struct stat st;
@@ -384,7 +384,7 @@ std::string FindLanguagesDir()
 	if (readlink("/proc/self/exe", exe, sizeof(exe) - 1) > 0) {
 		std::string dir(exe);
 		auto sl = dir.rfind('/');
-		if (sl != std::string::npos) dir = dir.substr(0, sl);
+		if (sl != std::string::npos) dir.resize(sl);
 		std::string p = dir + "/../assets/data/languages";
 		struct stat st;
 		if (stat(p.c_str(), &st) == 0) return p;

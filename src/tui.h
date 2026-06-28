@@ -347,8 +347,10 @@ private:
 
 	std::string fLineBuffer;
 	std::string fCodeBlockLang;
+	std::string fDiffLang;          // lang hint for ```diff blocks (empty = plain)
 	std::string fResponsePrefix;
 	bool        fInCodeBlock     = false;
+	bool        fInDiffBlock     = false; // true while inside a ```diff fence
 	bool        fFirstOutputDone = false;
 	Spinner*    fSpinner           = nullptr;
 

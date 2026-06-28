@@ -35,6 +35,20 @@ bool RequiresPermission(const std::string& name);
 // already self-explanatory (Bash, Read, Glob, Grep).
 std::string Preview(const std::string& name, const json& input);
 
+// A compact, single-line summary of a tool's most salient argument
+// (the command for Bash, the path for Read/Write/Edit, the pattern for
+// Grep/Glob, etc.). Newlines are collapsed and the result is clamped to
+// ~80 chars so it fits on one status row. Used by the CLI status line,
+// the GUI tool log, and the Telegram bridge.
+std::string ArgSummary(const std::string& name, const json& input);
+
+// Structured diff for GUI display. Returns a header line followed by
+// diff lines, each prefixed with '+' (addition), '-' (removal), or ' '
+// (context). Lines are newline-terminated. Returns an empty string when
+// the tool produces no diff (e.g. Bash) or when the diff cannot be built
+// (file not found). Currently supports Edit and Write.
+std::string GuiDiff(const std::string& name, const json& input);
+
 } // namespace tools
 
 #endif

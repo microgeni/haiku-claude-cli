@@ -149,7 +149,7 @@ void GuiSink::OnToolStatus(const std::string& phase)
 			const auto colon = name.find(": ");
 			if (colon != std::string::npos) {
 				args = name.substr(colon + 2);
-				name = name.substr(0, colon);
+				name.resize(colon);
 			}
 		}
 		ToolStarted(name, args.empty() ? "running" : args);

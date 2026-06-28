@@ -1220,27 +1220,89 @@ std::string ErrorLabel() {
 
 namespace {
 
+// ── Colour palette (ANSI SGR 24-bit / 256-color codes) ───────────────────
+//
+//  kClrKeyword     bold magenta   — control-flow keywords (if/for/while…)
+//  kClrType        bold cyan      — built-in types (int/char/bool/void…)
+//  kClrPreproc     magenta        — C/C++ preprocessor lines (#include…)
+//  kClrString      green          — string / char literals
+//  kClrNumber      cyan           — numeric literals
+//  kClrComment     dim bright-blk — line and block comments
+//  kClrOperator    yellow         — C++ operators (::, ->, <<, &&…)
+//  kClrConstant    bold yellow    — UPPER_CASE identifiers (macros/enums)
+//  kClrBuiltin     bold green     — shell builtins / function names
+//  kClrVariable    cyan           — shell $VAR / ${VAR} expansions
+//  kClrSpecial     bold red       — shell special vars ($?, $#, $@…)
+//  kClrReset       reset fg       — back to terminal default foreground
+//
+static constexpr const char* kClrKeyword  = "\x1b[1;35m";
+static constexpr const char* kClrType     = "\x1b[1;36m";
+static constexpr const char* kClrPreproc  = "\x1b[35m";
+static constexpr const char* kClrString   = "\x1b[32m";
+static constexpr const char* kClrNumber   = "\x1b[36m";
+static constexpr const char* kClrComment  = "\x1b[2;90m";
+static constexpr const char* kClrOperator = "\x1b[33m";
+static constexpr const char* kClrConstant = "\x1b[1;33m";
+static constexpr const char* kClrBuiltin  = "\x1b[1;32m";
+static constexpr const char* kClrVariable = "\x1b[36m";
+static constexpr const char* kClrSpecial  = "\x1b[1;31m";
+static constexpr const char* kClrReset    = "\x1b[0m";
+static constexpr const char* kClrFgReset  = "\x1b[39m";
+
+// ── LangSpec ─────────────────────────────────────────────────────────────
+
 struct LangSpec {
-	const std::unordered_set<std::string>* keywords = nullptr;
-	bool has_slash_comment = false;  // //
-	bool has_hash_comment  = false;  // #
-	bool has_block_comment = false;  // /* */
-	bool has_single_string = false;  // '...'
-	bool has_numbers       = true;
-	bool has_preprocessor  = false;  // C/C++ #include etc.
+	const std::unordered_set<std::string>* keywords     = nullptr;
+	const std::unordered_set<std::string>* type_words   = nullptr; // highlighted as types
+	const std::unordered_set<std::string>* builtins     = nullptr; // highlighted as builtins
+	bool has_slash_comment  = false;  // // line comment
+	bool has_hash_comment   = false;  // # line comment
+	bool has_block_comment  = false;  // /* … */
+	bool has_single_string  = false;  // '…'
+	bool has_numbers        = true;
+	bool has_preprocessor   = false;  // C/C++ # directives
+	bool has_operators      = false;  // :: -> << >> && || operator colouring
+	bool has_shell_vars     = false;  // $VAR / ${VAR} / $( ) expansion
+	bool has_constants      = false;  // UPPER_CASE → kClrConstant
 };
 
+// ── Keyword / type / builtin tables ──────────────────────────────────────
+
+// C/C++ flow-control keywords (bold magenta).
 const std::unordered_set<std::string>& cpp_keywords() {
 	static const std::unordered_set<std::string> k = {
-		"auto","break","case","catch","char","class","const","constexpr","continue",
-		"default","delete","do","double","else","enum","explicit","extern","false",
-		"float","for","friend","goto","if","inline","int","long","namespace","new",
-		"noexcept","nullptr","operator","private","protected","public","return",
-		"short","signed","sizeof","static","static_cast","struct","switch","template",
-		"this","throw","true","try","typedef","typename","union","unsigned","using",
-		"virtual","void","volatile","while","bool","wchar_t","char16_t","char32_t",
-		"size_t","ssize_t","int8_t","int16_t","int32_t","int64_t","uint8_t","uint16_t",
-		"uint32_t","uint64_t","std"
+		"auto","break","case","catch","continue","default","delete","do","else",
+		"explicit","extern","for","friend","goto","if","inline","namespace","new",
+		"noexcept","operator","private","protected","public","return","sizeof",
+		"static","static_cast","dynamic_cast","reinterpret_cast","const_cast",
+		"switch","template","this","throw","try","typedef","typename","union",
+		"using","virtual","while","nullptr","true","false","class","struct","enum",
+		"constexpr","consteval","constinit","co_await","co_return","co_yield",
+		"requires","concept","export","import","module","override","final",
+		"alignas","alignof","decltype","noreturn","thread_local","static_assert"
+	};
+	return k;
+}
+
+// C/C++ built-in types (bold cyan).
+const std::unordered_set<std::string>& cpp_types() {
+	static const std::unordered_set<std::string> k = {
+		"void","bool","char","short","int","long","float","double","signed","unsigned",
+		"wchar_t","char8_t","char16_t","char32_t","size_t","ssize_t","ptrdiff_t",
+		"intptr_t","uintptr_t",
+		"int8_t","int16_t","int32_t","int64_t",
+		"uint8_t","uint16_t","uint32_t","uint64_t",
+		"int_fast8_t","int_fast16_t","int_fast32_t","int_fast64_t",
+		"uint_fast8_t","uint_fast16_t","uint_fast32_t","uint_fast64_t",
+		"int_least8_t","int_least16_t","int_least32_t","int_least64_t",
+		"uint_least8_t","uint_least16_t","uint_least32_t","uint_least64_t",
+		"intmax_t","uintmax_t",
+		"std","string","vector","map","unordered_map","set","unordered_set",
+		"pair","tuple","optional","variant","any","span","array","deque",
+		"list","forward_list","queue","stack","priority_queue",
+		"shared_ptr","unique_ptr","weak_ptr","atomic","mutex","thread",
+		"ifstream","ofstream","fstream","istringstream","ostringstream","stringstream",
+		"ostream","istream","iostream","FILE","DIR"
 	};
 	return k;
 }
@@ -1250,16 +1312,36 @@ const std::unordered_set<std::string>& py_keywords() {
 		"False","None","True","and","as","assert","async","await","break","class",
 		"continue","def","del","elif","else","except","finally","for","from","global",
 		"if","import","in","is","lambda","nonlocal","not","or","pass","raise","return",
-		"try","while","with","yield","self"
+		"try","while","with","yield","self","cls"
 	};
 	return k;
 }
 
+// Shell flow-control keywords (bold magenta).
 const std::unordered_set<std::string>& sh_keywords() {
 	static const std::unordered_set<std::string> k = {
 		"if","then","else","elif","fi","case","esac","for","while","do","done","in",
-		"function","select","until","return","break","continue","local","export",
-		"readonly","unset","set","shift","trap","true","false"
+		"function","select","until","return","break","continue","time",
+		"[[","]]","[[","]]"
+	};
+	return k;
+}
+
+// Shell builtins and commonly used commands (bold green).
+const std::unordered_set<std::string>& sh_builtins() {
+	static const std::unordered_set<std::string> k = {
+		// POSIX builtins
+		"echo","printf","read","local","export","readonly","unset","set","shift",
+		"trap","true","false","exit","exec","eval","source",".",
+		"test","[",
+		// Common external commands treated as builtins in scripts
+		"cd","pwd","ls","cat","grep","sed","awk","cut","sort","uniq","wc","head",
+		"tail","find","xargs","mkdir","rmdir","rm","cp","mv","ln","touch","chmod",
+		"chown","make","cmake","git","curl","wget","tar","gzip","zip","unzip",
+		"env","which","type","command","hash","alias","declare","typeset",
+		"mapfile","readarray","getopts","wait","jobs","fg","bg","kill","sleep",
+		"basename","dirname","realpath","stat","file","diff","patch","install",
+		"pkg-config","python","python3","perl","ruby","node","npm","pip"
 	};
 	return k;
 }
@@ -1279,39 +1361,44 @@ const std::unordered_set<std::string>& json_keywords() {
 	return k;
 }
 
+// ── lookup_lang ───────────────────────────────────────────────────────────
+
 bool lookup_lang(const std::string& lang, LangSpec& spec) {
-	const std::string l = [&]{
-		std::string s = lang;
-		for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-		return s;
-	}();
+	std::string l = lang;
+	for (auto& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
 	if (l == "cpp" || l == "c++" || l == "cxx" || l == "hpp" || l == "hxx" ||
-		l == "c"   || l == "h") {
-		spec.keywords        = &cpp_keywords();
-		spec.has_slash_comment = true;
-		spec.has_block_comment = true;
-		spec.has_single_string = true;
-		spec.has_preprocessor  = true;
+	    l == "c"   || l == "h") {
+		spec.keywords         = &cpp_keywords();
+		spec.type_words       = &cpp_types();
+		spec.has_slash_comment  = true;
+		spec.has_block_comment  = true;
+		spec.has_single_string  = true;
+		spec.has_preprocessor   = true;
+		spec.has_operators      = true;
+		spec.has_constants      = true;
 		return true;
 	}
 	if (l == "py" || l == "python") {
-		spec.keywords          = &py_keywords();
-		spec.has_hash_comment  = true;
-		spec.has_single_string = true;
+		spec.keywords           = &py_keywords();
+		spec.has_hash_comment   = true;
+		spec.has_single_string  = true;
 		return true;
 	}
 	if (l == "sh" || l == "bash" || l == "zsh" || l == "shell") {
-		spec.keywords          = &sh_keywords();
-		spec.has_hash_comment  = true;
-		spec.has_single_string = true;
-		spec.has_numbers       = false;
+		spec.keywords           = &sh_keywords();
+		spec.builtins           = &sh_builtins();
+		spec.has_hash_comment   = true;
+		spec.has_single_string  = true;
+		spec.has_numbers        = false;
+		spec.has_shell_vars     = true;
 		return true;
 	}
 	if (l == "rust" || l == "rs") {
-		spec.keywords          = &rust_keywords();
-		spec.has_slash_comment = true;
-		spec.has_block_comment = true;
+		spec.keywords           = &rust_keywords();
+		spec.has_slash_comment  = true;
+		spec.has_block_comment  = true;
+		spec.has_operators      = true;
 		return true;
 	}
 	if (l == "json") {
@@ -1321,117 +1408,444 @@ bool lookup_lang(const std::string& lang, LangSpec& spec) {
 	return false;
 }
 
-std::string highlight_with(const LangSpec& spec, const std::string& line) {
-	// C/C++ preprocessor: whole line if the first non-ws char is #.
+// ── highlight_with ────────────────────────────────────────────────────────
+//
+// Tokenises a single source line and emits ANSI SGR escape sequences for
+// each recognised token class.  The tokeniser is intentionally simple —
+// a one-pass scanner with no lookahead beyond the current character — but
+// covers the 95 % case for the languages we care about.
+//
+// Token priority (first match wins):
+//   1. C/C++ preprocessor directive  (whole line)
+//   2. Line comment  (// or #)
+//   3. Block comment  (/* … */)
+//   4. String literal  (" or ')
+//   5. Shell variable expansion  ($VAR, ${…}, $(...), $?, $#, $@…)
+//   6. Numeric literal
+//   7. Identifier → keyword / type / builtin / UPPER_CASE / plain
+//   8. C++ multi-char operators  (::, ->, <<, >>, &&, ||, !=, ==…)
+//   9. Fallthrough character
+
+static std::string highlight_with(const LangSpec& spec, const std::string& line) {
+	// C/C++ preprocessor: whole line when first non-ws char is '#'.
 	if (spec.has_preprocessor) {
 		size_t k = 0;
 		while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
 		if (k < line.size() && line[k] == '#') {
-			return std::string("\x1b[35m") + line + "\x1b[39m";
+			// Colour the directive keyword (e.g. "include") differently from
+			// the rest of the line so #include <file> reads clearly.
+			// Find end of directive word.
+			size_t dstart = k + 1;
+			while (dstart < line.size() && line[dstart] == ' ') ++dstart;
+			size_t dend = dstart;
+			while (dend < line.size() && std::isalpha(static_cast<unsigned char>(line[dend]))) ++dend;
+
+			std::string out;
+			out += line.substr(0, k);           // leading whitespace
+			out += kClrPreproc;
+			out += line.substr(k, dend - k);    // #directive
+			out += kClrFgReset;
+			if (dend < line.size()) {
+				// Rest of preprocessor line: strings in green, rest in preproc colour.
+				const std::string rest = line.substr(dend);
+				out += kClrPreproc;
+				// Highlight <file> and "file" parts in the rest.
+				size_t ri = 0;
+				while (ri < rest.size()) {
+					if (rest[ri] == '"') {
+						out += kClrString;
+						out += rest[ri++];
+						while (ri < rest.size() && rest[ri] != '"') out += rest[ri++];
+						if (ri < rest.size()) out += rest[ri++];
+						out += kClrPreproc;
+					} else if (rest[ri] == '<') {
+						out += kClrString;
+						out += rest[ri++];
+						while (ri < rest.size() && rest[ri] != '>') out += rest[ri++];
+						if (ri < rest.size()) out += rest[ri++];
+						out += kClrPreproc;
+					} else {
+						out += rest[ri++];
+					}
+				}
+				out += kClrReset;
+			} else {
+				out += kClrReset;
+			}
+			return out;
 		}
 	}
 
 	std::string out;
-	out.reserve(line.size() + 32);
+	out.reserve(line.size() + 64);
 	size_t i = 0;
 
+	// Helper: does line start with literal `lit` at position i?
 	auto starts_at = [&](const char* lit) {
 		const size_t n = std::char_traits<char>::length(lit);
 		return i + n <= line.size() && line.compare(i, n, lit) == 0;
 	};
 
 	while (i < line.size()) {
-		// Line comments
+
+		// ── Line comments ──────────────────────────────────────────────────
 		if (spec.has_slash_comment && starts_at("//")) {
-			out += "\x1b[2;90m";
+			out += kClrComment;
 			out += line.substr(i);
-			out += "\x1b[0m";
+			out += kClrReset;
 			break;
 		}
 		if (spec.has_hash_comment && line[i] == '#') {
-			out += "\x1b[2;90m";
+			out += kClrComment;
 			out += line.substr(i);
-			out += "\x1b[0m";
+			out += kClrReset;
 			break;
 		}
-		// Block comment opener — color to end of line (line-local).
+
+		// ── Block comment /* … */ ──────────────────────────────────────────
 		if (spec.has_block_comment && starts_at("/*")) {
-			out += "\x1b[2;90m";
+			out += kClrComment;
 			const size_t close = line.find("*/", i + 2);
 			if (close == std::string::npos) {
 				out += line.substr(i);
-				out += "\x1b[0m";
+				out += kClrReset;
 				break;
 			}
 			out += line.substr(i, close + 2 - i);
-			out += "\x1b[0m";
+			out += kClrReset;
 			i = close + 2;
 			continue;
 		}
-		// Double-quoted string
+
+		// ── Double-quoted string ──────────────────────────────────────────
 		if (line[i] == '"') {
-			const size_t start = i++;
+			out += kClrString;
+			out += line[i++];
 			while (i < line.size() && line[i] != '"') {
-				if (line[i] == '\\' && i + 1 < line.size()) ++i;
-				++i;
+				if (line[i] == '\\' && i + 1 < line.size()) out += line[i++];
+				out += line[i++];
 			}
-			if (i < line.size()) ++i;
-			out += "\x1b[32m";
-			out += line.substr(start, i - start);
-			out += "\x1b[39m";
+			if (i < line.size()) out += line[i++]; // closing "
+			out += kClrFgReset;
 			continue;
 		}
-		// Single-quoted string / char literal
+
+		// ── Single-quoted string / char literal ───────────────────────────
 		if (spec.has_single_string && line[i] == '\'') {
-			const size_t start = i++;
+			out += kClrString;
+			out += line[i++];
 			while (i < line.size() && line[i] != '\'') {
-				if (line[i] == '\\' && i + 1 < line.size()) ++i;
-				++i;
+				if (line[i] == '\\' && i + 1 < line.size()) out += line[i++];
+				out += line[i++];
 			}
-			if (i < line.size()) ++i;
-			out += "\x1b[32m";
-			out += line.substr(start, i - start);
-			out += "\x1b[39m";
+			if (i < line.size()) out += line[i++]; // closing '
+			out += kClrFgReset;
 			continue;
 		}
-		// Numbers
+
+		// ── Shell variable expansions ─────────────────────────────────────
+		// $?, $#, $@, $$, $!, $0..$9, $VAR, ${VAR}, $(…), $((…))
+		if (spec.has_shell_vars && line[i] == '$') {
+			if (i + 1 < line.size()) {
+				const char next = line[i + 1];
+				// Special single-char vars: $? $# $@ $$ $! $- $*
+				if (next == '?' || next == '#' || next == '@' || next == '$' ||
+				    next == '!' || next == '-' || next == '*') {
+					out += kClrSpecial;
+					out += line[i]; out += line[i + 1];
+					out += kClrFgReset;
+					i += 2;
+					continue;
+				}
+				// Positional: $0..$9
+				if (std::isdigit(static_cast<unsigned char>(next))) {
+					out += kClrSpecial;
+					out += line[i]; out += line[i + 1];
+					out += kClrFgReset;
+					i += 2;
+					continue;
+				}
+				// ${VAR} or $((expr)) or $(cmd)
+				if (next == '{') {
+					const size_t close = line.find('}', i + 2);
+					out += kClrVariable;
+					if (close != std::string::npos) {
+						out += line.substr(i, close + 1 - i);
+						i = close + 1;
+					} else {
+						out += line.substr(i);
+						i = line.size();
+					}
+					out += kClrFgReset;
+					continue;
+				}
+				if (next == '(') {
+					// $( … ) command substitution — colour the $ and ( only,
+					// then let the inner content tokenise normally.
+					out += kClrVariable;
+					out += line[i]; out += line[i + 1];
+					out += kClrFgReset;
+					i += 2;
+					continue;
+				}
+				// $IDENTIFIER
+				if (std::isalpha(static_cast<unsigned char>(next)) || next == '_') {
+					out += kClrVariable;
+					out += line[i++]; // $
+					while (i < line.size() &&
+					       (std::isalnum(static_cast<unsigned char>(line[i])) || line[i] == '_'))
+						out += line[i++];
+					out += kClrFgReset;
+					continue;
+				}
+			}
+			// Bare $ — fall through to plain character output.
+		}
+
+		// ── Numeric literals ──────────────────────────────────────────────
 		if (spec.has_numbers && std::isdigit(static_cast<unsigned char>(line[i]))) {
 			const size_t start = i;
-			while (i < line.size()
-				   && (std::isalnum(static_cast<unsigned char>(line[i]))
-					   || line[i] == '.' || line[i] == '_')) ++i;
-			out += "\x1b[36m";
+			// Hex (0x…), binary (0b…), octal (0…), float, integer.
+			if (line[i] == '0' && i + 1 < line.size() &&
+			    (line[i + 1] == 'x' || line[i + 1] == 'X')) {
+				i += 2;
+				while (i < line.size() &&
+				       std::isxdigit(static_cast<unsigned char>(line[i]))) ++i;
+			} else if (line[i] == '0' && i + 1 < line.size() &&
+			           (line[i + 1] == 'b' || line[i + 1] == 'B')) {
+				i += 2;
+				while (i < line.size() && (line[i] == '0' || line[i] == '1')) ++i;
+			} else {
+				while (i < line.size() &&
+				       (std::isalnum(static_cast<unsigned char>(line[i])) ||
+				        line[i] == '.' || line[i] == '_')) ++i;
+			}
+			// Consume trailing type suffixes (u, l, ul, f, …).
+			while (i < line.size() &&
+			       (line[i] == 'u' || line[i] == 'U' ||
+			        line[i] == 'l' || line[i] == 'L' ||
+			        line[i] == 'f' || line[i] == 'F')) ++i;
+			out += kClrNumber;
 			out += line.substr(start, i - start);
-			out += "\x1b[39m";
+			out += kClrFgReset;
 			continue;
 		}
-		// Identifiers → keywords
+
+		// ── Identifiers → keyword / type / builtin / UPPER_CASE / plain ───
 		if (std::isalpha(static_cast<unsigned char>(line[i])) || line[i] == '_') {
 			const size_t start = i;
-			while (i < line.size()
-				   && (std::isalnum(static_cast<unsigned char>(line[i])) || line[i] == '_')) ++i;
+			while (i < line.size() &&
+			       (std::isalnum(static_cast<unsigned char>(line[i])) || line[i] == '_')) ++i;
 			const std::string word = line.substr(start, i - start);
+
+			// Keyword (bold magenta)?
 			if (spec.keywords && spec.keywords->count(word)) {
-				out += "\x1b[1;35m";
+				out += kClrKeyword;
 				out += word;
-				out += "\x1b[22;39m";
-			} else {
-				out += word;
+				out += kClrReset;
+				continue;
 			}
+			// Type (bold cyan)?
+			if (spec.type_words && spec.type_words->count(word)) {
+				out += kClrType;
+				out += word;
+				out += kClrReset;
+				continue;
+			}
+			// Shell builtin (bold green)?
+			if (spec.builtins && spec.builtins->count(word)) {
+				out += kClrBuiltin;
+				out += word;
+				out += kClrReset;
+				continue;
+			}
+			// UPPER_CASE identifier → treat as constant/macro (bold yellow).
+			if (spec.has_constants && !word.empty()) {
+				bool all_upper = true;
+				for (const char c : word) {
+					if (c != '_' && !std::isupper(static_cast<unsigned char>(c)) &&
+					    !std::isdigit(static_cast<unsigned char>(c))) {
+						all_upper = false;
+						break;
+					}
+				}
+				// Only colour if at least one letter (avoid lone underscores).
+				if (all_upper) {
+					bool has_letter = false;
+					for (const char c : word)
+						if (std::isalpha(static_cast<unsigned char>(c))) { has_letter = true; break; }
+					if (has_letter) {
+						out += kClrConstant;
+						out += word;
+						out += kClrFgReset;
+						continue;
+					}
+				}
+			}
+			// Plain identifier.
+			out += word;
 			continue;
 		}
+
+		// ── C++ multi-char operators ───────────────────────────────────────
+		if (spec.has_operators) {
+			// Two-char operators: :: -> << >> && || == != <= >= += -= *= /= %=
+			//                     &= |= ^= ~= ++ -- .* ->*
+			bool matched = false;
+			if (i + 1 < line.size()) {
+				const char a = line[i], b = line[i + 1];
+				if ((a == ':' && b == ':') || (a == '-' && b == '>') ||
+				    (a == '<' && b == '<') || (a == '>' && b == '>') ||
+				    (a == '&' && b == '&') || (a == '|' && b == '|') ||
+				    (a == '=' && b == '=') || (a == '!' && b == '=') ||
+				    (a == '<' && b == '=') || (a == '>' && b == '=') ||
+				    (a == '+' && b == '=') || (a == '-' && b == '=') ||
+				    (a == '*' && b == '=') || (a == '/' && b == '=') ||
+				    (a == '%' && b == '=') || (a == '&' && b == '=') ||
+				    (a == '|' && b == '=') || (a == '^' && b == '=') ||
+				    (a == '+' && b == '+') || (a == '-' && b == '-') ||
+				    (a == '.' && b == '*') || (a == '~' && b == '=')) {
+					out += kClrOperator;
+					out += a; out += b;
+					out += kClrFgReset;
+					i += 2;
+					matched = true;
+				}
+			}
+			if (matched) continue;
+			// Single-char operators: = ! < > + - * / % & | ^ ~ ? :
+			const char a = line[i];
+			if (a == '=' || a == '!' || a == '<' || a == '>' ||
+			    a == '+' || a == '-' || a == '*' || a == '/' ||
+			    a == '%' || a == '&' || a == '|' || a == '^' ||
+			    a == '~' || a == '?' || a == ':') {
+				out += kClrOperator;
+				out += a;
+				out += kClrFgReset;
+				++i;
+				continue;
+			}
+		}
+
+		// ── Fallthrough: emit the character unchanged ──────────────────────
 		out += line[i++];
 	}
 	return out;
 }
 
-std::string highlight_code(const std::string& lang, const std::string& line) {
+// Apply syntax highlighting to one source line given a language tag.
+// Returns the plain line unchanged for unknown / empty language tags.
+static std::string highlight_code(const std::string& lang, const std::string& line) {
 	LangSpec spec;
-	if (!lookup_lang(lang, spec)) {
-		// Unknown or unspecified language — keep T3's dim green tint.
-		return "\x1b[32m" + line + "\x1b[0m";
-	}
+	if (!lookup_lang(lang, spec))
+		return "\x1b[32m" + line + kClrReset; // dim green for unknown lang
 	return highlight_with(spec, line);
+}
+
+// ── Diff line rendering (used by both the preview block and the markdown
+//    renderer when it encounters a ```diff fence) ──────────────────────────
+
+// Re-inject a background-color escape sequence immediately after every
+// full SGR reset (\x1b[0m) inside `s`.  This preserves the coloured
+// background tint when `s` contains syntax-highlighted text that uses
+// \x1b[0m to terminate individual token colours.
+static std::string reinject_bg(const std::string& s, const char* bg_seq) {
+	if (s.find('\x1b') == std::string::npos) return s;
+	std::string out;
+	out.reserve(s.size() + 32);
+	for (size_t i = 0; i < s.size(); ) {
+		if (s[i] != '\x1b') { out += s[i++]; continue; }
+		const size_t seq_start = i++;
+		if (i < s.size() && s[i] == '[') {
+			++i;
+			while (i < s.size() && s[i] != 'm') ++i;
+			if (i < s.size()) ++i;
+		}
+		const std::string seq = s.substr(seq_start, i - seq_start);
+		out += seq;
+		if (seq == "\x1b[0m" || seq == "\x1b[m")
+			out += bg_seq;
+	}
+	return out;
+}
+
+// Classify a raw diff line.
+enum class DiffLineKind {
+	Added,    // starts with '+'
+	Removed,  // starts with '-'
+	Hunk,     // starts with '@'
+	FileNew,  // starts with "+++"
+	FileOld,  // starts with "---"
+	Context,  // everything else
+};
+
+static DiffLineKind diff_classify(const std::string& line) {
+	if (line.size() >= 3 && line.substr(0, 3) == "+++") return DiffLineKind::FileNew;
+	if (line.size() >= 3 && line.substr(0, 3) == "---") return DiffLineKind::FileOld;
+	if (!line.empty() && line[0] == '+') return DiffLineKind::Added;
+	if (!line.empty() && line[0] == '-') return DiffLineKind::Removed;
+	if (!line.empty() && line[0] == '@') return DiffLineKind::Hunk;
+	return DiffLineKind::Context;
+}
+
+// Render a single unified-diff line with colour.  `lang` is used to
+// syntax-highlight the code content inside added/removed lines.
+static std::string render_diff_line(const std::string& line, const std::string& lang) {
+	if (!g_color_enabled) return line;
+
+	const DiffLineKind kind = diff_classify(line);
+	switch (kind) {
+		case DiffLineKind::FileNew:
+		case DiffLineKind::FileOld:
+			// Bold white — file path header lines (--- a/foo  +++ b/foo).
+			return "\x1b[1;37m" + line + kClrReset;
+
+		case DiffLineKind::Hunk:
+			// Cyan hunk headers: @@ -N,M +N,M @@ optional context
+			{
+				// Find the closing @@ and colour the range part in bold,
+				// the trailing context (function name etc.) in dim italic.
+				const size_t close = line.find("@@", 2);
+				if (close != std::string::npos && close + 2 <= line.size()) {
+					const std::string range   = line.substr(0, close + 2);
+					const std::string context = line.substr(close + 2);
+					return "\x1b[1;36m" + range + "\x1b[22;2m" + context + kClrReset;
+				}
+				return "\x1b[1;36m" + line + kClrReset;
+			}
+
+		case DiffLineKind::Added:
+			// Dark-green bg, green fg — show syntax-highlighted content.
+			{
+				static constexpr const char* kBg = "\x1b[48;2;2;40;0m";
+				const std::string marker  = line.substr(0, 1);   // "+"
+				const std::string content = line.size() > 1 ? line.substr(1) : "";
+				const std::string hl      = lang.empty() ? content
+				                                         : highlight_code(lang, content);
+				return std::string(kBg) +
+				       "\x1b[38;2;80;200;80m" + marker +
+				       reinject_bg(hl, kBg) +
+				       "\x1b[K\x1b[0m";
+			}
+
+		case DiffLineKind::Removed:
+			// Dark-red bg, muted-red marker, near-white content.
+			{
+				static constexpr const char* kBg = "\x1b[48;2;61;1;0m";
+				const std::string marker  = line.substr(0, 1);   // "-"
+				const std::string content = line.size() > 1 ? line.substr(1) : "";
+				const std::string hl      = lang.empty() ? content
+				                                         : highlight_code(lang, content);
+				return std::string(kBg) +
+				       "\x1b[38;2;220;90;90m" + marker +
+				       "\x1b[38;2;248;248;242m" + reinject_bg(hl, kBg) +
+				       "\x1b[K\x1b[0m";
+			}
+
+		case DiffLineKind::Context:
+		default:
+			return line;
+	}
 }
 
 } // namespace
@@ -1531,20 +1945,21 @@ std::string HighlightCode(const std::string& lang, const std::string& line) {
 // \x1b[K fills the background to the terminal right edge.
 std::string DiffRemoved(const std::string& marker, const std::string& content) {
 	if (!g_color_enabled) return marker + content;
-	// Set dark-red bg first, then muted-red fg for the marker,
-	// then near-white fg for the content, then fill+reset.
-	return "\x1b[48;2;61;1;0m"
+	static constexpr const char* kBg = "\x1b[48;2;61;1;0m";
+	const std::string safe            = reinject_bg(content, kBg);
+	return std::string(kBg) +
 	       "\x1b[38;2;220;90;90m" + marker +
-	       "\x1b[38;2;248;248;242m" + content +
-	       "\x1b[K\x1b[39m\x1b[49m";
+	       "\x1b[38;2;248;248;242m" + safe +
+	       "\x1b[K\x1b[0m";
 }
 
 std::string DiffAdded(const std::string& marker, const std::string& content) {
 	if (!g_color_enabled) return marker + content;
-	// Dark-green bg, muted-green fg for the entire row.
-	return "\x1b[48;2;2;40;0m"
-	       "\x1b[38;2;80;200;80m" + marker + content +
-	       "\x1b[K\x1b[39m\x1b[49m";
+	static constexpr const char* kBg = "\x1b[48;2;2;40;0m";
+	const std::string safe            = reinject_bg(content, kBg);
+	return std::string(kBg) +
+	       "\x1b[38;2;80;200;80m" + marker + safe +
+	       "\x1b[K\x1b[0m";
 }
 
 namespace {
@@ -1826,8 +2241,23 @@ void MarkdownRenderer::FlushTable() {
 }
 
 void MarkdownRenderer::RenderLine(const std::string& line) {
-	// Inside a code block, highlight per recognized language until we
-	// see the closing fence.
+	// ── Inside a diff block ────────────────────────────────────────────────
+	// Lines are coloured by their unified-diff sigil (+/-/@/---/+++) using
+	// the render_diff_line() helper.  The content of +/- lines is further
+	// syntax-highlighted using fDiffLang when available.
+	if (fInDiffBlock) {
+		if (line.size() >= 3 && line.substr(0, 3) == "```") {
+			fInDiffBlock = false;
+			fDiffLang.clear();
+			Emit(Dim("```") + "\n");
+			return;
+		}
+		Emit(render_diff_line(line, fDiffLang) + "\n");
+		return;
+	}
+
+	// ── Inside a regular code block ────────────────────────────────────────
+	// Highlight per recognized language until we see the closing fence.
 	if (fInCodeBlock) {
 		if (line.size() >= 3 && line.substr(0, 3) == "```") {
 			fInCodeBlock   = false;
@@ -1839,17 +2269,53 @@ void MarkdownRenderer::RenderLine(const std::string& line) {
 		return;
 	}
 
-	// Opening code fence. Tables end at any non-table line — flush
-	// the buffer first so a fenced code block can't land inside an
-	// unclosed table.
+	// ── Opening code fence ─────────────────────────────────────────────────
+	// Tables end at any non-table line — flush the buffer first so a fenced
+	// code block can't land inside an unclosed table.
 	if (line.size() >= 3 && line.substr(0, 3) == "```") {
 		if (fTableActive) FlushTable();
-		fInCodeBlock   = true;
-		fCodeBlockLang = line.substr(3);
-		if (fCodeBlockLang.empty()) {
-			Emit(Dim("```") + "\n");
+
+		// Parse the info string after the fence.
+		std::string info = line.substr(3);
+		// Trim leading whitespace from info string.
+		size_t istart = 0;
+		while (istart < info.size() && (info[istart] == ' ' || info[istart] == '\t')) ++istart;
+		info = info.substr(istart);
+		// Lowercase for comparison.
+		std::string info_lc = info;
+		for (auto& c : info_lc)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+		// Detect "diff" fence — may carry an optional language hint after a
+		// space or colon, e.g. "diff cpp", "diff:bash".
+		bool is_diff = false;
+		std::string diff_lang;
+		if (info_lc == "diff" || info_lc.substr(0, 5) == "diff " ||
+		    info_lc.substr(0, 5) == "diff:") {
+			is_diff = true;
+			// Extract optional language hint.
+			if (info_lc.size() > 5)
+				diff_lang = info_lc.substr(5);
+			else if (info_lc.size() > 4 && info_lc[4] == ' ')
+				diff_lang = info_lc.substr(5);
+		}
+
+		if (is_diff) {
+			fInDiffBlock = true;
+			fDiffLang    = diff_lang;
+			// Header: dim "``` diff" label, optionally showing the lang hint.
+			if (diff_lang.empty())
+				Emit(Dim("``` diff") + "\n");
+			else
+				Emit(Dim("``` diff:" + diff_lang) + "\n");
 		} else {
-			Emit(Dim("``` " + fCodeBlockLang) + "\n");
+			fInCodeBlock   = true;
+			fCodeBlockLang = info;
+			if (info.empty()) {
+				Emit(Dim("```") + "\n");
+			} else {
+				Emit(Dim("``` " + info) + "\n");
+			}
 		}
 		return;
 	}
@@ -1890,6 +2356,36 @@ void MarkdownRenderer::RenderLine(const std::string& line) {
 						  :                    "\x1b[1;36m";
 		Emit(std::string(color) + rest + "\x1b[0m\n");
 		return;
+	}
+
+	// Thematic break (HR): 3+ hyphens, asterisks, or underscores, optionally
+	// separated by spaces, with no other characters.  Must be detected before
+	// the bullet-list check so "---" (no trailing space) is rendered as a rule
+	// rather than falling through to plain paragraph text.
+	{
+		size_t hr_i = 0;
+		// Allow up to 3 spaces of leading indent (CommonMark).
+		while (hr_i < line.size() && line[hr_i] == ' ' && hr_i < 3) ++hr_i;
+		if (hr_i < line.size() &&
+		    (line[hr_i] == '-' || line[hr_i] == '*' || line[hr_i] == '_')) {
+			const char hr_ch = line[hr_i];
+			int  hr_count    = 0;
+			bool hr_ok       = true;
+			for (size_t k = hr_i; k < line.size(); ++k) {
+				if (line[k] == hr_ch)      ++hr_count;
+				else if (line[k] != ' ')   { hr_ok = false; break; }
+			}
+			if (hr_ok && hr_count >= 3) {
+				// Emit a full-width dim rule, capped to terminal width.
+				int cols = TerminalWidth();
+				if (cols <= 0) cols = 80;
+				std::string rule;
+				rule.reserve(static_cast<size_t>(cols) * 3);
+				for (int k = 0; k < cols; ++k) rule += "\xE2\x94\x80"; // ─
+				Emit(Dim(rule) + "\n");
+				return;
+			}
+		}
 	}
 
 	// Bullet list: optional leading whitespace, then '- ' or '* '.
