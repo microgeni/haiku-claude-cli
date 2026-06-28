@@ -77,8 +77,17 @@ public:
 	// HTTP request as soon as `*keep_running` becomes false. This
 	// lets callers (e.g. RemoteControl::stop) cut a blocking
 	// long-poll short without waiting for the full timeout.
+	//
+	// If `out_error` is non-null it is set to true when the call failed
+	// for a reason the caller should back off on (transport error, HTTP
+	// error, a non-ok Telegram response such as a 409 Conflict, or a
+	// parse failure) and false when the call succeeded — even if it
+	// returned zero updates. A clean empty result (timeout with no new
+	// messages) is NOT an error. Lets the poll loop distinguish "nothing
+	// happened" from "something is wrong" and apply exponential backoff.
 	std::vector<Update> poll(int timeout_sec = 25,
-							 std::atomic<bool>* keep_running = nullptr);
+							 std::atomic<bool>* keep_running = nullptr,
+							 bool* out_error = nullptr);
 
 	// POST sendMessage to the given chat. Long messages are chunked
 	// into ~4000-char pieces to stay under Telegram's 4096-char

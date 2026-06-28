@@ -1,10 +1,12 @@
 #include "telegram.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -422,7 +424,12 @@ bool Client::CheckPollAvailable(std::string* reason) {
 	return true;
 }
 
-std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_running) {
+std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_running,
+								 bool* out_error) {
+	// Assume failure until we successfully parse an ok response; every
+	// early-return below is a failure the caller should back off on.
+	if (out_error) *out_error = true;
+
 	const json body = {
 		{"offset",          fNextOffset},
 		{"timeout",         timeout_sec},
@@ -433,6 +440,11 @@ std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_runnin
 	if (!PostJson("getUpdates", body.dump(), &response,
 				   static_cast<long>(timeout_sec + 10),
 				   keep_running)) {
+		// A caller-requested cancel (keep_running flipped) trips the curl
+		// progress callback and looks like a transport failure, but it is
+		// an orderly shutdown, not an error to back off on.
+		if (keep_running && !keep_running->load() && out_error)
+			*out_error = false;
 		return {};
 	}
 
@@ -451,6 +463,11 @@ std::vector<Update> Client::poll(int timeout_sec, std::atomic<bool>* keep_runnin
 			return out;
 		}
 		if (!j.contains("result") || !j["result"].is_array()) return out;
+
+		// Got a well-formed ok response. Even if it carries zero updates
+		// (a plain long-poll timeout), the call succeeded — clear the
+		// error flag so the loop does not back off on quiet periods.
+		if (out_error) *out_error = false;
 
 		for (const auto& entry : j["result"]) {
 			const int64_t id = entry.value("update_id", int64_t{0});
@@ -784,9 +801,46 @@ void RemoteControl::PollLoop() {
 	// it here would stop the poller the moment any chat turn is cancelled.
 	// Stop() flips fRunning and aborts the in-flight long-poll via the
 	// keep_running pointer handed to Client::poll.
+	//
+	// Consecutive failures (transport errors, HTTP 5xx, or a 409 Conflict
+	// from a second poller) trigger exponential backoff so a flaky network
+	// or a transient conflict does not tight-spin the loop or flood the log
+	// — and the loop self-heals once the condition clears. A clean poll
+	// (even one with zero updates) resets the backoff immediately.
+	constexpr int kBackoffMaxSec = 60;
+	int consecutiveFailures = 0;
+
 	while (fRunning.load()) {
-		const auto updates = fClient.poll(10, &fRunning);
+		bool pollError = false;
+		const auto updates = fClient.poll(10, &fRunning, &pollError);
 		if (!fRunning.load()) break;
+
+		if (pollError) {
+			// Cap the exponent so backoffSec maxes out at kBackoffMaxSec:
+			// 1, 2, 4, 8, 16, 32, 60, 60, ...
+			++consecutiveFailures;
+			int backoffSec = 1;
+			for (int i = 1; i < consecutiveFailures && backoffSec < kBackoffMaxSec; ++i)
+				backoffSec = std::min(backoffSec * 2, kBackoffMaxSec);
+
+			if (consecutiveFailures == 1 || consecutiveFailures % 5 == 0) {
+				config::LogLine("remote-control poll failing (attempt "
+					+ std::to_string(consecutiveFailures) + "), backing off "
+					+ std::to_string(backoffSec) + "s");
+			}
+
+			// Sleep in short slices so Stop() takes effect promptly.
+			for (int slept = 0; slept < backoffSec && fRunning.load(); ++slept)
+				std::this_thread::sleep_for(std::chrono::seconds(1));
+			continue;
+		}
+
+		if (consecutiveFailures > 0) {
+			config::LogLine("remote-control poll recovered after "
+				+ std::to_string(consecutiveFailures) + " failure(s)");
+			consecutiveFailures = 0;
+		}
+
 		for (const auto& u : updates) {
 			if (!fRunning.load()) break;
 			if (!fAllowed.count(u.user_id)) {
