@@ -91,6 +91,7 @@ void PrintUsageLine(const api::SendResult& result) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+	api::GlobalInit();
 	tui::Init();
 	tui::InstallSigwinchHandler();
 

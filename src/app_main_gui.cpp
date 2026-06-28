@@ -14,6 +14,7 @@
 
 #include "chat_window.h"
 #include "agents.h"
+#include "api.h"
 #include "commands.h"
 #include "config.h"
 #include "hooks.h"
@@ -282,6 +283,7 @@ private:
 
 int main()
 {
+	api::GlobalInit();
 	ClaudeGuiApp app;
 	app.Run();
 	return 0;

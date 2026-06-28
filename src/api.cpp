@@ -14,6 +14,8 @@
 #include <sstream>
 #include <termios.h>
 #include <thread>
+#include <mutex>
+#include <cstdlib>
 #include <unistd.h>
 
 #include <curl/curl.h>
@@ -395,19 +397,43 @@ size_t StreamWriteCallback(char* data, size_t size, size_t nmemb, void* userp) {
 	return total;
 }
 
-// Session-scoped curl handle. Reused across all SendConversation
-// calls so DNS cache, TLS session, and TCP connections persist
-// between turns. Created lazily; cleaned up via atexit.
-CURL* g_curl = nullptr;
+// Per-thread curl handle. Reused across all SendConversation calls
+// *on the same thread* so DNS cache, TLS session, and TCP connections
+// persist between turns. The GUI runs SendWithTools on a worker thread
+// while the main thread may start the next turn or load a session, so a
+// single process-global handle would be shared across threads — which
+// libcurl forbids and which segfaults inside curl_easy_perform(). Making
+// the handle thread_local gives each worker its own handle and keeps the
+// CLI (single-threaded) behaviour identical. Each thread cleans up its
+// own handle on exit via a thread_local guard object.
+thread_local CURL* g_curl = nullptr;
+
+namespace {
+// Cleans up the calling thread's curl handle when the thread exits.
+struct CurlThreadCleanup {
+	~CurlThreadCleanup() {
+		if (g_curl) { curl_easy_cleanup(g_curl); g_curl = nullptr; }
+	}
+};
+thread_local CurlThreadCleanup g_curlCleanup;
+}
 
 CURL* get_curl() {
 	if (!g_curl) {
 		g_curl = curl_easy_init();
-		std::atexit([]() {
-			if (g_curl) { curl_easy_cleanup(g_curl); g_curl = nullptr; }
-		});
+		// Touch the thread_local guard so it is instantiated and will
+		// run its destructor when this thread exits.
+		(void)&g_curlCleanup;
 	}
 	return g_curl;
+}
+
+void GlobalInit() {
+	static std::once_flag once;
+	std::call_once(once, []() {
+		curl_global_init(CURL_GLOBAL_DEFAULT);
+		std::atexit([]() { curl_global_cleanup(); });
+	});
 }
 
 std::string ShortInputSummary(const json& input) {

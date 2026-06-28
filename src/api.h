@@ -130,6 +130,13 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 // No-op (returns empty vector) on non-Haiku platforms.
 std::vector<std::string> DrainWrittenSummaryPaths();
 
+// Initialise libcurl's global state once, before any worker thread can
+// call curl_easy_init(). libcurl's implicit global init (triggered by the
+// first curl_easy_init) is NOT thread-safe; the GUI runs SendWithTools on
+// a worker thread, so this must be called once from main() at startup.
+// Safe to call multiple times; only the first call has effect.
+void GlobalInit();
+
 } // namespace api
 
 // Shared cancellation flag — set by the SIGINT handler and the Esc
