@@ -90,6 +90,12 @@ static void ParseStyleNode(const YAML::Node& node, int canon_id,
 
 bool Theme::LoadFile(const std::string& path)
 {
+	// Same Flex-lexer guard as ParseLanguageFile: skip missing/empty files
+	// so yaml-cpp never prints "input in flex scanner failed" to stderr.
+	struct stat st;
+	if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0)
+		return false;
+
 	try {
 		YAML::Node root = YAML::LoadFile(path);
 		if (!root.IsMap()) return false;
@@ -139,6 +145,13 @@ static std::string ToLower(std::string s)
 
 static bool ParseLanguageFile(const std::string& path, Language& out)
 {
+	// Never hand a missing or empty file to YAML::LoadFile: yaml-cpp's Flex
+	// lexer prints "input in flex scanner failed" to stderr on a bad stream
+	// before the C++ exception is thrown, so guard with a stat() first.
+	struct stat st;
+	if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0)
+		return false;
+
 	try {
 		YAML::Node root = YAML::LoadFile(path);
 		if (!root.IsMap()) return false;
@@ -365,18 +378,28 @@ std::string FindDefaultTheme()
 std::string FindLanguagesDir()
 {
 #ifdef __HAIKU__
+	// A languages directory only counts if it actually contains a known
+	// grammar file. Genio creates an empty ~/config/settings/Genio/languages
+	// directory; accepting it caused code_styler to try opening files that
+	// don't exist, which makes yaml-cpp's Flex lexer print "input in flex
+	// scanner failed" to stderr. Probe for cpp.yaml as a sentinel and fall
+	// through to the next candidate when the directory is empty.
+	auto hasGrammars = [](const std::string& dir) {
+		struct stat st;
+		const std::string sentinel = dir + "/cpp.yaml";
+		return stat(sentinel.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+	};
+
 	BPath settings;
 	if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings) == B_OK) {
 		std::string p = std::string(settings.Path()) + "/Genio/languages";
-		struct stat st;
-		if (stat(p.c_str(), &st) == 0) return p;
+		if (hasGrammars(p)) return p;
 	}
 
 	BPath nonpkg;
 	if (find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, &nonpkg) == B_OK) {
 		std::string p = std::string(nonpkg.Path()) + "/claude-gui/languages";
-		struct stat st;
-		if (stat(p.c_str(), &st) == 0) return p;
+		if (hasGrammars(p)) return p;
 	}
 
 	// Development fallback.
@@ -386,8 +409,7 @@ std::string FindLanguagesDir()
 		auto sl = dir.rfind('/');
 		if (sl != std::string::npos) dir.resize(sl);
 		std::string p = dir + "/../assets/data/languages";
-		struct stat st;
-		if (stat(p.c_str(), &st) == 0) return p;
+		if (hasGrammars(p)) return p;
 	}
 #endif
 	return {};
