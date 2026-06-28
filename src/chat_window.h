@@ -584,6 +584,12 @@ private:
 	// owns the lifecycle; the destructor stops it cleanly.
 	std::unique_ptr<telegram::RemoteControl> fRemote;
 	void _ToggleRemote();  // Tools > Remote Control: start/stop the poller
+
+	// Extract displayable plain text from an Anthropic message "content"
+	// field, which may be a bare string or an array of typed blocks. Used
+	// to render Telegram-origin turns into the transcript; non-text blocks
+	// (image, tool_use) are skipped.
+	static std::string _PlainTextFromContent(const nlohmann::json& content);
 };
 
 #endif // HAIKU_CLAUDE_CLI_CHAT_WINDOW_H

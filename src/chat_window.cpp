@@ -63,6 +63,7 @@
 #include "syntax_highlight.h"
 #include "config.h"
 #include "gui_sink.h"
+#include "tee_sink.h"
 #include "md_renderer.h"
 #include "models.h"
 #include "paths.h"
@@ -2617,9 +2618,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_REMOTE_APPEND: {
 		// A remote (Telegram) turn finished. Append the user + assistant
 		// messages to the local history on the window thread so the GUI's
-		// fMessages stays in sync and the exchange is saved. The transcript
-		// view is left as-is (the remote turn streamed to Telegram, not here);
-		// a dim notice marks that a remote turn occurred.
+		// fMessages stays in sync and the exchange is saved, AND render the
+		// exchange into the transcript so the chat window mirrors what the
+		// phone saw. This is the Telegram -> GUI half of the bidirectional
+		// mirror (the GUI -> Telegram half lives in _SpawnWorker).
 		const char* userStr = nullptr;
 		const char* asstStr = nullptr;
 		if (msg->FindString("user", &userStr) == B_OK
@@ -2627,13 +2629,27 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			try {
 				nlohmann::json userMsg = nlohmann::json::parse(userStr);
 				nlohmann::json asstMsg = nlohmann::json::parse(asstStr);
+
+				// Pull plain text out of each message for display. Content
+				// may be a string or an array of typed blocks; we render the
+				// text blocks and ignore images/tool_use for the transcript.
+				const std::string userText = _PlainTextFromContent(userMsg.value("content", nlohmann::json{}));
+				const std::string asstText = _PlainTextFromContent(asstMsg.value("content", nlohmann::json{}));
+
 				{
 					std::lock_guard<std::mutex> lock(fMessagesMutex);
 					fMessages.push_back(std::move(userMsg));
 					fMessages.push_back(std::move(asstMsg));
 				}
 				_SaveSession();
-				_AppendToolLine("\xF0\x9F\x93\xA1 remote turn synced to history\n");
+
+				// Render the exchange. A dim 📡 marker on the user label
+				// signals the turn originated from Telegram, not the GUI.
+				_DismissWelcome();
+				AppendWithColor(fOutput, "\n\xF0\x9F\x93\xA1 you \xE2\x96\xB8 ", kColorUserLabel);
+				_AppendText(userText + "\n");
+				AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+				if (!asstText.empty()) _AppendText(asstText + "\n");
 			} catch (const std::exception& e) {
 				config::LogLine(std::string("remote append parse failed: ")
 					+ e.what());
@@ -3210,13 +3226,50 @@ void ChatWindow::_SpawnWorker()
 	gui::GuiSink* sink = fSink;
 	sink->BeginMessage("assistant");
 
+	// When remote control is active, mirror this locally-typed turn to the
+	// phone: stream to a TelegramSink for the primary chat in addition to
+	// the GUI. Capture the prompt text now (on the window thread) so the
+	// worker can send a "> prompt" preamble before the reply streams.
+	telegram::RemoteControl* remote =
+		(fRemote && fRemote->Running()) ? fRemote.get() : nullptr;
+	const std::string promptText = fPendingUserText;
+
 	fWorkerRunning.store(true);
 	// fWorkerMessages is mutated through `this`; the main thread does not
 	// touch it until after join() in MSG_WORKER_DONE, so no data race.
-	fWorker = std::thread([this, auth, model, maxTokens, systemPrompt, sink]() {
+	fWorker = std::thread([this, auth, model, maxTokens, systemPrompt, sink,
+	                       remote, promptText]() {
+		// Build the active sink. With no remote, it's just the GuiSink.
+		// With remote active, tee the GuiSink and a TelegramSink so the
+		// turn appears on both surfaces. AcquireTurn() serialises against
+		// the remote poll loop so a phone turn and a GUI turn never run
+		// concurrently against the shared history or the same chat.
+		std::unique_ptr<telegram::TelegramSink> tgSink;
+		std::unique_ptr<TeeSink>                tee;
+		OutputSink* active = sink;
+
+		if (remote && remote->PrimaryUserId() != 0) {
+			remote->AcquireTurn();
+			remote->SendPromptNotice(promptText);
+			tgSink = std::make_unique<telegram::TelegramSink>(
+				remote->GetClient(),
+				remote->PrimaryUserId(),
+				remote->AllowDestructive(),
+				remote->AllowedToolsRef(),
+				remote->PermQueueRef());
+			tgSink->BeginMessage("assistant");
+			tee = std::make_unique<TeeSink>(sink, tgSink.get());
+			active = tee.get();
+		}
+
 		const api::SendResult result = api::SendWithTools(auth, model, maxTokens,
-		                   fWorkerMessages, systemPrompt, sink);
+		                   fWorkerMessages, systemPrompt, active);
 		sink->EndMessage();
+
+		if (remote) {
+			if (tgSink) tgSink->EndMessage();
+			remote->ReleaseTurn();
+		}
 
 		BMessage tokMsg(gui::MSG_TOKENS);
 		tokMsg.AddInt32("input",  result.input_tokens);
@@ -3409,6 +3462,27 @@ void ChatWindow::_UpdateTokenBarPrice()
 	fTokenBar->SetPrice(price.input, price.output);
 }
 
+// Extract displayable plain text from a message "content" field. A bare
+// string is returned as-is; an array of blocks yields the concatenated
+// "text" blocks (image and tool_use blocks are skipped).
+std::string ChatWindow::_PlainTextFromContent(const nlohmann::json& content)
+{
+	if (content.is_string())
+		return content.get<std::string>();
+	if (!content.is_array())
+		return std::string();
+
+	std::string out;
+	for (const auto& block : content) {
+		if (!block.is_object()) continue;
+		if (block.value("type", std::string()) == "text") {
+			if (!out.empty()) out += "\n";
+			out += block.value("text", std::string());
+		}
+	}
+	return out;
+}
+
 // Tools > Remote Control: start or stop the background Telegram poller.
 // Mirrors the CLI's /remote-control toggle. Keeps the menu checkmark and
 // the token-bar "📡 REMOTE" badge in sync with the actual running state.
@@ -3461,6 +3535,10 @@ void ChatWindow::_ToggleRemote()
 		}
 
 		if (fRemote->Start()) {
+			// Give the registry a meaningful label so /sessions on the
+			// phone shows the conversation topic rather than a bare ID.
+			fRemote->SetSessionTitle(
+				fConvTopic.empty() ? std::string("GUI session") : fConvTopic);
 			// Share the GUI's conversation so remote turns see both sides of
 			// the dialogue (mirrors the CLI). The provider snapshots fMessages
 			// under fMessagesMutex; the appender posts a BMessage so the actual

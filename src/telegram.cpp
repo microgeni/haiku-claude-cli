@@ -690,6 +690,83 @@ bool Client::DeleteMessage(int64_t chat_id, int64_t message_id) {
 
 std::atomic<bool> g_muted { false };
 
+// ── SessionRegistry ───────────────────────────────────────────
+
+SessionRegistry& SessionRegistry::Instance() {
+	static SessionRegistry instance;
+	return instance;
+}
+
+int SessionRegistry::Register(RemoteControl* session, const std::string& title,
+							  const std::string& model) {
+	std::lock_guard<std::mutex> lk(fMu);
+	const int id = fNextId++;
+	fEntries.push_back(Entry{id, session, title, model});
+	return id;
+}
+
+void SessionRegistry::Unregister(int id) {
+	std::lock_guard<std::mutex> lk(fMu);
+	for (auto it = fEntries.begin(); it != fEntries.end(); ++it) {
+		if (it->id == id) { fEntries.erase(it); break; }
+	}
+	// Drop any chat attachments that pointed at this session so a stale
+	// ID never routes to a freed RemoteControl.
+	for (auto it = fActiveByChat.begin(); it != fActiveByChat.end();) {
+		if (it->second == id) it = fActiveByChat.erase(it);
+		else ++it;
+	}
+}
+
+void SessionRegistry::UpdateTitle(int id, const std::string& title) {
+	std::lock_guard<std::mutex> lk(fMu);
+	for (auto& e : fEntries) {
+		if (e.id == id) { e.title = title; break; }
+	}
+}
+
+std::vector<SessionRegistry::Entry> SessionRegistry::List() const {
+	std::lock_guard<std::mutex> lk(fMu);
+	return fEntries; // already kept in ascending-id insertion order.
+}
+
+RemoteControl* SessionRegistry::ActiveFor(int64_t chat_id, int* out_id) const {
+	std::lock_guard<std::mutex> lk(fMu);
+	auto it = fActiveByChat.find(chat_id);
+	int wantId = 0;
+	if (it != fActiveByChat.end()) {
+		wantId = it->second;
+	} else if (fEntries.size() == 1) {
+		// With a single live session, default the chat to it so the
+		// common case "just talk to the one session" needs no /session.
+		wantId = fEntries.front().id;
+	}
+	if (wantId == 0) return nullptr;
+	for (const auto& e : fEntries) {
+		if (e.id == wantId) {
+			if (out_id) *out_id = e.id;
+			return e.session;
+		}
+	}
+	return nullptr;
+}
+
+bool SessionRegistry::Attach(int64_t chat_id, int id) {
+	std::lock_guard<std::mutex> lk(fMu);
+	for (const auto& e : fEntries) {
+		if (e.id == id) {
+			fActiveByChat[chat_id] = id;
+			return true;
+		}
+	}
+	return false;
+}
+
+size_t SessionRegistry::Count() const {
+	std::lock_guard<std::mutex> lk(fMu);
+	return fEntries.size();
+}
+
 // ── RemoteControl ─────────────────────────────────────────────
 
 bool RemoteControl::ConfigIsValid(const config::Config& cfg, std::string* reason) {
@@ -749,6 +826,15 @@ bool RemoteControl::Start() {
 	fAllowedTools.clear();
 	fRunning.store(true);
 	fWorkerRunning.store(true);
+	// Register with the process-wide session registry so /sessions and
+	// /session N can see and route to this live session. Use the stored
+	// title (set via SetSessionTitle) or a sensible default.
+	{
+		const std::string title = fSessionTitle.empty()
+			? std::string("session") : fSessionTitle;
+		fSessionId = SessionRegistry::Instance().Register(
+			this, title, fSessionModel.empty() ? fCfgModel : fSessionModel);
+	}
 	fWorker = std::thread(&RemoteControl::WorkLoop, this);
 	fPoller = std::thread(&RemoteControl::PollLoop, this);
 	return true;
@@ -756,6 +842,12 @@ bool RemoteControl::Start() {
 
 void RemoteControl::Stop() {
 	if (!fRunning.exchange(false)) return;
+	// Unregister first so no incoming update routes to a session that is
+	// tearing down.
+	if (fSessionId != 0) {
+		SessionRegistry::Instance().Unregister(fSessionId);
+		fSessionId = 0;
+	}
 	// Wake any thread blocked in AcquireTurn() so it sees
 	// fRunning == false and unblocks cleanly.
 	fTurnCv.notify_all();
@@ -793,6 +885,15 @@ void RemoteControl::SetSharedHistoryAppender(
 void RemoteControl::SendPromptNotice(const std::string& user_text) {
 	if (!fRunning.load() || fPrimaryUserId == 0 || g_muted.load()) return;
 	fClient.SendMessage(fPrimaryUserId, "> " + user_text);
+}
+
+// Set or refresh this session's title for /sessions. When the poller is
+// already running, push the new label straight into the registry; before
+// Start() it is just stored and applied at registration time.
+void RemoteControl::SetSessionTitle(const std::string& title) {
+	fSessionTitle = title;
+	if (fSessionId != 0)
+		SessionRegistry::Instance().UpdateTitle(fSessionId, title);
 }
 
 void RemoteControl::PollLoop() {
@@ -867,6 +968,105 @@ void RemoteControl::PollLoop() {
 			fWorkCv.notify_one();
 		}
 	}
+}
+
+// Handle the built-in session commands owned by the SessionRegistry:
+//   /sessions      — list all live sessions with their IDs
+//   /session N     — attach this chat to session N
+//   /whoami        — show which session this chat is attached to
+// These run before any per-session routing or turn acquisition so a
+// phone can list/switch even while a Claude turn is in progress. Returns
+// true when the update was one of these commands and was fully serviced.
+bool RemoteControl::TryHandleSessionCommand(const Update& u) {
+	if (u.is_callback || u.text.empty() || u.text.front() != '/')
+		return false;
+
+	const std::string cmd = u.text.substr(0, u.text.find(' '));
+	auto& reg = SessionRegistry::Instance();
+
+	if (cmd == "/sessions") {
+		const auto entries = reg.List();
+		int activeId = 0;
+		reg.ActiveFor(u.chat_id, &activeId);
+		std::string out = "Live sessions:\n";
+		if (entries.empty()) {
+			out += "(none)";
+		} else {
+			for (const auto& e : entries) {
+				out += "#" + std::to_string(e.id) + "  " + e.title;
+				if (!e.model.empty()) out += "  (" + e.model + ")";
+				if (e.id == activeId) out += "  [active]";
+				out += "\n";
+			}
+			out += "\nUse /session N to switch.";
+		}
+		fClient.SendMessage(u.chat_id, out);
+		config::LogLine("remote-control /sessions chat=" + std::to_string(u.chat_id));
+		return true;
+	}
+
+	if (cmd == "/session") {
+		// Parse the numeric argument after "/session ".
+		std::string arg;
+		const auto sp = u.text.find(' ');
+		if (sp != std::string::npos) arg = u.text.substr(sp + 1);
+		// Trim surrounding whitespace.
+		while (!arg.empty() && (arg.front() == ' ' || arg.front() == '\t'))
+			arg.erase(arg.begin());
+		while (!arg.empty() && (arg.back() == ' ' || arg.back() == '\t'))
+			arg.pop_back();
+
+		if (arg.empty()) {
+			fClient.SendMessage(u.chat_id,
+				"Usage: /session N  (see /sessions for IDs)");
+			return true;
+		}
+		int id = 0;
+		try {
+			id = std::stoi(arg);
+		} catch (const std::exception&) {
+			fClient.SendMessage(u.chat_id,
+				"Not a number: '" + arg + "'. Usage: /session N");
+			return true;
+		}
+		if (reg.Attach(u.chat_id, id)) {
+			int resolvedId = 0;
+			reg.ActiveFor(u.chat_id, &resolvedId);
+			std::string label;
+			for (const auto& e : reg.List())
+				if (e.id == resolvedId) label = e.title;
+			fClient.SendMessage(u.chat_id,
+				"Attached to session #" + std::to_string(id)
+				+ (label.empty() ? "" : " (" + label + ")")
+				+ ". Your messages now go there.");
+			config::LogLine("remote-control /session attach chat="
+				+ std::to_string(u.chat_id) + " id=" + std::to_string(id));
+		} else {
+			fClient.SendMessage(u.chat_id,
+				"No session #" + std::to_string(id)
+				+ ". Use /sessions to list.");
+		}
+		return true;
+	}
+
+	if (cmd == "/whoami") {
+		int activeId = 0;
+		reg.ActiveFor(u.chat_id, &activeId);
+		if (activeId == 0) {
+			fClient.SendMessage(u.chat_id,
+				"Not attached to any session. Use /sessions then /session N.");
+		} else {
+			std::string label;
+			for (const auto& e : reg.List())
+				if (e.id == activeId) label = e.title;
+			fClient.SendMessage(u.chat_id,
+				"Attached to session #" + std::to_string(activeId)
+				+ (label.empty() ? "" : " (" + label + ")") + ".");
+		}
+		return true;
+	}
+
+	return false;
 }
 
 // Handle slash commands that do NOT require a Claude turn — i.e. every
@@ -1008,6 +1208,10 @@ void RemoteControl::WorkLoop() {
 			job = fWorkQueue.front();
 			fWorkQueue.pop_front();
 		}
+		// Session registry commands (/sessions, /session N, /whoami) are
+		// handled first and never block on a turn, so a phone can list and
+		// switch sessions even while a Claude turn is running.
+		if (TryHandleSessionCommand(job)) continue;
 		// Slash commands that don't invoke Claude are handled here
 		// immediately — without waiting for AcquireTurn() — so the
 		// Telegram user can always use /help, /mute, /new, etc. even

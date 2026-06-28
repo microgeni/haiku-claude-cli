@@ -252,6 +252,71 @@ private:
 	static int64_t NowMs();
 };
 
+// Process-wide registry of live remote-control sessions. Phase 1 of the
+// multi-session design (docs/MULTI_SESSION_REMOTE.md): the Telegram bot
+// can only have one getUpdates poller per token, so all live sessions
+// share one poller and the phone routes to a session by an explicit
+// switch. The registry assigns a small, stable integer ID to each
+// registered RemoteControl and remembers, per Telegram chat, which
+// session that chat is currently "attached" to.
+//
+// Thread-safe: the poll loop (registry reads on every update) and the
+// window/REPL thread (register / unregister) touch it concurrently.
+//
+// In Phase 1 the GUI hosts a single live conversation, so exactly one
+// session is registered; the registry still provides /sessions,
+// /session N, and /whoami end to end so the routing machinery is real
+// and exercised. Phase 2 lights up multiple live sessions.
+class RemoteControl; // forward declaration for the registry.
+
+class SessionRegistry {
+public:
+	// A registered live session. `title` is a snapshot description shown
+	// by /sessions (e.g. the model or the window title); it is captured
+	// at registration and may be refreshed via UpdateTitle.
+	struct Entry {
+		int            id = 0;
+		RemoteControl* session = nullptr;
+		std::string    title;
+		std::string    model;
+	};
+
+	// The single process-wide instance. Created on first use.
+	static SessionRegistry& Instance();
+
+	// Register a live session and return its unique ID (>= 1). The
+	// caller must Unregister with the same ID before the RemoteControl
+	// is destroyed.
+	int Register(RemoteControl* session, const std::string& title,
+				 const std::string& model);
+	void Unregister(int id);
+
+	// Refresh the human-readable title shown by /sessions.
+	void UpdateTitle(int id, const std::string& title);
+
+	// Snapshot of all registered sessions, ordered by ascending ID.
+	std::vector<Entry> List() const;
+
+	// Look up the session a chat is currently attached to. Returns
+	// nullptr when the chat has no attachment yet (caller should hint
+	// /sessions). out_id, when non-null, receives the resolved ID.
+	RemoteControl* ActiveFor(int64_t chat_id, int* out_id = nullptr) const;
+
+	// Attach a chat to a session ID. Returns false when no such ID is
+	// registered. On success the chat's subsequent prompts route there.
+	bool Attach(int64_t chat_id, int id);
+
+	// Convenience: number of registered sessions.
+	size_t Count() const;
+
+private:
+	SessionRegistry() = default;
+	mutable std::mutex          fMu;
+	int                         fNextId = 1;
+	std::vector<Entry>          fEntries;          // ordered by id
+	std::map<int64_t, int>      fActiveByChat;     // chat_id -> session id
+};
+
 // Self-contained background Telegram poller spawned on demand by
 // the /remote-control slash command inside the REPL. Runs in its
 // own thread, polls Telegram for incoming messages from allowed
@@ -332,9 +397,25 @@ public:
 	// turn starts streaming. Called by LocalWorker under the turn lock.
 	void SendPromptNotice(const std::string& user_text);
 
+	// Register/refresh this session's descriptive title in the global
+	// SessionRegistry so /sessions shows something meaningful (the GUI
+	// window title or the CLI's "REPL"). Safe to call before or after
+	// Start(); registration happens in Start() and this just updates the
+	// stored label. `model` is shown in parentheses by /sessions.
+	void SetSessionTitle(const std::string& title);
+
+	// The registry ID assigned to this session in Start(), or 0 when the
+	// poller is not running. Lets the GUI surface the number.
+	int SessionId() const { return fSessionId; }
+
 private:
 	void PollLoop();
 	void WorkLoop();
+	// Handle the built-in session commands (/sessions, /session N,
+	// /whoami) that the SessionRegistry owns. Runs before any per-session
+	// routing so a phone can list and switch even mid-turn. Returns true
+	// when the update was a session command and was fully serviced.
+	bool TryHandleSessionCommand(const Update& u);
 	// Try to handle a slash command immediately, without waiting for
 	// AcquireTurn().  Returns true if the command was fully serviced
 	// (so the caller can skip AcquireTurn / ProcessUpdate).  Returns
@@ -347,6 +428,11 @@ private:
 	Client                       fClient;
 	std::unordered_set<int64_t>  fAllowed;
 	int64_t                      fPrimaryUserId = 0;
+	// Registry ID assigned in Start() (0 while not running) and the
+	// human-readable title shown by /sessions.
+	int                          fSessionId = 0;
+	std::string                  fSessionTitle;
+	std::string                  fSessionModel;
 	// Chat ID of the turn currently running. Set by ProcessUpdate.
 	std::atomic<int64_t>         fActiveChatId { 0 };
 	bool                         fAllowDestructive = false;
