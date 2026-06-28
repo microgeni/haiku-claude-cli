@@ -16,6 +16,16 @@ set -euo pipefail
 version="${VERSION#v}"
 pkg_name="claude_cli-${version}-${BUILD_NUMBER}-x86_64.hpkg"
 
+# The HPKG bundles the GUI app (apps/Claude), which `make package` builds as
+# a prerequisite. The GUI links yaml-cpp (for the Genio-theme syntax
+# highlighter), so its -devel package must be present — the CLI build step
+# does not install it. Install it here if missing so the GUI compile finds
+# <yaml-cpp/yaml.h>.
+if ! pkg-config --exists yaml-cpp 2>/dev/null; then
+    echo "  yaml-cpp headers missing, installing yaml_cpp0.8_devel..."
+    pkgman install -y yaml_cpp0.8_devel
+fi
+
 make clean
 make
 make package PKG_VERSION="$version" PKG_BUILD="$BUILD_NUMBER"
