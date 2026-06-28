@@ -2,6 +2,20 @@ CXX      ?= c++
 CXXSTD   ?= -std=c++17
 WARN     ?= -Wall -Wextra -Wpedantic
 
+# ── Parallel build ──────────────────────────────────────────────────────────
+# Default to one compile job per CPU so a plain `make` uses all cores. The
+# user can still override with an explicit `-jN` on the command line (that
+# wins because command-line flags take precedence) or pin the count with
+# `make JOBS=8`. NPROCS is detected on Haiku/Linux (nproc), macOS/BSD
+# (sysctl), then getconf, falling back to 1.
+NPROCS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+JOBS   ?= $(NPROCS)
+# Only inject -j when the invoking make wasn't already given a job count
+# (avoids the "-jN forced in submake" warning and respects an explicit -j).
+ifeq ($(filter -j%,$(MAKEFLAGS)),)
+    MAKEFLAGS += -j$(JOBS)
+endif
+
 # Build mode. `make` is a fast unoptimized-ish dev build; `make release` is
 # a separate target below that reinvokes make with MODE=release. Each mode
 # gets its own BUILDDIR so switching between them doesn't force a rebuild.
