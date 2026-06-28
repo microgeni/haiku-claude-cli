@@ -164,10 +164,33 @@ session with the conversation topic. Global turn lock unchanged — no
 concurrent turns yet. The class rename to Dispatcher/Session is deferred
 to Phase 2 when multiple live sessions actually exist.
 
-**Phase 2 — GUI multi-window.**
-Move poller ownership to `ClaudeGuiApp`, add "New Session" windows, each
-self-registering. Now `/sessions` on the phone lists real desktop
-windows and `/session N` switches between them.
+**Phase 2 — GUI multi-window.** Split into 2a (single process) and 2b
+(multi-process broker).
+
+*Phase 2a — multiple windows in one GUI process.* Move poller ownership
+out of `ChatWindow` and into `ClaudeGuiApp` (one poller / one token for
+the whole process). Add File ▸ New Session to spawn windows. Each window
+registers a session with the registry; a routed prompt runs a turn in
+the **target** window and streams the reply into that window's GuiSink.
+Global turn lock retained (one turn at a time across windows). The
+registry's session interface is deliberately a **callback/message seam**
+— "run a turn for session N", "the reply chunk for N" — rather than
+direct pokes at window internals, so the same routing path works
+unchanged when the seam becomes cross-process in 2b.
+
+*Phase 2b — multi-process broker (GUI×N and CLI×N share one bot).* An
+in-process registry is a C++ singleton and cannot span processes; two
+processes polling the same token 409 each other. So one process must own
+the token as a **broker** and the others register their sessions over
+IPC. On Haiku the mechanism is `be_roster` + `BMessenger`: a process
+discovers the broker by app signature and exchanges `BMessage`s
+(register session, routed prompt in, reply chunk out, unregister).
+Because 2a already routes through a callback seam, 2b mostly swaps "call
+the local callback" for "send a BMessage to the owning process". Open
+problems unique to 2b: **leader election** (which instance owns the
+token when several launch), **broker crash recovery** (token orphaned —
+elect a new owner), and a small **wire protocol**. Deferred until 2a is
+proven.
 
 **Phase 3 — per-session concurrency.**
 Replace the global turn lock with per-session locks so multiple sessions

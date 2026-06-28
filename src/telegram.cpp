@@ -14,6 +14,7 @@
 #include "api.h"
 #include "commands.h"
 #include "models.h"
+#include "tee_sink.h"
 #include "tools.h"
 #include "tui.h"
 
@@ -699,9 +700,25 @@ SessionRegistry& SessionRegistry::Instance() {
 
 int SessionRegistry::Register(RemoteControl* session, const std::string& title,
 							  const std::string& model) {
+	return Register(session, title, model, nullptr, nullptr, nullptr);
+}
+
+int SessionRegistry::Register(RemoteControl* session, const std::string& title,
+							  const std::string& model,
+							  std::function<nlohmann::json()> historyProvider,
+							  std::function<void(nlohmann::json, nlohmann::json)> historyAppender,
+							  std::function<std::unique_ptr<OutputSink>()> sinkFactory) {
 	std::lock_guard<std::mutex> lk(fMu);
 	const int id = fNextId++;
-	fEntries.push_back(Entry{id, session, title, model});
+	Entry e;
+	e.id              = id;
+	e.session         = session;
+	e.title           = title;
+	e.model           = model;
+	e.historyProvider = std::move(historyProvider);
+	e.historyAppender = std::move(historyAppender);
+	e.sinkFactory     = std::move(sinkFactory);
+	fEntries.push_back(std::move(e));
 	return id;
 }
 
@@ -749,6 +766,27 @@ RemoteControl* SessionRegistry::ActiveFor(int64_t chat_id, int* out_id) const {
 		}
 	}
 	return nullptr;
+}
+
+bool SessionRegistry::Resolve(int64_t chat_id, Entry* out) const {
+	std::lock_guard<std::mutex> lk(fMu);
+	auto it = fActiveByChat.find(chat_id);
+	int wantId = 0;
+	if (it != fActiveByChat.end()) {
+		wantId = it->second;
+	} else if (fEntries.size() == 1) {
+		// Single-session default: a chat with no explicit /session still
+		// routes to the only live session.
+		wantId = fEntries.front().id;
+	}
+	if (wantId == 0) return false;
+	for (const auto& e : fEntries) {
+		if (e.id == wantId) {
+			if (out) *out = e; // copies the std::function callbacks.
+			return true;
+		}
+	}
+	return false;
 }
 
 bool SessionRegistry::Attach(int64_t chat_id, int id) {
@@ -1330,14 +1368,28 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 
 	fActiveChatId.store(u.chat_id);
 
+	// Resolve which live session this chat is attached to (Phase 2a). The
+	// resolved entry supplies the conversation history and a factory for a
+	// window-bound mirror sink so the reply streams into the target
+	// window's GUI as well as the phone. Falls back to the legacy
+	// fSharedHistory* members when no entry resolves (single-surface CLI
+	// or an unrouted chat), preserving the original behaviour.
+	SessionRegistry::Entry routed;
+	const bool haveRoute = SessionRegistry::Instance().Resolve(u.chat_id, &routed);
+
+	auto historyProvider = (haveRoute && routed.historyProvider)
+		? routed.historyProvider : fSharedHistory;
+	auto historyAppender = (haveRoute && routed.historyAppender)
+		? routed.historyAppender : fSharedHistoryAppend;
+
 	const json snapshot = msgs;
 	msgs.push_back({{"role", "user"}, {"content", u.text}});
 
-	// Build the messages array: shared local history (if any) + this
-	// user's per-chat thread.
+	// Build the messages array: routed session's shared history (if any) +
+	// this user's per-chat thread.
 	json call_msgs;
-	if (fSharedHistory) {
-		call_msgs = fSharedHistory();
+	if (historyProvider) {
+		call_msgs = historyProvider();
 		for (const auto& m : msgs) call_msgs.push_back(m);
 	} else {
 		call_msgs = msgs;
@@ -1364,11 +1416,26 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	if (!g_muted.load())
 		tg_sink.BeginMessage("assistant");
 
+	// When the routed session offers a window-bound mirror, build it and
+	// tee the reply into both the phone and that window's GUI. The phone
+	// (TelegramSink) is the PRIMARY sink so permission prompts go to the
+	// person who sent the prompt; the window GuiSink is a passive mirror.
+	std::unique_ptr<OutputSink> mirror;
+	std::unique_ptr<TeeSink>    tee;
+	OutputSink* active = &tg_sink;
+	if (haveRoute && routed.sinkFactory) {
+		mirror = routed.sinkFactory();
+		if (mirror) {
+			tee = std::make_unique<TeeSink>(&tg_sink, mirror.get());
+			active = tee.get();
+		}
+	}
+
 	std::cout << tui::ClaudePrompt();
 	const std::string effective_system = config::ComposeSystem(fCustomSystem);
 	const auto result = api::SendWithTools(auth, fCfgModel, fCfgMaxTokens,
 	                                       call_msgs, effective_system,
-	                                       g_muted.load() ? nullptr : &tg_sink);
+	                                       g_muted.load() ? nullptr : active);
 	std::cout << "\n";
 	fActiveChatId.store(fPrimaryUserId);
 
@@ -1387,10 +1454,10 @@ void RemoteControl::ProcessUpdate(const Update& u_in) {
 	                             {"content", result.assistant_text}};
 	msgs.push_back(assistant_msg);
 
-	// Write-back to local REPL history.
-	if (fSharedHistoryAppend) {
+	// Write-back to the routed session's local history (REPL/GUI).
+	if (historyAppender) {
 		const json user_msg = msgs[msgs.size() - 2];
-		fSharedHistoryAppend(user_msg, assistant_msg);
+		historyAppender(user_msg, assistant_msg);
 	}
 
 	config::LogLine("remote-control tx user=" + std::to_string(u.user_id)

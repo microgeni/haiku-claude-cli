@@ -274,11 +274,28 @@ public:
 	// A registered live session. `title` is a snapshot description shown
 	// by /sessions (e.g. the model or the window title); it is captured
 	// at registration and may be refreshed via UpdateTitle.
+	//
+	// The three callbacks form the routing seam (Phase 2a): when a prompt
+	// is routed to this session, the poll worker uses them to fetch the
+	// session's conversation history, append the exchanged turn back, and
+	// build a front-end sink (e.g. a window-bound GuiSink) to stream the
+	// reply into. They are deliberately type-erased std::functions — not
+	// BeAPI types — so this header stays portable to the CLI build; the
+	// GUI captures its BMessenger inside the sinkFactory lambda. Any may
+	// be null: a null sinkFactory means "no local mirror, phone only"
+	// (the legacy single-surface behaviour).
 	struct Entry {
 		int            id = 0;
 		RemoteControl* session = nullptr;
 		std::string    title;
 		std::string    model;
+		// Returns a read-only snapshot of this session's message history.
+		std::function<nlohmann::json()> historyProvider;
+		// Appends (userMsg, assistantMsg) back into the session history.
+		std::function<void(nlohmann::json, nlohmann::json)> historyAppender;
+		// Constructs a fresh OutputSink to mirror the reply into this
+		// session's local surface (window). Owned by the caller.
+		std::function<std::unique_ptr<OutputSink>()> sinkFactory;
 	};
 
 	// The single process-wide instance. Created on first use.
@@ -286,9 +303,16 @@ public:
 
 	// Register a live session and return its unique ID (>= 1). The
 	// caller must Unregister with the same ID before the RemoteControl
-	// is destroyed.
+	// is destroyed. The callback overload wires the Phase 2a routing
+	// seam (history provider/appender + sink factory); the legacy
+	// overload registers a phone-only session with no local mirror.
 	int Register(RemoteControl* session, const std::string& title,
 				 const std::string& model);
+	int Register(RemoteControl* session, const std::string& title,
+				 const std::string& model,
+				 std::function<nlohmann::json()> historyProvider,
+				 std::function<void(nlohmann::json, nlohmann::json)> historyAppender,
+				 std::function<std::unique_ptr<OutputSink>()> sinkFactory);
 	void Unregister(int id);
 
 	// Refresh the human-readable title shown by /sessions.
@@ -296,6 +320,13 @@ public:
 
 	// Snapshot of all registered sessions, ordered by ascending ID.
 	std::vector<Entry> List() const;
+
+	// Resolve the full Entry (including routing callbacks) that a chat is
+	// currently attached to. Returns true and fills *out when an active
+	// session exists; false when the chat has no attachment and there is
+	// no single-session default. Used by the poll worker to route a
+	// prompt to the right session's history and surface.
+	bool Resolve(int64_t chat_id, Entry* out) const;
 
 	// Look up the session a chat is currently attached to. Returns
 	// nullptr when the chat has no attachment yet (caller should hint
