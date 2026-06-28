@@ -41,3 +41,4 @@ build-release/
 .genio.yaml
 .genio-claude-selection.txt
 
+*.tar
