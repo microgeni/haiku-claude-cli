@@ -14,6 +14,8 @@
 
 #include "oauth.h"
 #include "paths.h"
+#include "skills.h"
+#include "agents.h"
 
 namespace config {
 
@@ -392,6 +394,8 @@ std::string ComposeSystem(const std::string& flag_system,
 	append(LoadOptionalFile(paths::ProjectMemoryPath()));
 	append(BfsSystemBlock());
 	append(BehaviorSystemBlock());
+	append(skills::SystemBlock());
+	append(agents::SystemBlock());
 	append(flag_system);
 
 	// Append the working directory so Claude always knows where relative

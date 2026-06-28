@@ -55,5 +55,9 @@ step "v1.4/v1.4.1 async-feature tests"
 bash tests/async_features_test.sh
 echo "PASS"
 
+step "Agent Skills + Subagents tests"
+bash tests/skills_agents_test.sh
+echo "PASS"
+
 echo
 echo "=== all tests passed ==="

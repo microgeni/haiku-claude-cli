@@ -168,7 +168,12 @@ api::Permission TerminalSink::AskPermission(const std::string& tool_name,
 	const std::string allow_session_label = dir_scope.empty()
 	    ? "Yes, allow all " + tool_name + " this session  (shift+tab)"
 	    : "Yes, allow all " + tool_name + " in " + dir_scope + " this session  (shift+tab)";
-	const std::vector<std::string> choices = { "Yes", allow_session_label, "No" };
+	const std::vector<std::string> choices = {
+		"Yes",
+		allow_session_label,
+		"\xE2\x9A\xA1 Enable ludicrous mode (auto-approve all tools this session)",
+		"No",
+	};
 
 	if (api::g_active_esc_guard) api::g_active_esc_guard->pause();
 	repl::BlockStdin();
@@ -194,11 +199,21 @@ api::Permission TerminalSink::AskPermission(const std::string& tool_name,
 		if (denial_reason) *denial_reason = "user chose to amend the prompt";
 		return Permission::Deny;
 	}
+	// "Yes, allow all X this session"
 	if (picked == 1) {
 		api::AlwaysAllowed().insert(tool_name);
 		return Permission::Allow;
 	}
+	// "⚡ Enable ludicrous mode"
+	if (picked == 2) {
+		api::g_ludicrous_mode.store(true);
+		std::cout << tui::Yellow("\xE2\x9A\xA1 LUDICROUS MODE ENGAGED")
+		          << tui::Dim(" \xe2\x80\x94 all tool permissions auto-approved") << "\n";
+		return Permission::Allow;
+	}
+	// "Yes" (allow once)
 	if (picked == 0) return Permission::Allow;
+	// "No" (deny)
 	if (denial_reason)
 		*denial_reason = "user declined permission for " + tool_name;
 	return Permission::Deny;

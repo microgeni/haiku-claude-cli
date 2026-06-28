@@ -29,6 +29,10 @@ std::string UserMemoryPath();          // <ConfigDir>/CLAUDE.md
 std::string ProjectMemoryPath();       // ./CLAUDE.md (cwd-relative)
 std::string SessionsDir();             // <ConfigDir>/sessions  (GUI)
 std::string GuiPrefsPath();            // <ConfigDir>/gui_prefs.msg  (GUI)
+std::string UserSkillsDir();           // <ConfigDir>/skills
+std::string ProjectSkillsDir();        // ./.claude/skills (cwd-relative)
+std::string UserAgentsDir();           // <ConfigDir>/agents
+std::string ProjectAgentsDir();        // ./.claude/agents (cwd-relative)
 
 // Create `path` and any missing parent directories with mode 0700.
 // Returns false only if a mkdir(2) call fails for a reason other

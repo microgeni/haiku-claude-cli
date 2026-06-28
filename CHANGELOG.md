@@ -23,6 +23,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   auto-approve state is always visible, matching the CLI's status-bar
   treatment. The badge tracks the menu checkmark.
 
+- **Agent Skills** (Claude Code parity) — drop a `SKILL.md` into
+  `<config>/skills/<name>/` (personal) or `./.claude/skills/<name>/`
+  (project) and it becomes available as `/skill-name`. SKILL.md uses
+  YAML frontmatter (`name`, `description`, `disable-model-invocation`,
+  `allowed-tools`) plus a markdown body. The body supports `{{args}}`
+  substitution and `` !`shell cmd` `` dynamic-context injection (the
+  command's stdout is inlined before Claude sees the skill). Skills
+  whose frontmatter does not set `disable-model-invocation: true` are
+  advertised to the model so it can invoke them automatically when a
+  request matches the description. Project skills override user skills
+  of the same name. List them with `/skills`. Loaded by both the CLI
+  and the GUI.
+- **Subagents** (Claude Code parity) — define specialized agents as
+  Markdown files in `<config>/agents/<name>.md` (personal) or
+  `./.claude/agents/<name>.md` (project), with YAML frontmatter
+  (`name`, `description`, `tools`, `model`, `color`) and a body that
+  becomes the agent's system prompt. The `Task` tool now accepts a
+  `subagent_type` argument: when it matches a loaded definition, the
+  sub-turn runs with that agent's prompt and model override (the
+  `haiku`/`sonnet`/`opus` aliases resolve to current model ids). The
+  available subagents are listed to the model in the system prompt so
+  it can delegate appropriately. List them with `/agents`.
+- **GUI skill/subagent integration** — the GUI's slash-command popup now
+  offers `/skills`, `/agents`, and every loaded skill name. Typing
+  `/skills` or `/agents` prints the loaded definitions inline, and
+  `/skill-name` expands the skill (with `{{args}}` and `` !`cmd` ``
+  injection) into the next turn.
+
+
 ## [1.8.1] - 2026-07-23
 
 ### Fixed

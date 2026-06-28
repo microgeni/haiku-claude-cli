@@ -42,6 +42,18 @@ std::string ProjectMemoryPath() { return "CLAUDE.md"; }
 std::string SessionsDir()       { return ConfigDir() + "/sessions"; }
 std::string GuiPrefsPath()      { return ConfigDir() + "/gui_prefs.msg"; }
 
+// Agent Skills (Claude Code parity). Personal skills live under the
+// config dir; project skills live in ./.claude/skills, checked into
+// the repo so a team shares them. Each skill is a directory named
+// <skill-name> containing a SKILL.md entry point.
+std::string UserSkillsDir()     { return ConfigDir() + "/skills"; }
+std::string ProjectSkillsDir()  { return ".claude/skills"; }
+
+// Subagents (Claude Code parity). Markdown files with YAML
+// frontmatter; project definitions override user definitions.
+std::string UserAgentsDir()     { return ConfigDir() + "/agents"; }
+std::string ProjectAgentsDir()  { return ".claude/agents"; }
+
 // Walk `path` one component at a time and mkdir each prefix. mkdir(2)
 // returning EEXIST is fine — someone (maybe a previous call, maybe the
 // user) already created it. Any other error aborts the walk.

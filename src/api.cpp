@@ -18,6 +18,7 @@
 
 #include <curl/curl.h>
 
+#include "agents.h"
 #include "hooks.h"
 #include "output_sink.h"
 #include "repl.h"
@@ -882,12 +883,36 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 					tres.content  = "error: Task requires a `prompt` argument";
 					tres.is_error = true;
 				} else {
-					const std::string sub_label = tinput.value("description", std::string{"sub-agent"});
+					// Resolve an optional subagent definition. When the
+					// model passes a subagent_type matching a loaded
+					// agent, run the sub-turn with that agent's system
+					// prompt and model override; otherwise fall back to
+					// the generic single-shot sub-agent.
+					const std::string sub_type =
+						tinput.value("subagent_type", std::string{});
+					const agents::Agent* agent =
+						sub_type.empty() ? nullptr : agents::Find(sub_type);
+
+					std::string sub_label =
+						tinput.value("description", std::string{"sub-agent"});
+					if (agent) sub_label = agent->name + ": " + sub_label;
+
+					// The sub-agent's system prompt is the parent system
+					// (so memory/behavior still apply) with the agent's
+					// body prepended as its specialization.
+					std::string sub_system = custom_system;
+					if (agent && !agent->prompt.empty()) {
+						sub_system = agent->prompt
+						           + (custom_system.empty() ? "" : "\n\n" + custom_system);
+					}
+					const std::string sub_model =
+						agent ? agents::ResolveModel(*agent, model) : model;
+
 					sink.OnMeta("  -> " + sub_label + ":");
 					std::cout << tui::ClaudePrompt();
 					json sub_messages = json::array({{{"role", "user"}, {"content", sub_prompt}}});
-					const auto sub = SendConversation(auth, model, max_tokens,
-					                                  sub_messages, custom_system,
+					const auto sub = SendConversation(auth, sub_model, max_tokens,
+					                                  sub_messages, sub_system,
 					                                  /*include_tools=*/false,
 					                                  &sink);
 					std::cout << "\n";
@@ -908,7 +933,11 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 				            json{{"tool_input", tinput}, {"tool_result", tres.content},
 				                 {"is_error", tres.is_error}}, tname);
 			} else {
-				sink.OnToolStatus("\xF0\x9F\x94\xA7 running " + tname + "\xE2\x80\xA6");
+				const std::string args = tools::ArgSummary(tname, tinput);
+				std::string phase = "\xF0\x9F\x94\xA7 running " + tname;
+				if (!args.empty()) phase += ": " + args;
+				phase += "\xE2\x80\xA6";
+				sink.OnToolStatus(phase);
 				tres = tools::Run(tname, tinput);
 				sink.OnToolStatus("");   // done
 				sink.OnMeta(tres.is_error

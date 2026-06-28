@@ -20,12 +20,14 @@
 #include <nlohmann/json.hpp>
 
 #include "api.h"
+#include "agents.h"
 #include "commands.h"
 #include "hooks.h"
 #include "models.h"
 #include "notify.h"
 #include "paths.h"
 #include "repl.h"
+#include "skills.h"
 #include "stats.h"
 #include "telegram.h"
 #include "tui.h"
@@ -379,12 +381,16 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	repl::Init(paths::ReplHistoryPath());
 
 	commands::Load(paths::ConfigDir() + "/commands");
+	skills::Load(paths::UserSkillsDir(), paths::ProjectSkillsDir());
+	agents::Load(paths::UserAgentsDir(), paths::ProjectAgentsDir());
 	std::vector<std::string> all_slash = {
 		"/help", "/clear", "/model", "/compact", "/usage",
-		"/todos", "/memory", "/stats", "/open", "/notify",
+		"/todos", "/memory", "/stats", "/skills", "/agents",
+		"/open", "/notify",
 		"/remote-control", "/ludicrous", "/exit", "/quit",
 	};
 	for (const auto& c : commands::Names()) all_slash.push_back("/" + c);
+	for (const auto& c : skills::Names())   all_slash.push_back("/" + c);
 	repl::SetSlashCommands(all_slash);
 
 	// Mutable copy of the initial auth so we can refresh tokens
