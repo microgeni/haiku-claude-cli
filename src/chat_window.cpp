@@ -3,7 +3,7 @@
 // Three native widget classes are defined here before ChatWindow:
 //   InputView    — multi-line input with history, placeholder, Shift+Enter.
 //   TokenBar     — thin coloured fill bar showing context usage.
-//   SettingsPanel — slide-in panel for system prompt / model config.
+//   SettingsDialog — dialog window for system prompt / model config.
 //   SpinnerView  — animated thinking indicator.
 //
 // All view mutations happen on the main thread inside MessageReceived or
@@ -29,7 +29,9 @@
 #include <Font.h>
 #include <GroupLayout.h>
 #include <GroupView.h>
+#include <Box.h>
 #include <LayoutBuilder.h>
+#include <LayoutUtils.h>
 #include <Menu.h>
 #include <MenuBar.h>
 #include <Message.h>
@@ -54,8 +56,10 @@
 
 #include <private/interface/AboutWindow.h>
 #include "api.h"
+#include "agents.h"
 #include "code_styler.h"
 #include "commands.h"
+#include "skills.h"
 #include "syntax_highlight.h"
 #include "config.h"
 #include "gui_sink.h"
@@ -63,6 +67,7 @@
 #include "models.h"
 #include "paths.h"
 #include "session_store.h"
+#include "telegram.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -479,7 +484,7 @@ void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
 {
 	static const char* kBuiltins[] = {
 		"/help", "/clear", "/new", "/model", "/compact",
-		"/memory", "/usage", "/version", nullptr
+		"/memory", "/usage", "/version", "/skills", "/agents", nullptr
 	};
 
 	// Collect matching commands.
@@ -488,6 +493,16 @@ void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
 		if (name.size() >= prefix.size() &&
 		    name.substr(0, prefix.size()) == prefix)
 			matches.push_back(name);
+	}
+	// Agent Skills are invoked the same way as custom commands
+	// (/skill-name), so offer them in the completion popup too.
+	for (const auto& name : skills::Names()) {
+		if (name.size() >= prefix.size() &&
+		    name.substr(0, prefix.size()) == prefix) {
+			bool dup = false;
+			for (const auto& m : matches) if (m == name) { dup = true; break; }
+			if (!dup) matches.push_back(name);
+		}
 	}
 	for (int i = 0; kBuiltins[i]; ++i) {
 		const std::string b(kBuiltins[i]);
@@ -525,7 +540,7 @@ void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
 InputView::InputView(const char* name)
 	: BTextView(BRect(0, 0, 200, 24), name,
 	            BRect(4, 4, 196, 20),
-	            B_FOLLOW_NONE, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
+	            B_FOLLOW_ALL, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
 {
 	SetWordWrap(true);
 	SetStylable(false);
@@ -545,11 +560,6 @@ void InputView::AttachedToWindow()
 	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
 	// Set text rect now that we have a real frame.
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	// The input fills its cell inside the fixed-height input bar; the bar
-	// (not the input) owns the strip height, so only a small min is
-	// needed here and an unlimited max lets it fill the bar.
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, 24.0f));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 }
 
 void InputView::Draw(BRect updateRect)
@@ -654,6 +664,71 @@ void InputView::FrameResized(float w, float h)
 	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
 }
 
+// ===========================================================================
+// InputContainer — Genio TerminalTab-style host (see TerminalTab.cpp). A
+// plain B_FOLLOW_ALL BView with no size overrides claims layout space (its
+// default unlimited max lets the layout stretch it); the real content is an
+// AddChild'd scroll view that the container resizes to fill itself on every
+// frame change.
+// ===========================================================================
+
+InputContainer::InputContainer(const char* name)
+	: BView(name, B_FRAME_EVENTS | B_WILL_DRAW)
+{
+	SetResizingMode(B_FOLLOW_ALL);
+	// Use the dark chat background (not panel gray) so any sub-pixel gap
+	// between the scroll view and the container edges blends with the input
+	// instead of showing a gray strip.
+	SetViewColor(kColorChatBg);
+	SetLowColor(kColorChatBg);
+}
+
+void InputContainer::SetContent(BView* content, float minHeight)
+{
+	fContent   = content;
+	fMinHeight = minHeight;
+	if (fContent == nullptr)
+		return;
+	// The content is positioned/sized manually (not by a layout), exactly
+	// like TerminalTab's terminal view.
+	fContent->SetResizingMode(B_FOLLOW_NONE);
+	fContent->SetExplicitMinSize(BSize(48.0f, minHeight));
+	fContent->SetExplicitPreferredSize(BSize(48.0f, minHeight));
+	fContent->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+	AddChild(fContent);
+	// Pin the container's own height so the bottom bar is exactly the input
+	// row height. Min and preferred sit at minHeight; max is unlimited in
+	// height so the host absorbs any leftover row height (from the button
+	// column's spacing/insets) and the dark input reaches the window's
+	// bottom edge with no gray dead strip.
+	SetExplicitMinSize(BSize(48.0f, minHeight));
+	SetExplicitPreferredSize(BSize(B_SIZE_UNLIMITED, minHeight));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+}
+
+void InputContainer::AttachedToWindow()
+{
+	BView::AttachedToWindow();
+	if (fContent != nullptr) {
+		BRect b = Bounds();
+		fContent->MoveTo(0, 0);
+		fContent->ResizeTo(b.Width(), b.Height());
+	}
+}
+
+void InputContainer::FrameResized(float w, float h)
+{
+	if (fContent != nullptr)
+		fContent->ResizeTo(w, h);
+	BView::FrameResized(w, h);
+	// A divider drag resizes this container but does NOT fire the window's
+	// FrameResized, so the sibling button column can be left un-repainted and
+	// appear to vanish. Invalidate the parent (the input bar) so every sibling
+	// — including the Send/Stop/Clear buttons — is redrawn on each drag tick.
+	if (BView* parent = Parent())
+		parent->Invalidate();
+}
+
 void InputView::SetEnabled(bool enabled)
 {
 	fEnabled = enabled;
@@ -733,13 +808,27 @@ void InputView::_HistoryDown()
 TokenBar::TokenBar()
 	: BView("tokenbar", B_WILL_DRAW)
 {
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, static_cast<float>(kBarHeight)));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, static_cast<float>(kBarHeight)));
+	// Height = one line of plain-font text plus a small fixed padding. The
+	// bar only draws a single row of text (usage label + stats), so it does
+	// not need the full control-look item spacing that made it look like it
+	// had an unused extra row.
+	font_height fh;
+	be_plain_font->GetHeight(&fh);
+	float height = std::ceil(fh.ascent + fh.descent + fh.leading) + 6.0f;
+	// Pin a small explicit min WIDTH (not B_SIZE_UNSET): a custom BView with an
+	// unset min width reports its current frame width as the minimum, which at
+	// the initial window size latches the whole chat column — and thus the
+	// window — to a huge minimum width, letting the bottom input bar overflow
+	// and clip its buttons. A small min lets the bar and window shrink freely.
+	SetExplicitMinSize(BSize(40, height));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, height));
+	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
 }
 
-void TokenBar::Draw(BRect /*updateRect*/)
+void TokenBar::Draw(BRect updateRect)
 {
-	const BRect r      = Bounds();
+	BRect r = Bounds();
 	const float filled = (fMax > 0)
 		? std::min(1.0f, static_cast<float>(fUsed) / static_cast<float>(fMax))
 		: 0.0f;
@@ -759,9 +848,12 @@ void TokenBar::Draw(BRect /*updateRect*/)
 	SetHighColor(barColor);
 	FillRect(fill);
 
-	// Divider line at top.
-	SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_DARKEN_3_TINT));
-	StrokeLine(r.LeftTop(), r.RightTop());
+	// Top border drawn the Genio/GlobalStatusView way: a control-look border
+	// on the top edge instead of a hand-stroked divider line, so it matches
+	// the system look and the toolbar/menu separators.
+	be_control_look->DrawBorder(this, r, updateRect,
+		ui_color(B_PANEL_BACKGROUND_COLOR),
+		B_PLAIN_BORDER, 0, BControlLook::B_TOP_BORDER);
 
 	// Label "42,100 / 200k  (21%)".
 	auto commaNum = [](int v) -> std::string {
@@ -780,11 +872,22 @@ void TokenBar::Draw(BRect /*updateRect*/)
 	const std::string lbl  = commaNum(fUsed) + " / " + shortK(fMax) + "  (" + pct + ")";
 
 	BFont f(be_plain_font);
-	f.SetSize(10.0f);
+	f.SetSize(12.0f);
 	SetFont(&f);
 	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-	float strW = f.StringWidth(lbl.c_str());
-	MovePenTo(std::floor(r.right - strW - 8.0f), r.bottom - 3.0f);
+
+	// Vertically centre the text in the bar: place the baseline so that the
+	// ascent/descent block is centred within the view's height.
+	font_height fh;
+	f.GetHeight(&fh);
+	const float textH    = fh.ascent + fh.descent;
+	const float baseline = std::floor((r.Height() - textH) / 2.0f + fh.ascent);
+
+	const float lblW    = f.StringWidth(lbl.c_str());
+	const float lblLeft = std::floor(r.right - lblW - 8.0f);
+	// The context-window label is the priority indicator, so draw it first
+	// and reserve its space; the left-aligned stats yield to it.
+	MovePenTo(lblLeft, baseline);
 	DrawString(lbl.c_str());
 
 	// Left-aligned per-session stats, mirroring the CLI status row:
@@ -800,8 +903,38 @@ void TokenBar::Draw(BRect /*updateRect*/)
 		std::snprintf(costBuf, sizeof(costBuf), "  \xC2\xB7  $%.4f", cost);
 		stats += costBuf;
 	}
-	MovePenTo(r.left + 4.0f, r.bottom - 3.0f);
-	DrawString(stats.c_str());
+
+	// When ludicrous mode is on, draw a yellow "⚡ LUDICROUS" badge at the
+	// far left so the auto-approve state is always visible, mirroring the
+	// CLI status bar. The session stats start after the badge(s).
+	float statsLeft = r.left + 4.0f;
+	const std::string sep = "  \xC2\xB7  ";
+	if (fLudicrous) {
+		const std::string badge = "\xE2\x9A\xA1 LUDICROUS";
+		SetHighColor(230, 170, 50, 255); // amber, matches the bar's warning tone
+		MovePenTo(statsLeft, baseline);
+		DrawString(badge.c_str());
+		statsLeft += f.StringWidth(badge.c_str()) + f.StringWidth(sep.c_str());
+		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+	}
+	if (fRemote) {
+		const std::string badge = "\xF0\x9F\x93\xA1 REMOTE"; // 📡
+		SetHighColor(60, 180, 200, 255); // cyan, distinct from the amber ludicrous tone
+		MovePenTo(statsLeft, baseline);
+		DrawString(badge.c_str());
+		statsLeft += f.StringWidth(badge.c_str()) + f.StringWidth(sep.c_str());
+		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+	}
+
+	// Only draw the stats if they fit to the left of the context-window label
+	// without overlapping it (leave an 8px gutter between the two). When the
+	// window is narrow the stats are dropped rather than overdrawing the
+	// always-important "x / 200k (n%)" indicator.
+	const float statsWidth = f.StringWidth(stats.c_str());
+	if (statsLeft + statsWidth + 8.0f <= lblLeft) {
+		MovePenTo(statsLeft, baseline);
+		DrawString(stats.c_str());
+	}
 }
 
 void TokenBar::SetPrice(double inputPerM, double outputPerM)
@@ -826,33 +959,61 @@ void TokenBar::SetTokens(int used, int maxCtx)
 	Invalidate();
 }
 
-
-// ===========================================================================
-// SettingsPanel
-// ===========================================================================
-
-SettingsPanel::SettingsPanel(const std::string& systemPrompt, int maxTokens,
-                             int notifyMinSec, const std::string& workingDir,
-                             BMenuField* modelField)
-	: BView("settings", B_WILL_DRAW | B_SUPPORTS_LAYOUT)
+void TokenBar::SetLudicrous(bool on)
 {
-	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	_BuildLayout(systemPrompt, maxTokens, notifyMinSec, workingDir, modelField);
-	// Start hidden.
-	Hide();
+	if (fLudicrous == on) return;
+	fLudicrous = on;
+	Invalidate();
 }
 
-void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens,
-                                 int notifyMinSec, const std::string& workingDir,
-                                 BMenuField* modelField)
+void TokenBar::SetRemote(bool on)
+{
+	if (fRemote == on) return;
+	fRemote = on;
+	Invalidate();
+}
+
+
+// ===========================================================================
+// SettingsDialog
+// ===========================================================================
+
+SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
+                               int maxTokens, int notifyMinSec,
+                               const std::string& workingDir,
+                               BMenuField* modelField)
+	: BWindow(BRect(0, 0, 640, 480), "Settings",
+	          B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+	          B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
+	  fParent(parent)
+{
+	_BuildLayout(systemPrompt, maxTokens, notifyMinSec, workingDir, modelField);
+	// Give the window a sensible default size: wide enough to read a full
+	// working-directory path, then center it. AUTO_UPDATE_SIZE_LIMITS only
+	// sets the minimum, so resize explicitly to the preferred width.
+	ResizeTo(640, 480);
+	CenterOnScreen();
+	// Start the looper running but keep the window off-screen: Hide() before
+	// Show() leaves a net-hidden window whose looper is alive, so Toggle()
+	// can reveal it instantly and the parent can lock it to read values.
+	Hide();
+	Show();
+}
+
+void SettingsDialog::_BuildLayout(const std::string& systemPrompt, int maxTokens,
+                                  int notifyMinSec, const std::string& workingDir,
+                                  BMenuField* modelField)
 {
 	// System-prompt label + editor.
 	BStringView* sysLabel = new BStringView("syslbl", "System Prompt:");
 	fSysPromptView        = new BTextView("sysprompt", B_WILL_DRAW | B_FRAME_EVENTS);
 	fSysPromptView->SetWordWrap(true);
 	fSysPromptView->SetText(systemPrompt.c_str());
+	fSysPromptView->SetExplicitMinSize(BSize(80, 80));
 	BScrollView* sysScroll = new BScrollView("sysscroll", fSysPromptView,
 	                                          0, false, true, B_FANCY_BORDER);
+	sysScroll->SetExplicitMinSize(BSize(100, 80));
+	sysScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
 	// Max tokens field.
 	fMaxTokensCtl = new BTextControl("maxtokens", "Max tokens:",
@@ -881,32 +1042,62 @@ void SettingsPanel::_BuildLayout(const std::string& systemPrompt, int maxTokens,
 	                                   workingDir.c_str(), nullptr);
 	fWorkingDirCtl->SetToolTip("Directory Claude uses as the root for "
 	                            "relative file paths and tool calls.");
+	// Make the path field roomy enough to read a full path without scrolling.
+	fWorkingDirCtl->SetExplicitMinSize(BSize(360, B_SIZE_UNSET));
 	BButton* browseBtn = new BButton("browseworkdir", "Browse" B_UTF8_ELLIPSIS,
 	                                  new BMessage(gui::MSG_BROWSE_WORKDIR));
-
-	// Close button.
 	BButton* closeBtn = new BButton("closesettings", "Close",
 	                                 new BMessage(gui::MSG_SETTINGS));
+	closeBtn->MakeDefault(true);
 
-	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_SMALL_INSETS)
+	// Browse and Close are handled by the parent ChatWindow (the working-dir
+	// BFilePanel and the value read-back logic both live there).
+	if (fParent) {
+		browseBtn->SetTarget(fParent);
+		closeBtn->SetTarget(fParent);
+	}
+
+	// Group the controls into labelled BBoxes, mirroring Genio's ConfigWindow
+	// idiom (MakeViewFor wraps each settings group in a BBox with a label).
+	BBox* modelBox = new BBox("modelbox");
+	modelBox->SetLabel("Model");
+	BGroupView* modelGroup = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+	modelGroup->GroupLayout()->SetInsets(B_USE_ITEM_INSETS);
+	BLayoutBuilder::Group<>(modelGroup)
 		.Add(modelField)
+		.Add(fMaxTokensCtl)
 		.Add(sysLabel)
 		.Add(sysScroll, 1.0f)
-		.Add(fMaxTokensCtl)
+	.End();
+	modelBox->AddChild(modelGroup);
+
+	BBox* behaviorBox = new BBox("behaviorbox");
+	behaviorBox->SetLabel("Behavior");
+	BGroupView* behaviorGroup = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+	behaviorGroup->GroupLayout()->SetInsets(B_USE_ITEM_INSETS);
+	BLayoutBuilder::Group<>(behaviorGroup)
 		.Add(notifyLabel)
 		.Add(fNotifyDelay)
-		.Add(fWorkingDirCtl)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+			.Add(fWorkingDirCtl, 1.0f)
+			.Add(browseBtn, 0.0f)
+		.End()
+	.End();
+	behaviorBox->AddChild(behaviorGroup);
+
+	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_WINDOW_SPACING)
+		.Add(modelBox, 1.0f)
+		.Add(behaviorBox, 0.0f)
 		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
 			.AddGlue()
-			.Add(browseBtn)
+			.Add(closeBtn)
 		.End()
-		.Add(closeBtn)
 	.End();
 }
 
-void SettingsPanel::SetValues(const std::string& systemPrompt, int maxTokens,
-                              int notifyMinSec, const std::string& workingDir)
+void SettingsDialog::SetValues(const std::string& systemPrompt, int maxTokens,
+                               int notifyMinSec, const std::string& workingDir)
 {
 	if (fSysPromptView)
 		fSysPromptView->SetText(systemPrompt.c_str());
@@ -921,14 +1112,14 @@ void SettingsPanel::SetValues(const std::string& systemPrompt, int maxTokens,
 		fWorkingDirCtl->SetText(workingDir.c_str());
 }
 
-std::string SettingsPanel::SystemPrompt() const
+std::string SettingsDialog::SystemPrompt() const
 {
 	if (!fSysPromptView) return {};
 	const char* t = fSysPromptView->Text();
 	return t ? std::string(t) : std::string();
 }
 
-int SettingsPanel::MaxTokens() const
+int SettingsDialog::MaxTokens() const
 {
 	if (!fMaxTokensCtl) return 8192;
 	const char* t = fMaxTokensCtl->Text();
@@ -937,33 +1128,48 @@ int SettingsPanel::MaxTokens() const
 	return (v > 0) ? v : 8192;
 }
 
-bool SettingsPanel::NotificationsEnabled() const
+bool SettingsDialog::NotificationsEnabled() const
 {
 	// A delay of 0 means notifications are turned off entirely.
 	if (!fNotifyDelay) return true;
 	return fNotifyDelay->Value() > 0;
 }
 
-int SettingsPanel::NotifyMinSeconds() const
+int SettingsDialog::NotifyMinSeconds() const
 {
 	if (!fNotifyDelay) return 5;
 	return static_cast<int>(fNotifyDelay->Value());
 }
 
-std::string SettingsPanel::WorkingDir() const
+std::string SettingsDialog::WorkingDir() const
 {
 	if (!fWorkingDirCtl) return {};
 	const char* t = fWorkingDirCtl->Text();
 	return t ? std::string(t) : std::string();
 }
 
-void SettingsPanel::Toggle()
+void SettingsDialog::Toggle()
 {
 	fOpen = !fOpen;
-	if (fOpen)
-		Show();
-	else
-		Hide();
+	if (fOpen) {
+		if (IsHidden())
+			Show();
+		Activate(true);
+	} else {
+		if (!IsHidden())
+			Hide();
+	}
+}
+
+bool SettingsDialog::QuitRequested()
+{
+	// The window is created once and kept alive (hidden) for the life of
+	// the app, so a close request from the title-bar X must not actually
+	// quit it. Defer to the parent's MSG_SETTINGS handler (which reads the
+	// edited values back, then calls Toggle() to hide us).
+	if (fOpen && fParent)
+		fParent->PostMessage(gui::MSG_SETTINGS);
+	return false;
 }
 
 
@@ -1015,8 +1221,13 @@ WelcomeView::WelcomeView()
 			delete icon;
 	}
 
-	// Reserve enough height for the icon plus two text lines.
-	SetExplicitMinSize(BSize(B_SIZE_UNSET, 96));
+	// Reserve enough height for the icon plus two text lines. Pin a small
+	// minimum WIDTH too: a plain BView with an unset min width reports its
+	// current frame width as the minimum, which (at the initial window size)
+	// latches the whole chat column — and thus the window — to a huge minimum
+	// width, letting the bottom input bar overflow and clip its buttons. A
+	// small explicit min lets the column and window shrink freely.
+	SetExplicitMinSize(BSize(40, 96));
 	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 96));
 }
 
@@ -1185,6 +1396,15 @@ void ChatWindow::_BuildMenuBar()
 		new BMessage(gui::MSG_LUDICROUS));
 	fLudicrousItem->SetMarked(api::g_ludicrous_mode.load());
 	toolsMenu->AddItem(fLudicrousItem);
+
+	// Remote control: starts a background Telegram poller so allowed users can
+	// drive turns on this machine. The checkmark mirrors fRemote's running
+	// state, kept in sync by _ToggleRemote().
+	fRemoteItem = new BMenuItem(
+		"\xF0\x9F\x93\xA1 Remote Control  \xE2\x80\x94  Telegram bridge",
+		new BMessage(gui::MSG_REMOTE_CONTROL));
+	fRemoteItem->SetMarked(false);
+	toolsMenu->AddItem(fRemoteItem);
 	fMenuBar->AddItem(toolsMenu);
 
 	// ── Help ────────────────────────────────────────────────────────────────
@@ -1212,7 +1432,12 @@ void ChatWindow::_BuildMenuBar()
 void ChatWindow::_BuildLayout()
 {
 	// ── Output BTextView (always-dark chat area) ─────────────────────────────
-	fOutput = new BTextView(BRect(0, 0, 600, 400), "output",
+	// B_FOLLOW_ALL so the text view fills its enclosing BScrollView (the chat
+	// uses all available space). The scroll view — not this view — is what
+	// the window layout sizes; we give fScroll explicit min AND max sizes
+	// below so the layout is free to shrink/grow it without the BTextView's
+	// content-derived minimum freezing the whole window's width.
+	fOutput = new ChatTextView(BRect(0, 0, 600, 400), "output",
 	                        BRect(4, 4, 596, 396),
 	                        B_FOLLOW_ALL, B_WILL_DRAW | B_FRAME_EVENTS);
 	fOutput->MakeEditable(false);
@@ -1223,13 +1448,29 @@ void ChatWindow::_BuildLayout()
 	fOutput->SetLowColor(kColorChatBg);
 	fOutput->SetHighColor(kColorText);
 	fOutput->SetFontAndColor(be_fixed_font, B_FONT_ALL, &kColorText);
+	// Pin a small explicit minimum directly on the text view. A bare
+	// BTextView reports a content-derived minimum (often its current
+	// width), which propagates up through the BScrollView and the
+	// BSplitView and freezes the whole window's minimum width at the
+	// current content width. An explicit small min keeps the window
+	// freely shrinkable; B_FOLLOW_ALL still lets it fill the scroll view.
+	fOutput->SetExplicitMinSize(BSize(80, 40));
 
 	fScroll = new BScrollView("scroll", fOutput,
 	                          B_FOLLOW_NONE, 0, false, true, B_FANCY_BORDER);
-	// Allow the scrolled chat to shrink small so it yields vertical space
-	// to the fixed bottom strip when the window is reduced (otherwise the
-	// BTextView's natural min-height squeezes the input out of view).
+	// Decouple the chat's layout size from the BTextView's content-derived
+	// size: an explicit min lets it yield space to the fixed bottom strip,
+	// and an explicit *max* of unlimited tells the layout it may grow to
+	// fill all available space (so the chat uses the whole window) without
+	// the inner BTextView's intrinsic minimum freezing the window width.
 	fScroll->SetExplicitMinSize(BSize(120, 50));
+	fScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+	// Also pin the *preferred* width small. The BScrollView otherwise
+	// derives a preferred width from its target's current content width and
+	// the window's BGroupLayout latches that as a minimum, re-freezing the
+	// window (and clipping the bottom buttons) once the frame shrinks past
+	// the current content width.
+	fScroll->SetExplicitPreferredSize(BSize(120, 50));
 
 	// ── Welcome splash (shown above the chat until the first turn) ───────────
 	fWelcome = new WelcomeView();
@@ -1243,6 +1484,9 @@ void ChatWindow::_BuildLayout()
 
 	// ── Token bar ────────────────────────────────────────────────────────────
 	fTokenBar = new TokenBar();
+	// Mirror any pre-existing ludicrous state (e.g. restored session) so the
+	// badge matches the Tools menu checkmark from the start.
+	fTokenBar->SetLudicrous(api::g_ludicrous_mode.load());
 
 	// ── Session sidebar (left dock, hidden until View ▸ Sessions) ─────────────
 	fSessionList = new SessionListView("sessionlist", this);
@@ -1251,6 +1495,17 @@ void ChatWindow::_BuildLayout()
 		new BMessage(gui::MSG_SESSION_SELECT));
 	fSessionScroll = new BScrollView("sessionscroll", fSessionList,
 	                                 0, false, true, B_FANCY_BORDER);
+	// A BListView reports a content-derived minimum width (the widest session
+	// title), which propagates up through the scroll view, the session panel
+	// and the horizontal split, freezing the whole window's minimum width far
+	// wider than it should be — and that in turn lets the bottom input bar
+	// overflow to the right and clip the buttons once the window is narrowed.
+	// Pin a small explicit min on both the list and its scroller so the
+	// sidebar (and the window) can shrink freely; the splitter governs the
+	// real width.
+	fSessionList->SetExplicitMinSize(BSize(60, B_SIZE_UNSET));
+	fSessionScroll->SetExplicitMinSize(BSize(60, 50));
+	fSessionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 	BButton* sessNew = new BButton("sessnew", "New",
 	                               new BMessage(gui::MSG_SESSION_NEW));
 	BButton* sessOpen = new BButton("sessopen", "Open",
@@ -1296,31 +1551,41 @@ void ChatWindow::_BuildLayout()
 
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
-
-	// ── Buttons ──────────────────────────────────────────────────────────────
-	fSend = new BButton("send", "Send", new BMessage(gui::MSG_SEND));
-	fSend->MakeDefault(true);
-
-	fStop = new BButton("stop", "Stop", new BMessage(gui::MSG_CANCEL));
-	fStop->Hide(); // hidden until busy
+	// Wrap the input in a BScrollView so a vertical scrollbar appears on the
+	// right when the typed text grows taller than the visible area. Horizontal
+	// scrolling stays off (the input word-wraps).
+	fInputScroll = new BScrollView("inputscroll", fInput,
+		B_FOLLOW_ALL, B_FRAME_EVENTS, false /*horizontal*/, true /*vertical*/,
+		B_NO_BORDER);
+	// A BTextView only grows to its content height, so when the typed text is
+	// shorter than the input area the scroll view shows its own background
+	// below the text — a grey strip against the dark input. Paint the scroll
+	// view (and its inner document area) in the same dark chat colour so that
+	// empty region blends seamlessly with the input instead of showing grey.
+	fInputScroll->SetViewColor(kColorChatBg);
+	fInputScroll->SetLowColor(kColorChatBg);
+	// Host the scroll view in an InputContainer (Genio TerminalTab pattern):
+	// the container claims the layout space and manually resizes the scroll
+	// view to fill it, so the input reliably takes the whole bottom-bar area
+	// without any content-driven size overrides. The starting height is a
+	// few text lines tall.
+	font_height ifh;
+	be_plain_font->GetHeight(&ifh);
+	const float kInputLineH = ifh.ascent + ifh.descent + ifh.leading + 1.0f;
+	const float kInputRowH  = 5.0f * kInputLineH + 12.0f;
+	fInputHost = new InputContainer("inputhost");
+	fInputHost->SetContent(fInputScroll, kInputRowH);
 
 	// ── Model picker ─────────────────────────────────────────────────────────
 	fModelMenu  = new BPopUpMenu(fModel.c_str());
 	fModelField = new BMenuField("modelpicker", "Model:", fModelMenu);
 	_PopulateModelMenu();
 
-	// ── Secondary toolbar buttons ─────────────────────────────────────────────
-	fClearBtn    = new BButton("clearbtn",    "Clear",    new BMessage(gui::MSG_CLEAR_OUTPUT));
-	fSettingsBtn = new BButton("settingsbtn", "\xE2\x9A\x99", // ⚙
-	                            new BMessage(gui::MSG_SETTINGS));
-	fSettingsBtn->SetToolTip("Settings (Cmd+,)");
-
-	// ── Settings panel (right) ────────────────────────────────────────────────
-	fSettings = new SettingsPanel(fSystemPrompt, fMaxTokens, fNotifyMinSec,
-	                               fWorkingDir, fModelField);
-	// Small min-width so the window can still shrink; splitter governs.
-	fSettings->SetExplicitMinSize(BSize(120, B_SIZE_UNSET));
-	fSettings->SetExplicitMaxSize(BSize(560, B_SIZE_UNLIMITED));
+	// ── Settings dialog (separate window, created hidden) ─────────────────────
+	// The model picker lives inside the dialog (reparented there by the
+	// layout builder). The dialog is shown/hidden via File ▸ Settings.
+	fSettings = new SettingsDialog(this, fSystemPrompt, fMaxTokens,
+	                               fNotifyMinSec, fWorkingDir, fModelField);
 
 	// ── Find bar (hidden until Cmd-F) ─────────────────────────────────────────
 	// A thin horizontal strip: query field | ◀ | ▶ | counter | ✕.
@@ -1352,94 +1617,172 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	// ── Layout ────────────────────────────────────────────────────────────────
-	// The session sidebar, chat area, and settings panel sit in a single
-	// horizontal BSplitView (Genio-style) so both the left (sidebar) and
-	// right (settings) dividers can be dragged. The chat column (welcome
-	// splash + scroll) is wrapped in its own view as the middle item.
-	BView* chatColumn = new BView("chatcolumn", B_SUPPORTS_LAYOUT);
-	chatColumn->SetResizingMode(B_FOLLOW_NONE);
-	BLayoutBuilder::Group<>(chatColumn, B_VERTICAL, 0)
+	// The session sidebar and chat area sit in a horizontal BSplitView so the
+	// sidebar divider can be dragged. The chat column (welcome splash +
+	// scroll) is the second item. It is a BGroupView so its own layout
+	// reflows its children on resize (Genio uses group views for such
+	// columns rather than bare B_FOLLOW_NONE BViews with explicit-size pins).
+	BGroupView* chatColumn = new BGroupView("chatcolumn", B_VERTICAL, 0.0f);
+	BLayoutBuilder::Group<>(chatColumn)
 		.Add(fWelcome, 0.0f)
 		.Add(fScroll, 1.0f)
 	.End();
-	// Let the chat column shrink in both axes — the BTextView/BScrollView
-	// would otherwise report a large min size (wide + tall) that crowds
-	// out the fixed bottom strip when the window is shrunk, making the
-	// input prompt disappear. A small explicit min lets the chat yield.
-	chatColumn->SetExplicitMinSize(BSize(160, 60));
 
 	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
 	fSplit->SetName("mainsplit");
 	BLayoutBuilder::Split<>(fSplit)
-		.Add(fSessionPanel, 0.22f)   // sidebar  — collapsible
-		.Add(chatColumn,    0.56f)   // chat     — takes the rest
-		.Add(fSettings,     0.22f);  // settings — collapsible
-	// Both side panels are collapsible; the chat (index 1) is not.
+		.Add(fSessionPanel, 0.28f)   // sidebar  — collapsible
+		.Add(chatColumn,    0.72f);  // chat     — takes the rest
+	// The sidebar is collapsible; the chat (index 1) is not.
 	fSplit->SetCollapsible(0, true);
-	fSplit->SetCollapsible(2, true);
 
-	// Input row: input (expands) | vertical button column. The thinking
-	// spinner is rendered inline in the chat transcript (after the
-	// "claude ▸" header), not as a separate widget here.
-	// ── Bottom input bar — a dedicated fixed-height view ──────────────────────
-	// Wrapping the input + buttons in their own BView (like the session
-	// sidebar is its own panel) makes the layout treat the whole strip as
-	// one indivisible block with an explicit height, so it can never be
-	// squeezed away when the window shrinks. It's also independently
-	// show/hide-able.
-	fInputBar = new BView("inputbar", B_SUPPORTS_LAYOUT);
-	fInputBar->SetResizingMode(B_FOLLOW_NONE);
+	// ── Bottom input pane ─────────────────────────────────────────────────────
+	// Built to match Genio's ConsoleIOTabView verbatim — the golden-standard
+	// pane with a content area and a side button column:
+	//
+	//   Group(this, B_HORIZONTAL, 0.0f)
+	//     .Add(content, 3.0f)
+	//     .AddGroup(B_VERTICAL, 0.0f)
+	//       .SetInsets(B_USE_SMALL_SPACING)
+	//       .AddGlue()
+	//       .Add(button)…
+	//     .End()
+	//
+	// The input takes weight 3 (fills all leftover width); the buttons live
+	// in a weight-0 vertical sub-group with a leading glue, so they keep
+	// their natural width pinned to the right and never get clipped or
+	// stretched. fInputBar is a BGroupView so its own layout reflows its
+	// children on a live resize (no LayoutView/InvalidateTree hack needed).
+	// ── Bottom input pane ─────────────────────────────────────────────────────
+	// Genio ConsoleIOTabView idiom: input fills the width (weight 1), a
+	// compact button column sits on the right. The input scroll view is told
+	// to FILL the row height (B_SIZE_UNLIMITED max) so it is exactly as tall
+	// as the button column — no top/bottom misalignment or dead gap. The row
+	// height is therefore driven by the buttons (two visible at a time, since
+	// Send and Stop share a slot), giving a comfortable multi-line input.
+	fSend = new BButton("send", "Send", new BMessage(gui::MSG_SEND));
+	fSend->MakeDefault(true);
+	fStop = new BButton("stop", "Stop", new BMessage(gui::MSG_CANCEL));
+	fStop->Hide();   // hidden until busy; Send shows in its place
+	fClearBtn = new BButton("clearbtn", "Clear",
+		new BMessage(gui::MSG_CLEAR_OUTPUT));
+	// A uniform button width keeps the column tidy.
+	float inBtnW = std::max({ fSend->PreferredSize().Width(),
+	                          fStop->PreferredSize().Width(),
+	                          fClearBtn->PreferredSize().Width() });
+	fSend->SetExplicitSize(BSize(inBtnW, B_SIZE_UNSET));
+	fStop->SetExplicitSize(BSize(inBtnW, B_SIZE_UNSET));
+	fClearBtn->SetExplicitSize(BSize(inBtnW, B_SIZE_UNSET));
+
+	fInputBar = new BGroupView("inputbar", B_HORIZONTAL, B_USE_SMALL_SPACING);
 	fInputBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-
-	// Button column as its own fixed-width view so it's always visible on
-	// the right and never squeezed by the weight-1 input when the window
-	// resizes.
-	BView* buttonCol = new BView("buttoncol", B_SUPPORTS_LAYOUT);
-	buttonCol->SetResizingMode(B_FOLLOW_NONE);
-	BLayoutBuilder::Group<>(buttonCol, B_VERTICAL, 2.0f)
-		.SetInsets(0, 0, 3, 0)   // small right inset so focus rings aren't clipped
-		.Add(fSend)
-		.Add(fStop)
-		.Add(fClearBtn)
-		.Add(fSettingsBtn)
-		.AddGlue()
+	BLayoutBuilder::Group<>(fInputBar)
+		.SetInsets(0.0f, 0.0f, 0.0f, 0.0f)
+		.Add(fInputHost, 1.0f)
+		.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.0f)
+			.SetInsets(0.0f, 0.0f, 2.0f, 2.0f)
+			// Trailing glue pushes the button column to the TOP of the input
+			// pane, so Send/Stop/Clear sit at the top edge of the input area.
+			.Add(fSend)
+			.Add(fStop)
+			.Add(fClearBtn)
+			.AddGlue()
+		.End()
 	.End();
-	buttonCol->SetExplicitMinSize(BSize(104, B_SIZE_UNSET));
-	buttonCol->SetExplicitMaxSize(BSize(104, B_SIZE_UNLIMITED));
 
-	BLayoutBuilder::Group<>(fInputBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_SMALL_INSETS, 4, B_USE_SMALL_INSETS, 4)
-		.Add(fInput, 1.0f)
-		.Add(buttonCol, 0.0f)
+	// ── Bottom pane container ──────────────────────────────────────────────────
+	// The find bar and input bar form one logical "input pane" that docks
+	// against the chat area. Grouping them into a single BGroupView lets the
+	// whole pane be the bottom item of a vertical BSplitView, so the divider
+	// between chat and input is draggable (Genio editor/output split idiom).
+	// The token bar is NOT part of this pane: it belongs to the chat area
+	// above the divider, so the divider sits directly below the token bar and
+	// the usage readout stays pinned to the chat output it describes.
+	BGroupView* inputPane = new BGroupView("inputpane", B_VERTICAL, 0.0f);
+	fInputPane = inputPane;   // keep a member handle for show/hide toggling
+	inputPane->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	BLayoutBuilder::Group<>(inputPane)
+		.Add(fFindBar, 0.0f)
+		.Add(fInputBar, 1.0f)
 	.End();
-	// Fixed strip height: tall enough for the 3-row button column
-	// (Send/Stop, Clear, Settings) plus spacing and insets. min == max so
-	// the layout can neither grow nor shrink it.
-	fInputBar->SetExplicitMinSize(BSize(B_SIZE_UNSET, 132.0f));
-	fInputBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 132.0f));
+	// Do NOT force an explicit minimum on the pane. Genio's ConsoleIOTabView
+	// lets the layout engine derive the pane's minimum from its children, so
+	// the button column (Send/Stop/Clear) always reserves its full height and
+	// the buttons never clip when the window or splitter shrinks the pane.
+	// The input host carries its own small min; the derived pane min is the
+	// taller of the input row and the button column.
+
+	// ── Chat area (top of the vertical split) ──────────────────────────────────
+	// The sidebar/chat split plus the token bar form the top item. Keeping the
+	// token bar here — above the divider — means the draggable divider sits
+	// directly below the token bar, and the usage readout stays attached to the
+	// chat output it summarises rather than riding up and down with the input.
+	BGroupView* chatArea = new BGroupView("chatarea", B_VERTICAL, 0.0f);
+	chatArea->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	BLayoutBuilder::Group<>(chatArea)
+		.Add(fSplit,    1.0f)
+		.Add(fTokenBar, 0.0f)
+	.End();
+
+	// ── Vertical split: chat (top) over input pane (bottom) ────────────────────
+	// Mirrors Genio's nested AddSplit(B_VERTICAL): the chat area (sidebar/chat
+	// split + token bar) is the top item, the input pane the bottom item, so
+	// dragging the divider trades height between the chat output and the input.
+	fVSplit = new BSplitView(B_VERTICAL, 1.0f);
+	fVSplit->SetName("vsplit");
+	BLayoutBuilder::Split<>(fVSplit)
+		.Add(chatArea,  0.89f)   // chat area — takes most of the height
+		.Add(inputPane, 0.11f);  // input pane — collapsible (~half its old size)
+	// The input pane is collapsible; the chat (index 0) is not.
+	fVSplit->SetCollapsible(0, false);
+	fVSplit->SetCollapsible(1, true);
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(fMenuBar, 0.0f)
-		.Add(fSplit, 1.0f)
-		.Add(fTokenBar, 0.0f)
-		.Add(fFindBar, 0.0f)
-		.Add(fInputBar, 0.0f)
+		.Add(fVSplit, 1.0f)
 	.End();
 
-	// The window must never be smaller than the sum of the fixed rows
-	// plus a minimal chat, or the layout will collapse/hide the bottom
-	// input bar (observed: fInputBar reported hidden on over-shrink).
-	// Compute an explicit floor from the known row heights rather than
-	// trusting GetLayout()->MinSize(), which proved unreliable here.
-	const float kInputBarH = 132.0f;
-	const float kTokenBarH = static_cast<float>(TokenBar::kBarHeight);
-	const float kMenuH     = fMenuBar ? fMenuBar->Frame().Height() : 20.0f;
-	const float kChatMinH  = 80.0f;
-	const float minH = kMenuH + kChatMinH + kTokenBarH + kInputBarH + 24.0f;
-	const float minW = 360.0f;
+	// ── Window minimum size ─────────────────────────────────────────────────
+	// A BSplitView (and a layout group holding a manually-resized child) will
+	// NOT shrink a child below its minimum size — instead it lets the child
+	// overflow past the window edge, clipping content. Vertically that hangs
+	// the input pane off the bottom; horizontally it pushes the Send/Stop/
+	// Clear button column off the right edge. The only robust fix — and what
+	// Genio relies on for its Console I/O tab — is to forbid the window from
+	// ever being smaller than what the layout genuinely needs, using the
+	// views' real derived minimums (not magic numbers, and not Frame(), which
+	// is still empty before the first layout pass).
+
+	const float kInputPaneMinH = fInputBar->MinSize().height;
+	// Keep the chat area itself usable; its derived min (a tiny BTextView min
+	// plus the token bar) can be near-zero, so floor it to a few visible lines.
+	const float kChatAreaMinH  = std::max(120.0f, chatArea->MinSize().height);
+	const float kMenuH         = fMenuBar ? fMenuBar->PreferredSize().height
+	                                      : 20.0f;
+	const float kSplitterH     = fVSplit->SplitterSize();
+
+	const float minH = kMenuH + kChatAreaMinH + kSplitterH + kInputPaneMinH
+	                 + 8.0f /*frame slack*/;
+
+	// Horizontal floor: the window must be at least as wide as the widest of
+	// its full-width rows — the input bar (input field + button column) and
+	// the chat area (chat split + token bar) — plus a little frame slack, so
+	// the button column is never pushed off the right edge.
+	const float minW = std::max({ 360.0f,
+	                              fInputBar->MinSize().width + 8.0f,
+	                              chatArea->MinSize().width + 8.0f });
 	SetSizeLimits(minW, 32767, minH, 32767);
 	fWindowMinH = minH;
 	fWindowMinW = minW;
+
+	// Belt-and-suspenders: pin the pane's minimum height to the input bar's
+	// own derived minimum (the button column / input row), NOT the whole
+	// pane's (which includes the currently-hidden find bar). This gives the
+	// vertical BSplitView an unambiguous floor so it can never crush the pane
+	// and clip the Send/Stop/Clear buttons, without wasting input height on
+	// the find bar while it is hidden.
+	inputPane->SetExplicitMinSize(BSize(B_SIZE_UNSET,
+	                                     fInputBar->MinSize().height));
 
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
@@ -1504,23 +1847,59 @@ void ChatWindow::_RepositionOverlays()
 	fJumpBtn->MoveTo(sb.right - bw - 12.0f, sb.bottom - bh - 12.0f);
 }
 
+// Re-assert the window's size limits after the base class has shown the
+// window and the layout has run its first pass. A window-level BLayout
+// otherwise overwrites the limits we set in _BuildLayout with the layout's
+// own (too-wide) computed MinSize, which blocks horizontal shrinking.
+void ChatWindow::Show()
+{
+	BWindow::Show();
+	if (Lock()) {
+		SetSizeLimits(fWindowMinW, 32767, fWindowMinH, 32767);
+		Unlock();
+	}
+}
+
 // Recompute the input scroll view's maximum height so it never takes more
 // than 30 % of the window height (with a hard floor of kMinLines).
 void ChatWindow::FrameResized(float w, float h)
 {
 	BWindow::FrameResized(w, h);
-	// Safety net: if the layout ever collapses/hides the bottom input bar
-	// on an over-shrink, bring it back when View > Input says it's shown.
-	if (fInputBar && fInputBar->IsHidden()
-			&& fInputItem && fInputItem->IsMarked()) {
-		fInputBar->Show();
+
+	// The BSplitView does not always track the window's content width on a
+	// live resize — it leaves its children (and thus the chat column) frozen
+	// at their previous width, pushing content off the right edge. Nudging
+	// just the split's layout makes it re-fit its items to the new width.
+	if (fSplit) {
+		fSplit->InvalidateLayout(true);
+		fSplit->Relayout();
 	}
-	// Force the window layout to recompute child frames on resize. Without
-	// this, some children (notably the fixed-size input-bar buttons) can
-	// be left at stale positions/sizes after a resize even though they're
-	// correct at startup.
-	if (GetLayout())
-		GetLayout()->Relayout(true);
+	if (fVSplit) {
+		fVSplit->InvalidateLayout(true);
+		fVSplit->Relayout();
+	}
+
+	// During a live drag the app_server issues a continuous stream of
+	// FrameResized events but does not always repaint layout-managed children
+	// that sit beside a manually-resized B_FOLLOW_ALL view (the InputContainer)
+	// — the Send/Stop/Clear column can be left un-redrawn and appear to vanish.
+	// Force the whole input bar (and each button) to repaint every tick so the
+	// buttons stay on screen throughout the drag.
+	if (fInputBar) {
+		fInputBar->Invalidate();
+		if (fSend) fSend->Invalidate();
+		if (fStop) fStop->Invalidate();
+		if (fClearBtn) fClearBtn->Invalidate();
+	}
+
+	if (fInputPane && fInputPane->IsHidden()
+			&& fInputItem && fInputItem->IsMarked()) {
+		fInputPane->Show();
+	}
+	// The TokenBar text is drawn by hand; repaint it so its right-aligned
+	// context label re-runs the collision logic at the new width.
+	if (fTokenBar)
+		fTokenBar->Invalidate();
 	_RepositionOverlays();
 	// Keep output text rect in sync with the view bounds so word-wrap
 	// and Insert() render correctly after the window is resized.
@@ -1528,10 +1907,6 @@ void ChatWindow::FrameResized(float w, float h)
 		BRect b = fOutput->Bounds();
 		fOutput->SetTextRect(b.InsetByCopy(4.0f, 4.0f));
 	}
-	// A resize can leave the input unfocused, which shows the dim
-	// placeholder and makes an empty prompt look "grayed out". If the
-	// input was the focus before the resize, re-assert it so it keeps the
-	// dark+cyan active appearance (don't steal focus otherwise).
 	if (fInput && fInput->IsFocus())
 		fInput->Invalidate();
 }
@@ -1555,7 +1930,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_NEW_CHAT:
 		_NewChat();
-		break;case gui::MSG_CLEAR_OUTPUT:
+		break;
+
+	case gui::MSG_CLEAR_OUTPUT:
 		_ClearOutput();
 		break;
 
@@ -1566,15 +1943,20 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 
 	case gui::MSG_SETTINGS:
-		if (fSettings->IsOpen()) {
-			// Panel is open — closing it: read back the edited values.
-			fSystemPrompt         = fSettings->SystemPrompt();
-			fMaxTokens            = fSettings->MaxTokens();
-			fNotificationsEnabled = fSettings->NotificationsEnabled();
-			fNotifyMinSec         = fSettings->NotifyMinSeconds();
-			fWorkingDir           = fSettings->WorkingDir();
+		// fSettings is a separate BWindow (its own looper); lock it before
+		// touching its views from this (the main window's) thread.
+		if (fSettings && fSettings->Lock()) {
+			if (fSettings->IsOpen()) {
+				// Dialog is open — closing it: read back edited values.
+				fSystemPrompt         = fSettings->SystemPrompt();
+				fMaxTokens            = fSettings->MaxTokens();
+				fNotificationsEnabled = fSettings->NotificationsEnabled();
+				fNotifyMinSec         = fSettings->NotifyMinSeconds();
+				fWorkingDir           = fSettings->WorkingDir();
+			}
+			fSettings->Toggle();
+			fSettings->Unlock();
 		}
-		fSettings->Toggle();
 		break;
 
 	case gui::MSG_BROWSE_WORKDIR: {
@@ -1613,14 +1995,23 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 
 	case gui::MSG_TOGGLE_INPUT:
-		if (fInputBar) {
-			if (fInputBar->IsHidden()) {
-				fInputBar->Show();
+		// Hide/show the entire bottom split item (find bar + input bar), not
+		// just the input bar inside it — otherwise the empty pane slot stays
+		// in the split and shows as a grey strip. Hiding the whole pane lets
+		// the vertical split give its space back to the chat area, so the chat
+		// fills down to the window's bottom edge.
+		if (fInputPane) {
+			if (fInputPane->IsHidden()) {
+				fInputPane->Show();
 				if (fInputItem) fInputItem->SetMarked(true);
-				fInput->MakeFocus(true);
+				if (fInput) fInput->MakeFocus(true);
 			} else {
-				fInputBar->Hide();
+				fInputPane->Hide();
 				if (fInputItem) fInputItem->SetMarked(false);
+			}
+			if (fVSplit) {
+				fVSplit->InvalidateLayout(true);
+				fVSplit->Relayout();
 			}
 		}
 		break;
@@ -1718,9 +2109,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (!fCommandPopup || !fInput) break;
 		const char* prefix = nullptr;
 		msg->FindString("prefix", &prefix);
-		// Compute screen point: top-left of the input view.
-		BPoint pt = fInput->Frame().LeftTop();
-		ConvertToScreen(&pt);
+		// Compute screen point: top-left of the input view. fInput now lives
+		// inside fInputScroll, so convert from the input view's own
+		// coordinate space (Bounds), not via the window.
+		BPoint pt = fInput->Bounds().LeftTop();
+		fInput->ConvertToScreen(&pt);
 
 		fCommandPopup->Show(prefix ? prefix : "/", pt);
 		break;
@@ -1751,7 +2144,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case B_SIMPLE_DATA:
 	case B_REFS_RECEIVED: {
 		// If the message carries a directory ref from the working-dir
-		// BFilePanel, push it into the settings panel; otherwise treat it
+		// BFilePanel, push it into the settings dialog; otherwise treat it
 		// as a file-drop and forward to _RefsReceived.
 		bool handledByPanel = false;
 		if (fSettings) {
@@ -1760,11 +2153,14 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				BEntry entry(&ref);
 				if (entry.IsDirectory()) {
 					BPath path(&ref);
-					if (path.InitCheck() == B_OK) {
+					// fSettings is a separate looper — lock before touching
+					// its views from the main window thread.
+					if (path.InitCheck() == B_OK && fSettings->Lock()) {
 						fSettings->SetValues(fSettings->SystemPrompt(),
 						                     fSettings->MaxTokens(),
 						                     fSettings->NotifyMinSeconds(),
 						                     path.Path());
+						fSettings->Unlock();
 						handledByPanel = true;
 					}
 				}
@@ -1777,7 +2173,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_MODELS_READY: {
 		// Background fetch returned — rebuild the model menu with live data.
+		// The menu lives in the settings dialog (a separate looper), so
+		// lock that window before mutating it.
 		if (!fModelMenu) break;
+		const bool dlgLocked = fSettings && fSettings->Lock();
 		fModelMenu->RemoveItems(0, fModelMenu->CountItems(), true);
 		bool found = false;
 		const char* id   = nullptr;
@@ -1805,6 +2204,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		fModelMenu->SetRadioMode(true);
 		// Update the field label to reflect the live list.
 		if (fModelField) fModelField->MenuItem()->SetLabel(fModel.c_str());
+		if (dlgLocked) fSettings->Unlock();
 		break;
 	}
 
@@ -2038,32 +2438,38 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// On cancellation (fTurnCommitted == false) fall back to the
 		// plain user/assistant text so a half-finished tool exchange
 		// doesn't leave an orphaned tool_use that would 400 the API.
-		if (fCompactPending) {
-			// /compact: replace the underlying context with the summary
-			// (the streamed assistant text), but keep the on-screen
-			// transcript visible. On failure leave history untouched.
-			if (fTurnCommitted && !fPendingAssistantText.empty()) {
-				fMessages = nlohmann::json::array({
-					{{"role", "user"},
-					 {"content", "[previous conversation context follows]"}},
-					{{"role", "assistant"}, {"content", fPendingAssistantText}},
-				});
-				_AppendToolLine("\xE2\x9C\x93 context compacted \xE2\x80\x94 "
-					"conversation summarized; on-screen history kept\n");
+		{
+			// Hold fMessagesMutex while swapping/appending so the remote-control
+			// poller's SetSharedHistory snapshot never observes a half-updated
+			// or moved-from array.
+			std::lock_guard<std::mutex> lock(fMessagesMutex);
+			if (fCompactPending) {
+				// /compact: replace the underlying context with the summary
+				// (the streamed assistant text), but keep the on-screen
+				// transcript visible. On failure leave history untouched.
+				if (fTurnCommitted && !fPendingAssistantText.empty()) {
+					fMessages = nlohmann::json::array({
+						{{"role", "user"},
+						 {"content", "[previous conversation context follows]"}},
+						{{"role", "assistant"}, {"content", fPendingAssistantText}},
+					});
+					_AppendToolLine("\xE2\x9C\x93 context compacted \xE2\x80\x94 "
+						"conversation summarized; on-screen history kept\n");
+				} else {
+					_AppendToolLine("[compact failed \xE2\x80\x94 history unchanged]\n");
+				}
+				fCompactPending = false;
+			} else if (fTurnCommitted && fWorkerMessages.is_array()
+					&& !fWorkerMessages.empty()) {
+				fMessages = std::move(fWorkerMessages);
 			} else {
-				_AppendToolLine("[compact failed \xE2\x80\x94 history unchanged]\n");
+				if (!fPendingUserText.empty())
+					fMessages.push_back({{"role", "user"},
+					                     {"content", fPendingUserText}});
+				if (!fPendingAssistantText.empty())
+					fMessages.push_back({{"role", "assistant"},
+					                     {"content", fPendingAssistantText}});
 			}
-			fCompactPending = false;
-		} else if (fTurnCommitted && fWorkerMessages.is_array()
-				&& !fWorkerMessages.empty()) {
-			fMessages = std::move(fWorkerMessages);
-		} else {
-			if (!fPendingUserText.empty())
-				fMessages.push_back({{"role", "user"},
-				                     {"content", fPendingUserText}});
-			if (!fPendingAssistantText.empty())
-				fMessages.push_back({{"role", "assistant"},
-				                     {"content", fPendingAssistantText}});
 		}
 		fWorkerMessages = nlohmann::json::array();
 		fPendingUserText.clear();
@@ -2132,8 +2538,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				const size_t start = preview.find_first_not_of(" \t\n\r");
 				if (start != std::string::npos) preview = preview.substr(start);
 				// Truncate to ~120 chars for the notification body.
-				if (preview.size() > 120)
-					preview = preview.substr(0, 117) + "\xE2\x80\xA6"; // …
+				if (preview.size() > 120) {
+					preview.resize(117);
+					preview += "\xE2\x80\xA6"; // …
+				}
 				if (!preview.empty())
 					notif.SetContent(preview.c_str());
 
@@ -2194,10 +2602,43 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		const bool nowOn = !api::g_ludicrous_mode.load();
 		api::g_ludicrous_mode.store(nowOn);
 		if (fLudicrousItem) fLudicrousItem->SetMarked(nowOn);
+		if (fTokenBar) fTokenBar->SetLudicrous(nowOn);
 		const std::string notice = nowOn
 			? "\xE2\x9A\xA1 Ludicrous mode ON \xE2\x80\x94 all tool permissions auto-approved\n"
 			: "\xE2\x9A\xA1 Ludicrous mode OFF \xE2\x80\x94 permission prompts restored\n";
 		_AppendToolLine(notice);
+		break;
+	}
+
+	case gui::MSG_REMOTE_CONTROL:
+		_ToggleRemote();
+		break;
+
+	case gui::MSG_REMOTE_APPEND: {
+		// A remote (Telegram) turn finished. Append the user + assistant
+		// messages to the local history on the window thread so the GUI's
+		// fMessages stays in sync and the exchange is saved. The transcript
+		// view is left as-is (the remote turn streamed to Telegram, not here);
+		// a dim notice marks that a remote turn occurred.
+		const char* userStr = nullptr;
+		const char* asstStr = nullptr;
+		if (msg->FindString("user", &userStr) == B_OK
+		    && msg->FindString("assistant", &asstStr) == B_OK) {
+			try {
+				nlohmann::json userMsg = nlohmann::json::parse(userStr);
+				nlohmann::json asstMsg = nlohmann::json::parse(asstStr);
+				{
+					std::lock_guard<std::mutex> lock(fMessagesMutex);
+					fMessages.push_back(std::move(userMsg));
+					fMessages.push_back(std::move(asstMsg));
+				}
+				_SaveSession();
+				_AppendToolLine("\xF0\x9F\x93\xA1 remote turn synced to history\n");
+			} catch (const std::exception& e) {
+				config::LogLine(std::string("remote append parse failed: ")
+					+ e.what());
+			}
+		}
 		break;
 	}
 
@@ -2221,6 +2662,13 @@ bool ChatWindow::QuitRequested()
 		fSink = nullptr;
 	}
 	be_app->PostMessage(B_QUIT_REQUESTED);
+
+	// Tear down the settings dialog (a separate BWindow we created and
+	// keep alive hidden) so its looper thread exits cleanly.
+	if (fSettings && fSettings->Lock())
+		fSettings->Quit();
+	fSettings = nullptr;
+
 	return true;
 }
 
@@ -2497,11 +2945,86 @@ void ChatWindow::_FlushCodeBlock()
 // Turn lifecycle
 // ---------------------------------------------------------------------------
 
+// Handle GUI slash commands typed into the input field. Returns true when
+// the command was fully handled here (info commands like /skills, /agents);
+// returns false otherwise. For a /skill-name match, `userText` is rewritten
+// in place to the expanded skill body so the caller sends it as a turn.
+bool ChatWindow::_HandleSlashCommand(std::string& userText)
+{
+	// Split into command word and trailing args.
+	std::string line = userText;
+	while (!line.empty() && (line.back() == ' ' || line.back() == '\t'
+	        || line.back() == '\n' || line.back() == '\r'))
+		line.pop_back();
+	std::string cmd = line, args;
+	if (const auto sp = line.find(' '); sp != std::string::npos) {
+		cmd  = line.substr(0, sp);
+		args = line.substr(sp + 1);
+		while (!args.empty() && args.front() == ' ') args.erase(args.begin());
+	}
+
+	auto info = [&](const std::string& text) {
+		AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 " + userText + "\n", kColorUserLabel);
+		AppendWithColor(fOutput, text, kColorToolLine);
+		if (!fUserScrolled) _ScrollToBottom();
+	};
+
+	if (cmd == "/skills") {
+		const auto& all = skills::All();
+		if (all.empty()) {
+			info("[no skills loaded — add one under .claude/skills/<name>/SKILL.md "
+			     "or " + paths::UserSkillsDir() + "/<name>/SKILL.md]\n");
+			return true;
+		}
+		std::string body = "skills (invoke with /<name>):\n";
+		for (const auto& s : all) {
+			body += "  /" + s.name;
+			if (s.disableModelInvocation) body += "  (manual)";
+			if (!s.description.empty()) body += "  \xE2\x80\x94 " + s.description;
+			body += "\n";
+		}
+		info(body);
+		return true;
+	}
+
+	if (cmd == "/agents") {
+		const auto& all = agents::All();
+		if (all.empty()) {
+			info("[no subagents loaded — add one under .claude/agents/<name>.md "
+			     "or " + paths::UserAgentsDir() + "/<name>.md]\n");
+			return true;
+		}
+		std::string body = "subagents (Claude delegates via the Task tool):\n";
+		for (const auto& a : all) {
+			body += "  " + a.name;
+			if (!a.model.empty()) body += "  [" + a.model + "]";
+			if (!a.description.empty()) body += "  \xE2\x80\x94 " + a.description;
+			body += "\n";
+		}
+		info(body);
+		return true;
+	}
+
+	// /skill-name → expand the skill body (with {{args}} + dynamic context)
+	// and rewrite userText so the caller sends the expansion as a turn.
+	if (cmd.size() > 1 && cmd[0] == '/') {
+		const std::string name = cmd.substr(1);
+		bool found = false;
+		std::string expanded = skills::Expand(name, args, found);
+		if (found) {
+			userText = expanded;
+			return false; // fall through: send the expanded text as a turn
+		}
+	}
+
+	return false; // not a GUI-handled command; send verbatim
+}
+
 void ChatWindow::_SendTurn()
 {
 	const char* raw = fInput->Text();
 	if (!raw || raw[0] == '\0') return;
-	const std::string userText(raw);
+	std::string userText(raw);
 
 	// Recognise the /compact slash command typed into the input — clear
 	// the field and run the compact flow instead of sending it as a turn.
@@ -2517,8 +3040,27 @@ void ChatWindow::_SendTurn()
 		}
 	}
 
+	// Other GUI-handled slash commands: /skills, /agents (local info) and
+	// /skill-name (expand a skill into the turn text). _HandleSlashCommand
+	// returns true when it fully handled the line (info commands). For a
+	// /skill-name match it expands the skill into `userText` and returns
+	// false so we fall through and send the expansion as a normal turn.
+	if (!userText.empty() && userText[0] == '/') {
+		const std::string original = userText;
+		if (_HandleSlashCommand(userText)) {
+			fInput->SetText("");
+			fInput->PushHistory(original);
+			return;
+		}
+		if (userText != original) {
+			// Skill expansion: record the typed command in history, but
+			// send the expanded text as the turn.
+			fInput->PushHistory(original);
+		}
+	}
+
 	fInput->SetText("");
-	fInput->PushHistory(userText);
+	if (userText == std::string(raw)) fInput->PushHistory(userText);
 
 	// If this is the first turn, set the conversation topic for the title.
 	if (fConvTopic.empty()) {
@@ -2699,7 +3241,10 @@ void ChatWindow::_NewChat()
 {
 	_CancelWorker();
 	_ClearOutput();
-	fMessages    = nlohmann::json::array();
+	{
+		std::lock_guard<std::mutex> lock(fMessagesMutex);
+		fMessages    = nlohmann::json::array();
+	}
 	fTurnCount   = 0;
 	fConvTopic.clear();
 	fSessionPath.clear();
@@ -2711,10 +3256,6 @@ void ChatWindow::_NewChat()
 		fTokenBar->SetStats(0, 0, 0);
 	}
 	_UpdateTitle();
-
-	// Fresh conversation — bring back the welcome splash.
-	if (fWelcome != nullptr && fWelcome->IsHidden())
-		fWelcome->Show();
 
 	// Always restore the input to a ready state — _CancelWorker() only
 	// requests interruption and leaves _SetBusy(false) to MSG_WORKER_DONE,
@@ -2737,6 +3278,11 @@ void ChatWindow::_ClearOutput()
 	// user's chosen factor so new text is scaled to it on next append.
 	fZoomedLen   = 0;
 	fAppliedZoom = fZoomFactor;
+
+	// The output is empty again — bring back the welcome splash with the
+	// app icon and greeting, just as on a fresh window.
+	if (fWelcome != nullptr && fWelcome->IsHidden())
+		fWelcome->Show();
 }
 
 void ChatWindow::_HandlePermRequest(BMessage* msg)
@@ -2863,6 +3409,78 @@ void ChatWindow::_UpdateTokenBarPrice()
 	fTokenBar->SetPrice(price.input, price.output);
 }
 
+// Tools > Remote Control: start or stop the background Telegram poller.
+// Mirrors the CLI's /remote-control toggle. Keeps the menu checkmark and
+// the token-bar "📡 REMOTE" badge in sync with the actual running state.
+void ChatWindow::_ToggleRemote()
+{
+	const bool running = fRemote && fRemote->Running();
+
+	if (running) {
+		// Stop and tear down the poller.
+		fRemote->Stop();
+		fRemote.reset();
+		if (fRemoteItem) fRemoteItem->SetMarked(false);
+		if (fTokenBar)   fTokenBar->SetRemote(false);
+		_AppendToolLine("\xF0\x9F\x93\xA1 Remote control OFF "
+			"\xE2\x80\x94 Telegram poller stopped\n");
+		return;
+	}
+
+	// Starting: validate the telegram config first so we can give a clear
+	// reason rather than silently doing nothing.
+	const config::Config cfg = config::Load();
+	std::string why;
+	if (!telegram::RemoteControl::ConfigIsValid(cfg, &why)) {
+		_AppendToolLine("\xF0\x9F\x93\xA1 Remote control: " + why + "\n"
+			"  Add a 'telegram' block to config.json with a bot_token and "
+			"allowed_user_ids. See README.md.\n");
+		if (fRemoteItem) fRemoteItem->SetMarked(false);
+		return;
+	}
+
+	try {
+		// The auth getter hands the bridge a fresh copy of our session auth
+		// before each remote turn, so it piggybacks on the same credentials.
+		fRemote = std::make_unique<telegram::RemoteControl>(
+			cfg,
+			[this] { return fAuth; },
+			fSystemPrompt);
+		if (fRemote->Start()) {
+			// Share the GUI's conversation so remote turns see both sides of
+			// the dialogue (mirrors the CLI). The provider snapshots fMessages
+			// under fMessagesMutex; the appender posts a BMessage so the actual
+			// history mutation happens on the window thread (BLooper-safe).
+			fRemote->SetSharedHistory([this]() -> nlohmann::json {
+				std::lock_guard<std::mutex> lock(fMessagesMutex);
+				return fMessages;
+			});
+			BMessenger self(this);
+			fRemote->SetSharedHistoryAppender(
+				[self](nlohmann::json userMsg, nlohmann::json asstMsg) {
+					BMessage msg(gui::MSG_REMOTE_APPEND);
+					msg.AddString("user", userMsg.dump().c_str());
+					msg.AddString("assistant", asstMsg.dump().c_str());
+					self.SendMessage(&msg);
+				});
+			if (fRemoteItem) fRemoteItem->SetMarked(true);
+			if (fTokenBar)   fTokenBar->SetRemote(true);
+			_AppendToolLine("\xF0\x9F\x93\xA1 Remote control ON "
+				"\xE2\x80\x94 Telegram poller started\n");
+		} else {
+			fRemote.reset();
+			if (fRemoteItem) fRemoteItem->SetMarked(false);
+			_AppendToolLine("\xF0\x9F\x93\xA1 Remote control: "
+				"failed to start (already running?)\n");
+		}
+	} catch (const std::exception& e) {
+		fRemote.reset();
+		if (fRemoteItem) fRemoteItem->SetMarked(false);
+		_AppendToolLine(std::string("\xF0\x9F\x93\xA1 Remote control error: ")
+			+ e.what() + "\n");
+	}
+}
+
 void ChatWindow::_SaveSession()
 {
 	if (fMessages.empty()) return;
@@ -2923,7 +3541,7 @@ void ChatWindow::_ExportTranscript(const std::string& path)
 							if (cb.value("type", "") == "text")
 								rc += cb.value("text", "");
 					}
-					if (rc.size() > 1000) rc = rc.substr(0, 1000) + "\n…[truncated]";
+					if (rc.size() > 1000) { rc.resize(1000); rc += "\n…[truncated]"; }
 					s += "\n> 🔧 **tool result:**\n```\n" + rc + "\n```\n";
 				}
 			}
@@ -3281,16 +3899,22 @@ void ChatWindow::_LoadGuiPrefs()
 		fAppliedZoom = zoom;   // new text arrives pre-scaled to this
 	}
 
-	// Restore the splitter weights relative to the chat (middle item).
+	// Restore the splitter weight of the sidebar relative to the chat.
 	if (fSplit) {
-		float sidebarWeight = 0.0f, settingsWeight = 0.0f;
+		float sidebarWeight = 0.0f;
 		if (prefs.FindFloat("sidebar_weight", &sidebarWeight) == B_OK
 				&& sidebarWeight > 0.0f && sidebarWeight < 5.0f)
 			fSplit->SetItemWeight((int32)0, sidebarWeight, false);
-		if (prefs.FindFloat("settings_weight", &settingsWeight) == B_OK
-				&& settingsWeight > 0.0f && settingsWeight < 5.0f)
-			fSplit->SetItemWeight((int32)2, settingsWeight, false);
 		fSplit->SetItemWeight((int32)1, 1.0f, true);
+	}
+
+	// Restore the splitter weight of the chat relative to the input pane.
+	if (fVSplit) {
+		float inputWeight = 0.0f;
+		if (prefs.FindFloat("input_weight", &inputWeight) == B_OK
+				&& inputWeight > 0.0f && inputWeight < 5.0f)
+			fVSplit->SetItemWeight((int32)1, inputWeight, false);
+		fVSplit->SetItemWeight((int32)0, 1.0f, true);
 	}
 
 	// Last-used model — only when the caller didn't already pin one via
@@ -3302,10 +3926,13 @@ void ChatWindow::_LoadGuiPrefs()
 		fModel = model;
 		_UpdateTitle();
 		if (fModelMenu) {
+			// Menu lives in the settings dialog looper — lock it.
+			const bool dlgLocked = fSettings && fSettings->Lock();
 			for (int32 i = 0; i < fModelMenu->CountItems(); ++i) {
 				BMenuItem* it = fModelMenu->ItemAt(i);
 				if (it) it->SetMarked(it->Label() && fModel == it->Label());
 			}
+			if (dlgLocked) fSettings->Unlock();
 		}
 	}
 }
@@ -3317,10 +3944,13 @@ void ChatWindow::_SaveGuiPrefs()
 	prefs.AddRect("frame", Frame());
 	prefs.AddFloat("zoom", fZoomFactor);
 	prefs.AddString("model", fModel.c_str());
-	// Splitter weights (relative widths of the side panels).
+	// Splitter weight (relative width of the sidebar).
 	if (fSplit) {
 		prefs.AddFloat("sidebar_weight",  fSplit->ItemWeight((int32)0));
-		prefs.AddFloat("settings_weight", fSplit->ItemWeight((int32)2));
+	}
+	// Splitter weight (relative height of the input pane).
+	if (fVSplit) {
+		prefs.AddFloat("input_weight",  fVSplit->ItemWeight((int32)1));
 	}
 
 	BFile file(paths::GuiPrefsPath().c_str(),
@@ -3340,7 +3970,10 @@ void ChatWindow::_LoadSession(const std::string& path)
 	_CancelWorker();
 	_ClearOutput();
 
-	fMessages    = loaded;
+	{
+		std::lock_guard<std::mutex> lock(fMessagesMutex);
+		fMessages    = loaded;
+	}
 	fSessionPath = path;
 	fTurnCount   = 0;
 	fConvTopic.clear();
@@ -3358,15 +3991,17 @@ void ChatWindow::_LoadSession(const std::string& path)
 
 		// Reflect the restored values in the UI.
 		_UpdateTitle();
-		if (fSettings)
+		if (fSettings && fSettings->Lock()) {
 			fSettings->SetValues(fSystemPrompt, fMaxTokens,
 			                     fNotifyMinSec, fWorkingDir);
-		// Mark the matching model menu item.
-		if (fModelMenu) {
-			for (int32 i = 0; i < fModelMenu->CountItems(); ++i) {
-				BMenuItem* it = fModelMenu->ItemAt(i);
-				if (it) it->SetMarked(it->Label() && fModel == it->Label());
+			// Mark the matching model menu item (menu is in this looper).
+			if (fModelMenu) {
+				for (int32 i = 0; i < fModelMenu->CountItems(); ++i) {
+					BMenuItem* it = fModelMenu->ItemAt(i);
+					if (it) it->SetMarked(it->Label() && fModel == it->Label());
+				}
 			}
+			fSettings->Unlock();
 		}
 		// Refresh the cost estimate for the restored model.
 		_UpdateTokenBarPrice();

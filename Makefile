@@ -65,6 +65,7 @@ GUI_ONLY_SRCS := \
     $(SRCDIR)/code_styler.cpp       \
     $(SRCDIR)/md_renderer.cpp       \
     $(SRCDIR)/syntax_highlight.cpp  \
+    $(SRCDIR)/tool_bar.cpp          \
     $(SRCDIR)/chat_window.cpp       \
     $(SRCDIR)/app_main_gui.cpp
 
@@ -139,6 +140,7 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/gui_sink.cpp          \
     $(SRCDIR)/session_store.cpp     \
     $(SRCDIR)/telegram.cpp          \
+    $(SRCDIR)/tool_bar.cpp          \
     $(SRCDIR)/chat_window.cpp       \
     $(SRCDIR)/app_main_gui.cpp
 
@@ -150,9 +152,13 @@ YAMLCPP_CFLAGS := $(shell $(PKG_CONFIG) --cflags yaml-cpp 2>/dev/null)
 YAMLCPP_LIBS   := $(shell $(PKG_CONFIG) --libs   yaml-cpp 2>/dev/null || echo -lyaml-cpp)
 
 # Same compile flags as the CLI + libbe headers + yaml-cpp.
-GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS)
+# Private Haiku headers (BPrivate::BToolBar lives in private/shared) are
+# added so the Genio-style ToolBar compiles; libshared provides the symbol.
+GUI_PRIVATE_INCLUDES := $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/shared 2>/dev/null | sed 's/^/-I/') \
+                        $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/interface 2>/dev/null | sed 's/^/-I/')
+GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS) $(GUI_PRIVATE_INCLUDES)
 GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
-                -pthread -lbe -lnetwork -ltracker
+                -pthread -lbe -lshared -lnetwork -ltracker
 
 $(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@mkdir -p $(@D)
