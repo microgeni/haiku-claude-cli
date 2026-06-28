@@ -267,18 +267,47 @@ public:
 				fWorkingDir = env;
 		}
 
-		const std::string model      = cfg.model;
-		const int         maxTokens  = cfg.max_tokens;
-		const std::string systemPmt  = cfg.system;
-		const int         notifyMin  = static_cast<int>(cfg.notify_min_duration_sec);
+		// Remember the spawn parameters so File ▸ New Session can create
+		// additional windows with the same auth/config.
+		fAuth      = auth;
+		fModel     = cfg.model;
+		fMaxTokens = cfg.max_tokens;
+		fSystemPmt = cfg.system;
+		fNotifyMin = static_cast<int>(cfg.notify_min_duration_sec);
 
-		ChatWindow* win = new ChatWindow(auth, model, maxTokens, systemPmt,
-		                                 notifyMin, fWorkingDir);
+		_SpawnWindow();
+	}
+
+	// Create one chat window with the stored spawn parameters and show it.
+	// Each window self-registers as a live remote-control session in its
+	// constructor, so the phone can list/switch between them. Used for the
+	// initial window and every File ▸ New Session.
+	void _SpawnWindow()
+	{
+		ChatWindow* win = new ChatWindow(fAuth, fModel, fMaxTokens, fSystemPmt,
+		                                 fNotifyMin, fWorkingDir);
 		win->Show();
 	}
 
+	void MessageReceived(BMessage* msg) override
+	{
+		switch (msg->what) {
+			case gui::MSG_NEW_WINDOW:
+				_SpawnWindow();
+				break;
+			default:
+				BApplication::MessageReceived(msg);
+				break;
+		}
+	}
+
 private:
-	std::string fWorkingDir; // resolved from -w / --working-dir or CLAUDE_WORKING_DIR
+	std::string    fWorkingDir; // resolved from -w / --working-dir or env.
+	config::Auth   fAuth;       // spawn parameters captured in ReadyToRun.
+	std::string    fModel;
+	int            fMaxTokens = 0;
+	std::string    fSystemPmt;
+	int            fNotifyMin = 0;
 };
 
 int main()

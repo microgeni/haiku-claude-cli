@@ -865,9 +865,10 @@ bool RemoteControl::Start() {
 	fRunning.store(true);
 	fWorkerRunning.store(true);
 	// Register with the process-wide session registry so /sessions and
-	// /session N can see and route to this live session. Use the stored
-	// title (set via SetSessionTitle) or a sensible default.
-	{
+	// /session N can see and route to this live session. The GUI registers
+	// its own windows as sessions and disables this self-registration
+	// (SetSelfRegister(false)) so the poller does not add a duplicate.
+	if (fSelfRegister) {
 		const std::string title = fSessionTitle.empty()
 			? std::string("session") : fSessionTitle;
 		fSessionId = SessionRegistry::Instance().Register(

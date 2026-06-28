@@ -439,6 +439,12 @@ public:
 	// poller is not running. Lets the GUI surface the number.
 	int SessionId() const { return fSessionId; }
 
+	// Control whether Start() registers this RemoteControl as its own
+	// session in the SessionRegistry. The CLI leaves this on (the poller
+	// IS the session). The GUI turns it off because each ChatWindow
+	// registers itself as a session; the poller is only the transport.
+	void SetSelfRegister(bool enable) { fSelfRegister = enable; }
+
 private:
 	void PollLoop();
 	void WorkLoop();
@@ -462,6 +468,7 @@ private:
 	// Registry ID assigned in Start() (0 while not running) and the
 	// human-readable title shown by /sessions.
 	int                          fSessionId = 0;
+	bool                         fSelfRegister = true;
 	std::string                  fSessionTitle;
 	std::string                  fSessionModel;
 	// Chat ID of the turn currently running. Set by ProcessUpdate.

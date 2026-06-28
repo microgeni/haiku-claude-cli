@@ -83,6 +83,7 @@ constexpr uint32_t MSG_SESSION_SELECT  = 'SSEL'; // sidebar: load selected sessi
 constexpr uint32_t MSG_SESSION_DELETE  = 'SDEL'; // sidebar: delete selected session
 constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
 constexpr uint32_t MSG_SESSION_RENAME  = 'SRNM'; // sidebar: rename selected session
+constexpr uint32_t MSG_NEW_WINDOW      = 'NWIN'; // File > New Session: spawn a window
 constexpr uint32_t MSG_COMPACT         = 'CMPT'; // Edit: compact conversation context
 } // namespace gui
 
@@ -584,6 +585,20 @@ private:
 	// owns the lifecycle; the destructor stops it cleanly.
 	std::unique_ptr<telegram::RemoteControl> fRemote;
 	void _ToggleRemote();  // Tools > Remote Control: start/stop the poller
+
+	// ── Multi-session (Phase 2a) ─────────────────────────────────────────
+	// Each window registers itself as a live remote-control session in the
+	// process-wide telegram::SessionRegistry so the phone can /sessions
+	// list and /session N switch between desktop windows. The registry ID
+	// is assigned in the constructor and released in the destructor. The
+	// window supplies a history provider/appender and a sink factory that
+	// builds a GuiSink bound to this window, so a routed remote reply
+	// streams into this window's transcript.
+	int  fRegistrySessionId = 0;
+	void _RegisterSession();
+	void _UnregisterSession();
+	// A short label for /sessions (conversation topic or "GUI session N").
+	std::string _SessionLabel() const;
 
 	// Extract displayable plain text from an Anthropic message "content"
 	// field, which may be a bare string or an array of typed blocks. Used

@@ -1322,10 +1322,17 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Seed the token bar's cost estimate from the (possibly restored)
 	// model now that both the bar and final model are known.
 	_UpdateTokenBarPrice();
+
+	// Register this window as a live remote-control session so the phone
+	// can /sessions list it and /session N route prompts here.
+	_RegisterSession();
 }
 
 ChatWindow::~ChatWindow()
 {
+	// Leave the session registry first so no routed remote prompt can be
+	// dispatched to this window while it is tearing down.
+	_UnregisterSession();
 	delete fStyler;
 	delete fMdRenderer;
 	// The worker is normally joined in QuitRequested() before the window
@@ -1351,6 +1358,14 @@ void ChatWindow::_BuildMenuBar()
 
 	// ── File ────────────────────────────────────────────────────────────────
 	BMenu* fileMenu = new BMenu("File");
+	// New Session spawns a fresh window with its own live session, so the
+	// phone can /sessions list and /session N switch between them. Targets
+	// be_app (the application) which owns window creation.
+	BMenuItem* newWin = new BMenuItem("New Session",
+		new BMessage(gui::MSG_NEW_WINDOW), 'N');
+	newWin->SetTarget(be_app);
+	fileMenu->AddItem(newWin);
+	fileMenu->AddSeparatorItem();
 	fileMenu->AddItem(new BMenuItem("Settings\xE2\x80\xA6", // …
 		new BMessage(gui::MSG_SETTINGS), ','));
 	fileMenu->AddItem(new BMenuItem("Export Transcript\xE2\x80\xA6", // …
@@ -2677,7 +2692,18 @@ bool ChatWindow::QuitRequested()
 		delete fSink;
 		fSink = nullptr;
 	}
-	be_app->PostMessage(B_QUIT_REQUESTED);
+
+	// Multi-window: only quit the application when THIS is the last chat
+	// window. CountWindows() includes hidden helper windows (the settings
+	// dialog), so count visible ChatWindows explicitly. The window itself
+	// is still in the list at this point, so a count of 1 means "last".
+	int chatWindows = 0;
+	for (int32 i = 0; i < be_app->CountWindows(); ++i) {
+		if (dynamic_cast<ChatWindow*>(be_app->WindowAt(i)) != nullptr)
+			++chatWindows;
+	}
+	if (chatWindows <= 1)
+		be_app->PostMessage(B_QUIT_REQUESTED);
 
 	// Tear down the settings dialog (a separate BWindow we created and
 	// keep alive hidden) so its looper thread exits cleanly.
@@ -3483,6 +3509,61 @@ std::string ChatWindow::_PlainTextFromContent(const nlohmann::json& content)
 	return out;
 }
 
+// ── Multi-session registration (Phase 2a) ───────────────────────────────────
+
+// A short label for /sessions: the conversation topic when set, otherwise
+// a stable "GUI session N" using the registry ID.
+std::string ChatWindow::_SessionLabel() const
+{
+	if (!fConvTopic.empty()) return fConvTopic;
+	return "GUI session " + std::to_string(fRegistrySessionId);
+}
+
+// Register this window as a live remote-control session so the phone can
+// list it via /sessions and route prompts to it via /session N. Each
+// window supplies its own history provider and appender; a prompt routed
+// here runs against THIS window's conversation and its reply is mirrored
+// into THIS window's transcript via MSG_REMOTE_APPEND. Idempotent.
+void ChatWindow::_RegisterSession()
+{
+	if (fRegistrySessionId != 0) return;
+
+	BMessenger self(this);
+
+	auto provider = [this]() -> nlohmann::json {
+		std::lock_guard<std::mutex> lock(fMessagesMutex);
+		return fMessages;
+	};
+
+	auto appender = [self](nlohmann::json userMsg, nlohmann::json asstMsg) {
+		BMessage msg(gui::MSG_REMOTE_APPEND);
+		msg.AddString("user", userMsg.dump().c_str());
+		msg.AddString("assistant", asstMsg.dump().c_str());
+		self.SendMessage(&msg);
+	};
+
+	// No live sink factory in 2a: the appender renders the finished turn
+	// into this window via the proven MSG_REMOTE_APPEND path. Live
+	// token-by-token cross-window streaming is a later refinement.
+	fRegistrySessionId = telegram::SessionRegistry::Instance().Register(
+		nullptr, _SessionLabel(), fModel,
+		std::move(provider), std::move(appender), nullptr);
+
+	config::LogLine("gui session registered id="
+		+ std::to_string(fRegistrySessionId));
+}
+
+// Remove this window from the registry so no routed prompt reaches a
+// window that is tearing down. Called from the destructor.
+void ChatWindow::_UnregisterSession()
+{
+	if (fRegistrySessionId == 0) return;
+	telegram::SessionRegistry::Instance().Unregister(fRegistrySessionId);
+	config::LogLine("gui session unregistered id="
+		+ std::to_string(fRegistrySessionId));
+	fRegistrySessionId = 0;
+}
+
 // Tools > Remote Control: start or stop the background Telegram poller.
 // Mirrors the CLI's /remote-control toggle. Keeps the menu checkmark and
 // the token-bar "📡 REMOTE" badge in sync with the actual running state.
@@ -3520,6 +3601,12 @@ void ChatWindow::_ToggleRemote()
 			cfg,
 			[this] { return fAuth; },
 			fSystemPrompt);
+
+		// Each ChatWindow registers itself as a session, so the poller must
+		// NOT register a duplicate session of its own. It is purely the
+		// transport here; routing is handled by the per-window registry
+		// entries created in _RegisterSession().
+		fRemote->SetSelfRegister(false);
 
 		// Preflight before starting threads: catch an invalid token or a
 		// 409 Conflict (another instance polling the same bot) up front, so

@@ -167,16 +167,34 @@ to Phase 2 when multiple live sessions actually exist.
 **Phase 2 — GUI multi-window.** Split into 2a (single process) and 2b
 (multi-process broker).
 
-*Phase 2a — multiple windows in one GUI process.* Move poller ownership
-out of `ChatWindow` and into `ClaudeGuiApp` (one poller / one token for
-the whole process). Add File ▸ New Session to spawn windows. Each window
-registers a session with the registry; a routed prompt runs a turn in
-the **target** window and streams the reply into that window's GuiSink.
-Global turn lock retained (one turn at a time across windows). The
-registry's session interface is deliberately a **callback/message seam**
-— "run a turn for session N", "the reply chunk for N" — rather than
-direct pokes at window internals, so the same routing path works
-unchanged when the seam becomes cross-process in 2b.
+*Phase 2a — multiple windows in one GUI process. ✅ DONE.* Implemented
+with a lighter touch than the original sketch: the poller (a single
+`RemoteControl`) is still created by whichever window toggles Remote on,
+but it now runs as **transport only** — `SetSelfRegister(false)` stops it
+registering a session of its own. Instead **each `ChatWindow` registers
+itself** as a live session in its constructor (`_RegisterSession`) and
+unregisters in its destructor, supplying a history provider (snapshot of
+its `fMessages`) and an appender that posts `MSG_REMOTE_APPEND` to *that*
+window. A prompt routed to session N therefore runs against window N's
+conversation and its reply renders into window N's transcript via the
+existing remote-append path (turn-completion granularity; live
+token-by-token cross-window streaming via the `sinkFactory` seam is left
+as a later refinement). **File ▸ New Session** posts `MSG_NEW_WINDOW` to
+`ClaudeGuiApp`, which spawns another self-registering window with the
+same auth/config. `QuitRequested` now counts live `ChatWindow`s and only
+quits the app when the last one closes. Global turn lock retained — one
+turn at a time across all windows, which keeps the cross-window history
+access safe without per-session locks.
+
+*Known 2a limitation.* The poller is still owned per-window, so only the
+window that toggled Remote on hosts the transport. Toggling Remote on in
+a **second** window tries to start a second poller on the same token; the
+`Preflight` 409 check catches this and refuses with a clear message
+rather than wedging, but it is not seamless. Promoting the single poller
+into `ClaudeGuiApp` (so any window can be the one that turns it on, and
+all windows share it) is a clean follow-up — and a natural stepping stone
+to the 2b broker. Until then: turn Remote on in one window; all other
+windows are still listed and routable via `/sessions` / `/session N`.
 
 *Phase 2b — multi-process broker (GUI×N and CLI×N share one bot).* An
 in-process registry is a C++ singleton and cannot span processes; two
