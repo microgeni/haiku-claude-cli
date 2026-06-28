@@ -13,11 +13,14 @@
 #include <string>
 
 #include "chat_window.h"
+#include "agents.h"
+#include "commands.h"
 #include "config.h"
 #include "hooks.h"
 #include "mcp.h"
 #include "oauth.h"
 #include "paths.h"
+#include "skills.h"
 
 // Application signature registered in Haiku's MIME database.
 // Must match the BEOS:APP_SIG attribute stamped onto the binary.
@@ -226,6 +229,13 @@ public:
 		config::InitLogging(cfg.logging_enabled);
 		hooks::Load(cfg.hooks);
 		mcp::Init(cfg.mcp_servers);
+
+		// Load custom commands, Agent Skills, and subagents so the GUI
+		// has the same /skill-name expansions, model-invocable skills,
+		// and Task-delegated subagents as the CLI.
+		commands::Load(paths::ConfigDir() + "/commands");
+		skills::Load(paths::UserSkillsDir(), paths::ProjectSkillsDir());
+		agents::Load(paths::UserAgentsDir(), paths::ProjectAgentsDir());
 
 		// Resolve authentication (OAuth tokens, ANTHROPIC_API_KEY, or a
 		// stored API key). If none is found, show the in-app sign-in
