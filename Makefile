@@ -122,6 +122,7 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/gui_stubs.cpp         \
     $(SRCDIR)/gui_sink.cpp          \
     $(SRCDIR)/session_store.cpp     \
+    $(SRCDIR)/telegram.cpp          \
     $(SRCDIR)/chat_window.cpp       \
     $(SRCDIR)/app_main_gui.cpp
 

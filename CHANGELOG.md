@@ -6,6 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **GUI: Tools ▸ Remote Control** — start/stop the Telegram remote-control
+  bridge from the desktop app's Tools menu, mirroring the CLI's
+  `/remote-control`. Allowed Telegram users can drive turns on the local
+  machine while the GUI is running. The conversation is shared
+  bidirectionally: remote turns see the GUI's transcript (via a
+  thread-safe snapshot of the message history) and each completed remote
+  turn is synced back into the local history and auto-saved. Invalid or
+  missing `telegram` config produces a clear in-chat explanation instead
+  of failing silently. While active, the Tools menu item shows a checkmark
+  and the token bar displays a cyan **📡 REMOTE** badge.
+- **GUI: Ludicrous-mode indicator** — when Tools ▸ Ludicrous Mode is
+  enabled, the token bar now shows an amber **⚡ LUDICROUS** badge so the
+  auto-approve state is always visible, matching the CLI's status-bar
+  treatment. The badge tracks the menu checkmark.
+
 ## [1.8.1] - 2026-07-23
 
 ### Fixed
