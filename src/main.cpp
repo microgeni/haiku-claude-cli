@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
@@ -42,6 +43,10 @@ void PrintUsage(const char* prog, const std::string& default_model, int default_
 			  << "  -t, --max-tokens N   Max tokens in response (default: " << default_max_tokens << ").\n"
 			  << "  -s, --system TEXT    Custom system prompt (appended after the\n"
 			  << "                       required Claude Code prefix when OAuth is used).\n"
+			  << "  -w, --working-dir PATH\n"
+			  << "                       Change to PATH before doing anything else.\n"
+			  << "                       GUI launchers can also set CLAUDE_WORKING_DIR\n"
+			  << "                       in the environment for the same effect.\n"
 			  << "  -u, --usage          After the response, print input/output token\n"
 			  << "                       usage to stderr.\n"
 			  << "  -r, --resume [NAME]  Start the REPL pre-loaded with the last saved\n"
@@ -59,6 +64,8 @@ void PrintUsage(const char* prog, const std::string& default_model, int default_
 			  << "                       the Terminal window — the REPL auto-detects paths.\n"
 			  << "      --plain          Disable ANSI color output.\n"
 			  << "      --color          Force ANSI color output, even when piped.\n"
+			  << "      --print-only     Print attached files as a table and exit without\n"
+			  << "                       sending any message to the API. Requires -a.\n"
 			  << "  -V, --version        Print version and exit.\n"
 			  << "  -h, --help           Show this help and exit.\n"
 			  << "\n"
@@ -169,6 +176,7 @@ int main(int argc, char* argv[]) {
 	int                      max_tokens    = cfg.max_tokens;
 	bool                     interactive   = false;
 	bool                     show_usage    = cfg.show_usage;
+	bool                     print_only    = false;
 	bool                     resume        = false;
 	std::string              resume_name;   // empty = default history.json
 	std::string              custom_system = cfg.system;  // flawfinder: ignore
@@ -178,6 +186,17 @@ int main(int argc, char* argv[]) {
 	// Seed the destructive-tool flag from config. -y/--yes below
 	// can still flip it on for ad-hoc runs.
 	if (cfg.fAllowDestructiveTools) api::g_allow_destructive_tools = true;
+
+	// GUI launchers (e.g. Claude.app on Haiku) may not inherit a meaningful
+	// working directory.  Allow them to set CLAUDE_WORKING_DIR in the
+	// environment so that the process lands in the right project root before
+	// any flag parsing occurs.  --working-dir/-w below overrides this.
+	if (const char* env_wd = std::getenv("CLAUDE_WORKING_DIR")) {
+		if (*env_wd && chdir(env_wd) != 0) {
+			std::cerr << "warning: cannot chdir to CLAUDE_WORKING_DIR="
+			          << env_wd << ": " << std::strerror(errno) << "\n";
+		}
+	}
 
 	for (int i = 1; i < argc; ++i) {
 		const std::string arg = argv[i];
@@ -226,6 +245,10 @@ int main(int argc, char* argv[]) {
 			tui::SetColorEnabled(true);
 			continue;
 		}
+		if (arg == "--print-only") {
+			print_only = true;
+			continue;
+		}
 		if (arg == "-m" || arg == "--model") {
 			if (i + 1 >= argc) {
 				std::cerr << "error: " << arg << " requires a value\n";
@@ -252,6 +275,19 @@ int main(int argc, char* argv[]) {
 				return 1;
 			}
 			custom_system = argv[++i];
+			continue;
+		}
+		if (arg == "-w" || arg == "--working-dir") {
+			if (i + 1 >= argc) {
+				std::cerr << "error: " << arg << " requires a path\n";
+				return 1;
+			}
+			const char* wd = argv[++i];
+			if (chdir(wd) != 0) {
+				std::cerr << "error: cannot chdir to " << wd << ": "
+				          << std::strerror(errno) << "\n";
+				return 1;
+			}
 			continue;
 		}
 		parts.push_back(arg);
