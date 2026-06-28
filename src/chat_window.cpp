@@ -2276,7 +2276,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		std::string line = "\n\xE2\x9A\x99 "; // ⚙
 		if (name)    { line += name;    line += ": "; }
 		if (summary) { line += summary; }
-		line += "\xE2\x80\xA6\n"; // …
+		line += "\n";
 		_AppendToolLine(line);
 		break;
 	}

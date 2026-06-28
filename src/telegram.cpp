@@ -249,8 +249,13 @@ void TelegramSink::OnToolStatus(const std::string& phase) {
 		const auto p = phase.find(prefix);
 		if (p != std::string::npos) {
 			name = phase.substr(p + prefix.size());
-			// Strip trailing …
-			while (!name.empty() && (unsigned char)name.back() > 127) name.pop_back();
+			// Strip the trailing UTF-8 ellipsis (… == \xE2\x80\xA6) exactly,
+			// so a command ending in a multibyte char isn't corrupted.
+			const std::string kEllipsis = "\xE2\x80\xA6";
+			if (name.size() >= kEllipsis.size()
+			    && name.compare(name.size() - kEllipsis.size(),
+			                    kEllipsis.size(), kEllipsis) == 0)
+				name.resize(name.size() - kEllipsis.size());
 			const auto colon = name.find(": ");
 			if (colon != std::string::npos) {
 				args = name.substr(colon + 2);

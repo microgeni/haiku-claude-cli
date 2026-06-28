@@ -1589,7 +1589,8 @@ std::string GuiDiff(const std::string& name, const json& input)
 	return {};
 }
 
-std::string ArgSummary(const std::string& name, const json& input) {
+std::string ArgSummary(const std::string& name, const json& input,
+                       size_t maxLen) {
 	// Helper: fetch a string field if present, else empty.
 	auto str = [&input](const char* key) -> std::string {
 		if (input.contains(key) && input[key].is_string())
@@ -1628,13 +1629,13 @@ std::string ArgSummary(const std::string& name, const json& input) {
 			nlohmann::json::error_handler_t::replace);
 	}
 
-	// Collapse newlines to spaces and clamp length so the status line
-	// stays one row in both the CLI and the GUI.
+	// Collapse newlines to spaces so the summary stays a single logical
+	// line. Only clamp the length when a positive maxLen was given; the GUI
+	// passes 0 because its tool log can display the whole command.
 	for (char& c : out)
 		if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-	constexpr size_t kMaxLen = 80;
-	if (out.size() > kMaxLen) {
-		out.resize(kMaxLen - 1);
+	if (maxLen > 0 && out.size() > maxLen) {
+		out.resize(maxLen - 1);
 		out += "\xE2\x80\xA6"; // …
 	}
 	return out;

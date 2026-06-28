@@ -37,10 +37,13 @@ std::string Preview(const std::string& name, const json& input);
 
 // A compact, single-line summary of a tool's most salient argument
 // (the command for Bash, the path for Read/Write/Edit, the pattern for
-// Grep/Glob, etc.). Newlines are collapsed and the result is clamped to
-// ~80 chars so it fits on one status row. Used by the CLI status line,
-// the GUI tool log, and the Telegram bridge.
-std::string ArgSummary(const std::string& name, const json& input);
+// Grep/Glob, etc.). Newlines are collapsed to spaces. When maxLen > 0 the
+// result is clamped to that many characters with a trailing ellipsis so it
+// fits on one status row; pass maxLen == 0 to return the full, untruncated
+// argument (used by the GUI tool log, which can show the whole command).
+// Used by the CLI status line, the GUI tool log, and the Telegram bridge.
+std::string ArgSummary(const std::string& name, const json& input,
+                       size_t maxLen = 80);
 
 // Structured diff for GUI display. Returns a header line followed by
 // diff lines, each prefixed with '+' (addition), '-' (removal), or ' '

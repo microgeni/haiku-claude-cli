@@ -933,7 +933,10 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 				            json{{"tool_input", tinput}, {"tool_result", tres.content},
 				                 {"is_error", tres.is_error}}, tname);
 			} else {
-				const std::string args = tools::ArgSummary(tname, tinput);
+				// Pass maxLen == 0 so the full command reaches the sink. The
+				// CLI's TerminalSink ignores this phase string; the GUI tool
+				// log shows the whole command (no "…" truncation).
+				const std::string args = tools::ArgSummary(tname, tinput, 0);
 				std::string phase = "\xF0\x9F\x94\xA7 running " + tname;
 				if (!args.empty()) phase += ": " + args;
 				phase += "\xE2\x80\xA6";
