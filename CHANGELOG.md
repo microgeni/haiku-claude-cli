@@ -8,6 +8,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GUI: Genio IDE integration** — when the desktop app is launched from
+  Genio's **Tools ▸ Claude** menu, every file Claude writes or edits is
+  opened (or refreshed) in the running Genio editor, with the cursor jumped
+  to the edited line. Genio's extension launcher passes the active project
+  and file on argv (`--project-dir` / `--file` / `--line`); their presence
+  is what activates the integration, so a directly-launched GUI and the CLI
+  are completely unaffected. Files are routed to Genio
+  (`application/x-vnd.Genio`) via a `B_REFS_RECEIVED` message with `be:line`.
+  Haiku-only; a no-op on the macOS dev build.
 - **GUI: Tools ▸ Remote Control** — start/stop the Telegram remote-control
   bridge from the desktop app's Tools menu, mirroring the CLI's
   `/remote-control`. Allowed Telegram users can drive turns on the local
