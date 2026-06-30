@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-06-30
+
+### Fixed
+
+- **GUI: app icon now renders** in the welcome splash and the About box.
+  Both sites requested a 64×64 bitmap from
+  `BAppFileInfo::GetIcon(BBitmap*, icon_size)`, but that overload requires
+  the bitmap bounds to match the `icon_size` enum (16 or 32 px) and so
+  failed with `B_BAD_VALUE`. The raw HVIF data is now read and rasterised
+  to 64×64 via `BIconUtils::GetVectorIcon`.
+- **Packaging: HPKG install no longer fails** with *"nothing provides
+  lib:libbe."* `libbe.so` ships inside the base `haiku` package and is not
+  published as a `lib:*` resolvable, so it must not appear in the package's
+  `requires`. The `haiku >= r1~beta5` requirement already guarantees it is
+  present.
+
 ## [1.9.0] - 2026-07-24
 
 ### Added
