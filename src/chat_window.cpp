@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -30,6 +31,7 @@
 #include <GroupLayout.h>
 #include <GroupView.h>
 #include <Box.h>
+#include <IconUtils.h>
 #include <LayoutBuilder.h>
 #include <LayoutUtils.h>
 #include <Menu.h>
@@ -1211,15 +1213,24 @@ WelcomeView::WelcomeView()
 
 	// Pull the HVIF icon stamped onto the binary at link time — the same
 	// source the About box uses. 64x64 keeps it crisp on HiDPI displays.
+	// We read the raw vector data and rasterise it ourselves: the
+	// BAppFileInfo::GetIcon(BBitmap*, icon_size) overload requires the
+	// bitmap bounds to match the enum (16 or 32 px) exactly, so it cannot
+	// produce a 64x64 icon and silently fails with B_BAD_VALUE.
 	app_info info;
 	if (be_roster->GetRunningAppInfo(be_app->Team(), &info) == B_OK) {
 		BFile appFile(&info.ref, B_READ_ONLY);
 		BAppFileInfo fileInfo(&appFile);
-		BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
-		if (fileInfo.GetIcon(icon, B_LARGE_ICON) == B_OK)
-			fIcon = icon;
-		else
-			delete icon;
+		uint8* data = nullptr;
+		size_t size = 0;
+		if (fileInfo.GetIcon(&data, &size) == B_OK && data != nullptr) {
+			BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
+			if (BIconUtils::GetVectorIcon(data, size, icon) == B_OK)
+				fIcon = icon;
+			else
+				delete icon;
+			free(data);
+		}
 	}
 
 	// Reserve enough height for the icon plus two text lines. Pin a small
@@ -2575,15 +2586,22 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		    "application/x-vnd.Microgeni-claude-gui");
 
 		// Pull the HVIF icon that was stamped onto the binary at link time.
+		// Rasterise the raw vector data to 64x64 — the fixed-size GetIcon
+		// overload cannot fill a 64x64 bitmap (see WelcomeView for details).
 		app_info info;
 		if (be_roster->GetRunningAppInfo(be_app->Team(), &info) == B_OK) {
 			BFile appFile(&info.ref, B_READ_ONLY);
 			BAppFileInfo fileInfo(&appFile);
-			BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
-			if (fileInfo.GetIcon(icon, B_LARGE_ICON) == B_OK)
-				about->SetIcon(icon);
-			else
-				delete icon;
+			uint8* data = nullptr;
+			size_t size = 0;
+			if (fileInfo.GetIcon(&data, &size) == B_OK && data != nullptr) {
+				BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
+				if (BIconUtils::GetVectorIcon(data, size, icon) == B_OK)
+					about->SetIcon(icon);
+				else
+					delete icon;
+				free(data);
+			}
 		}
 
 		about->SetVersion(config::kVersion);
