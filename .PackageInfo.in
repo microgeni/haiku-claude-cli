@@ -20,5 +20,4 @@ requires {
 	lib:libssl >= 3
 	lib:libedit
 	lib:libyaml_cpp
-	lib:libbe
 }
