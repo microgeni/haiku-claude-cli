@@ -901,11 +901,10 @@ void TokenBar::Draw(BRect updateRect)
 	const std::string pct  = std::to_string(static_cast<int>(filled * 100.0f + 0.5f)) + "%";
 	const std::string lbl  = commaNum(fUsed) + " / " + shortK(fMax) + "  (" + pct + ")";
 
+	// Use the system font as-is (be_plain_font already carries the user's
+	// configured size, which grows on HiDPI). No explicit SetSize — the
+	// label tracks the system font like the rest of the application.
 	BFont f(be_plain_font);
-	// Scale the label with the system font so it stays legible on HiDPI
-	// displays (12pt at 1x, growing proportionally). Previously pinned to a
-	// fixed 12pt, which looked tiny once the system font was enlarged.
-	f.SetSize(ScalePx(12.0f));
 	SetFont(&f);
 	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
 
