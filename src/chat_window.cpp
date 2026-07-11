@@ -1285,6 +1285,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
 	, fModel(model)
+	, fConfigModel(model)
 	, fMaxTokens(maxTokens)
 	, fSystemPrompt(systemPrompt)
 	, fWorkingDir(workingDir)
@@ -4044,12 +4045,16 @@ void ChatWindow::_LoadGuiPrefs()
 		fVSplit->SetItemWeight((int32)0, 1.0f, true);
 	}
 
-	// Last-used model — only when the caller didn't already pin one via
-	// a session or CLI flag (fModel still at the constructor default is
-	// hard to detect, so we just adopt the saved model and re-mark the
-	// menu; a loaded session overrides this later anyway).
+	// Last-used model — only adopt the auto-saved GUI model when the user
+	// hasn't explicitly pinned one in config.json / via a CLI flag. If the
+	// constructor model differs from the built-in default, that value was
+	// deliberately chosen and must win over the saved last-used model.
+	// A loaded session still overrides this later.
+	const bool userPinnedModel =
+		!fConfigModel.empty() && fConfigModel != config::kDefaultModel;
 	const char* model = nullptr;
-	if (prefs.FindString("model", &model) == B_OK && model && model[0]) {
+	if (!userPinnedModel
+			&& prefs.FindString("model", &model) == B_OK && model && model[0]) {
 		fModel = model;
 		_UpdateTitle();
 		if (fModelMenu) {

@@ -457,6 +457,10 @@ private:
 	// ── Conversation state ───────────────────────────────────────────────────
 	config::Auth   fAuth;
 	std::string    fModel;
+	// The model this window was constructed with (from config.json / CLI).
+	// When it differs from the built-in default the user has explicitly
+	// pinned a model, so the auto-saved GUI last-model must not override it.
+	std::string    fConfigModel;
 	int            fMaxTokens;
 	std::string    fSystemPrompt;
 	std::string    fWorkingDir;   // working directory shown to Claude; empty = getcwd()
