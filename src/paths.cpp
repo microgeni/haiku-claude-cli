@@ -41,6 +41,7 @@ std::string UserMemoryPath()    { return ConfigDir() + "/CLAUDE.md"; }
 std::string ProjectMemoryPath() { return "CLAUDE.md"; }
 std::string SessionsDir()       { return ConfigDir() + "/sessions"; }
 std::string GuiPrefsPath()      { return ConfigDir() + "/gui_prefs.msg"; }
+std::string GuiHistoryPath()    { return ConfigDir() + "/gui_history"; }
 
 // Agent Skills (Claude Code parity). Personal skills live under the
 // config dir; project skills live in ./.claude/skills, checked into

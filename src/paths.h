@@ -29,6 +29,7 @@ std::string UserMemoryPath();          // <ConfigDir>/CLAUDE.md
 std::string ProjectMemoryPath();       // ./CLAUDE.md (cwd-relative)
 std::string SessionsDir();             // <ConfigDir>/sessions  (GUI)
 std::string GuiPrefsPath();            // <ConfigDir>/gui_prefs.msg  (GUI)
+std::string GuiHistoryPath();          // <ConfigDir>/gui_history    (GUI prompt history)
 std::string UserSkillsDir();           // <ConfigDir>/skills
 std::string ProjectSkillsDir();        // ./.claude/skills (cwd-relative)
 std::string UserAgentsDir();           // <ConfigDir>/agents
