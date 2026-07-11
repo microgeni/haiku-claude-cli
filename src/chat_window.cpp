@@ -902,7 +902,10 @@ void TokenBar::Draw(BRect updateRect)
 	const std::string lbl  = commaNum(fUsed) + " / " + shortK(fMax) + "  (" + pct + ")";
 
 	BFont f(be_plain_font);
-	f.SetSize(12.0f);
+	// Scale the label with the system font so it stays legible on HiDPI
+	// displays (12pt at 1x, growing proportionally). Previously pinned to a
+	// fixed 12pt, which looked tiny once the system font was enlarged.
+	f.SetSize(ScalePx(12.0f));
 	SetFont(&f);
 	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
 
@@ -914,7 +917,7 @@ void TokenBar::Draw(BRect updateRect)
 	const float baseline = std::floor((r.Height() - textH) / 2.0f + fh.ascent);
 
 	const float lblW    = f.StringWidth(lbl.c_str());
-	const float lblLeft = std::floor(r.right - lblW - 8.0f);
+	const float lblLeft = std::floor(r.right - lblW - ScalePx(8.0f));
 	// The context-window label is the priority indicator, so draw it first
 	// and reserve its space; the left-aligned stats yield to it.
 	MovePenTo(lblLeft, baseline);
@@ -937,7 +940,7 @@ void TokenBar::Draw(BRect updateRect)
 	// When ludicrous mode is on, draw a yellow "⚡ LUDICROUS" badge at the
 	// far left so the auto-approve state is always visible, mirroring the
 	// CLI status bar. The session stats start after the badge(s).
-	float statsLeft = r.left + 4.0f;
+	float statsLeft = r.left + ScalePx(4.0f);
 	const std::string sep = "  \xC2\xB7  ";
 	if (fLudicrous) {
 		const std::string badge = "\xE2\x9A\xA1 LUDICROUS";
@@ -961,7 +964,7 @@ void TokenBar::Draw(BRect updateRect)
 	// window is narrow the stats are dropped rather than overdrawing the
 	// always-important "x / 200k (n%)" indicator.
 	const float statsWidth = f.StringWidth(stats.c_str());
-	if (statsLeft + statsWidth + 8.0f <= lblLeft) {
+	if (statsLeft + statsWidth + ScalePx(8.0f) <= lblLeft) {
 		MovePenTo(statsLeft, baseline);
 		DrawString(stats.c_str());
 	}
