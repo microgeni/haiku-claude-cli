@@ -1310,6 +1310,12 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
+	// ChatWindow owns scroll positioning: it does a single _ScrollToBottom()
+	// per streamed chunk. Disable the renderer's own per-line ScrollToEnd()
+	// calls so the two don't issue several competing ScrollToOffset()s while
+	// the buffer is still reflowing — that fight is what makes the view
+	// jitter up and down after Send when the user had scrolled up.
+	fMdRenderer->SetAutoScroll(false);
 
 	// Update title with model name.
 	_UpdateTitle();
@@ -2279,6 +2285,12 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_CHUNK: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
+			// Decide once, before inserting, whether to keep the view pinned
+			// to the bottom: only if the user was already near the bottom.
+			// If they had scrolled up to read, leave their position alone so
+			// streaming text doesn't yank (and jitter) the view back down.
+			const bool stick = _IsNearBottom();
+
 			// First real output of the turn — erase the thinking spinner.
 			_SpinnerStop();
 			if (fInWebFetch) {
@@ -2297,6 +2309,14 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				_ProcessChunk(text);
 			}
 			fPendingAssistantText += text;
+
+			// Exactly one scroll per chunk (the renderer's own scrolling is
+			// disabled), so the view settles in a single move instead of
+			// fighting several competing ScrollToOffset() calls.
+			if (stick)
+				_ScrollToBottom();
+			else if (fJumpBtn && fJumpBtn->IsHidden())
+				fJumpBtn->Show();  // let the user jump back down when ready
 		}
 		break;
 	}
@@ -3056,6 +3076,11 @@ void ChatWindow::_SendTurn()
 	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);   // ▸
 	_AppendText(userText + "\n");
 	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
+
+	// Sending is an explicit "show me this exchange" action: snap to the
+	// bottom and hide the jump button so streaming follows the reply.
+	_ScrollToBottom();
+	if (fJumpBtn && !fJumpBtn->IsHidden()) fJumpBtn->Hide();
 
 	_LaunchWorker(userText);
 }

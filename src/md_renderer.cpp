@@ -250,7 +250,7 @@ void MdRenderer::FlushTable()
 	emit("\n", monoPlain, kColorTableCell);
 
 	// Scroll so the bottom of the table is visible.
-	fView->ScrollToOffset(fView->TextLength());
+	ScrollToEnd();
 
 	// ── 7. Reset state ────────────────────────────────────────────────────
 	fInTable = false;
@@ -307,6 +307,7 @@ void MdRenderer::AppendRun(const Run& r)
 
 void MdRenderer::ScrollToEnd()
 {
+	if (!fAutoScroll) return;
 	fView->ScrollToOffset(fView->TextLength());
 }
 

@@ -65,6 +65,12 @@ public:
 	void AppendRun(const Run& r);
 	void ScrollToEnd();
 
+	// Enable/disable the renderer's internal scroll-to-end calls. When the
+	// user has scrolled up to read earlier text, ChatWindow disables this so
+	// streaming replies don't yank the view back to the bottom (and fight
+	// the user's scroll position). Defaults to true.
+	void SetAutoScroll(bool on) { fAutoScroll = on; }
+
 	// Set the zoom multiplier applied to every run's font size at render
 	// time. New text (streamed or appended) is emitted pre-scaled to this
 	// factor so it matches the user's chosen zoom immediately, rather than
@@ -106,6 +112,10 @@ private:
 
 	// Zoom multiplier applied to every run's font size (see SetZoom).
 	float fZoom = 1.0f;
+
+	// When false, ScrollToEnd() is a no-op so the renderer never yanks the
+	// view to the bottom (see SetAutoScroll).
+	bool fAutoScroll = true;
 
 	// Track blank-line state for paragraph spacing.
 	bool fLastWasBlank = false;
