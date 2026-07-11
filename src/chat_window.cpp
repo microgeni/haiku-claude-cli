@@ -487,11 +487,16 @@ const char* kKnownModels[] = {
 	nullptr
 };
 
-void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
+void AppendWithColor(BTextView* view, const std::string& text, rgb_color color,
+                     float zoom = 1.0f)
 {
 	if (text.empty()) return;
 	BFont font;
 	view->GetFont(&font);
+	// Render at the current zoom so appended (non-markdown) text matches
+	// the user's chosen size immediately.
+	if (zoom > 0.0f && zoom != 1.0f)
+		font.SetSize(font.Size() * zoom);
 	text_run_array* tra = static_cast<text_run_array*>(
 		malloc(sizeof(text_run_array) + sizeof(text_run)));
 	if (!tra) {
@@ -2363,33 +2368,33 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (!rawDiff || !rawDiff[0]) break;
 
 		// Blank line before the diff block for visual separation.
-		AppendWithColor(fOutput, "\n", kColorToolLine);
+		AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
 
 		std::istringstream iss(rawDiff);
 		std::string line;
 		while (std::getline(iss, line)) {
 			if (line.empty()) {
-				AppendWithColor(fOutput, "\n", kColorToolLine);
+				AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
 				continue;
 			}
 			const char sigil = line[0];
 			const std::string text = line.substr(1) + "\n";
 			switch (sigil) {
 				case '!':
-					AppendWithColor(fOutput, text, kColorDiffHeader);
+					AppendWithColor(fOutput, text, kColorDiffHeader, fZoomFactor);
 					break;
 				case '+':
-					AppendWithColor(fOutput, "+ " + text, kColorDiffAdd);
+					AppendWithColor(fOutput, "+ " + text, kColorDiffAdd, fZoomFactor);
 					break;
 				case '-':
-					AppendWithColor(fOutput, "- " + text, kColorDiffRemove);
+					AppendWithColor(fOutput, "- " + text, kColorDiffRemove, fZoomFactor);
 					break;
 				default: // ' ' context
-					AppendWithColor(fOutput, "  " + text, kColorToolLine);
+					AppendWithColor(fOutput, "  " + text, kColorToolLine, fZoomFactor);
 					break;
 			}
 		}
-		AppendWithColor(fOutput, "\n", kColorToolLine);
+		AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
 		if (!fUserScrolled) _ScrollToBottom();
 		break;
 	}
@@ -2425,7 +2430,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (msg->FindString("text", &text) == B_OK && text) {
 			AppendWithColor(fOutput,
 			    std::string("\n\xE2\x9A\xA0 ") + text + "\n", // ⚠
-			    kColorError);
+			    kColorError, fZoomFactor);
 			_ScrollToBottom();
 		}
 		break;
@@ -2528,10 +2533,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		_SetBusy(false);
 		_UpdateTitle();
 
-		// If the user has zoomed, scale the text that just streamed in
-		// (it arrived at base size) so the whole transcript stays at the
-		// chosen zoom level.
-		if (fZoomFactor != 1.0f) _ApplyZoom();
+		// Streamed text is now inserted pre-scaled to the current zoom
+		// (the renderer and AppendWithColor honour fZoomFactor), so no
+		// retro-scaling is needed here.
 
 		// Auto-save session to BFS after every completed turn.
 		_SaveSession();
@@ -2699,9 +2703,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				// Render the exchange. A dim 📡 marker on the user label
 				// signals the turn originated from Telegram, not the GUI.
 				_DismissWelcome();
-				AppendWithColor(fOutput, "\n\xF0\x9F\x93\xA1 you \xE2\x96\xB8 ", kColorUserLabel);
+				AppendWithColor(fOutput, "\n\xF0\x9F\x93\xA1 you \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
 				_AppendText(userText + "\n");
-				AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+				AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 				if (!asstText.empty()) _AppendText(asstText + "\n");
 			} catch (const std::exception& e) {
 				config::LogLine(std::string("remote append parse failed: ")
@@ -2761,13 +2765,13 @@ bool ChatWindow::QuitRequested()
 
 void ChatWindow::_AppendText(const std::string& text)
 {
-	AppendWithColor(fOutput, text, kColorText);
+	AppendWithColor(fOutput, text, kColorText, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
 void ChatWindow::_AppendToolLine(const std::string& text)
 {
-	AppendWithColor(fOutput, text, kColorToolLine);
+	AppendWithColor(fOutput, text, kColorToolLine, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
@@ -2797,7 +2801,7 @@ void ChatWindow::_SpinnerStart()
 	fSpinnerOffset = fOutput->TextLength();
 	fSpinnerActive = true;
 	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
-	                                         fSpinnerStart), kColorInputCyan);
+	                                         fSpinnerStart), kColorInputCyan, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
@@ -2812,7 +2816,7 @@ void ChatWindow::_SpinnerTick()
 	if (fSpinnerOffset <= end)
 		fOutput->Delete(fSpinnerOffset, end);
 	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
-	                                         fSpinnerStart), kColorInputCyan);
+	                                         fSpinnerStart), kColorInputCyan, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
@@ -3049,9 +3053,9 @@ void ChatWindow::_SendTurn()
 	}
 
 	// Emit user label + text into the output.
-	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);   // ▸
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);   // ▸
 	_AppendText(userText + "\n");
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 
 	_LaunchWorker(userText);
 }
@@ -3129,7 +3133,7 @@ void ChatWindow::_LaunchCompact()
 
 	// Visible markers in the scrollback so the user sees what happened.
 	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 /compact\n", kColorUserLabel);
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 
 	fPendingUserText.clear();
 	fPendingAssistantText.clear();
@@ -3290,10 +3294,11 @@ void ChatWindow::_ClearOutput()
 	fCodeViews.clear();
 	// Reset the TextRect to fit the now-empty view.
 	fOutput->SetTextRect(fOutput->Bounds().InsetByCopy(4, 4));
-	// The buffer is empty; reset the zoom-applied boundary but keep the
-	// user's chosen factor so new text is scaled to it on next append.
-	fZoomedLen   = 0;
+	// The buffer is empty; keep the user's chosen factor so new text is
+	// inserted pre-scaled to it. fAppliedZoom tracks the buffer's uniform
+	// zoom (nothing on screen, so it equals the current factor).
 	fAppliedZoom = fZoomFactor;
+	if (fMdRenderer) fMdRenderer->SetZoom(fZoomFactor);
 
 	// The output is empty again — bring back the welcome splash with the
 	// app icon and greeting, just as on a fresh window.
@@ -3829,46 +3834,39 @@ void ChatWindow::_Zoom(int delta)
 		if (fZoomFactor < kMin) fZoomFactor = kMin;
 		if (fZoomFactor > kMax) fZoomFactor = kMax;
 	}
+	// Rescale text already on screen to the new factor, and make the
+	// renderer emit future streamed runs pre-scaled so new replies match.
 	_ApplyZoom();
+	if (fMdRenderer) fMdRenderer->SetZoom(fZoomFactor);
 }
 
-// Rescale the output runs to the desired zoom factor. Two regions are
-// handled: text already scaled to fAppliedZoom (offsets 0..fZoomedLen) is
-// adjusted by the incremental ratio, and freshly-streamed text beyond
-// fZoomedLen (which arrived at base size) is scaled by the full factor.
-// Relative sizes the markdown renderer chose (headings vs body) are
-// preserved because each run is scaled multiplicatively. Called on every
-// zoom command and after each turn (MSG_WORKER_DONE) so streamed text
-// catches up.
+// Rescale all on-screen text from the previously-applied zoom
+// (fAppliedZoom) to the current one (fZoomFactor). Because new text is now
+// inserted pre-scaled to fZoomFactor by the renderer and AppendWithColor,
+// the whole buffer is always at a single uniform zoom, so one incremental
+// rescale by (fZoomFactor / fAppliedZoom) covers everything. Relative sizes
+// the markdown renderer chose (headings vs body) are preserved because each
+// run is scaled multiplicatively. Called only from _Zoom().
 void ChatWindow::_ApplyZoom()
 {
 	if (!fOutput) return;
 	const int32 len = fOutput->TextLength();
-	if (len <= 0) { fAppliedZoom = fZoomFactor; fZoomedLen = 0; return; }
+	if (len <= 0) { fAppliedZoom = fZoomFactor; return; }
 
-	auto scaleRange = [&](int32 from, int32 to, float ratio) {
-		if (from >= to || ratio == 1.0f) return;
-		text_run_array* runs = fOutput->RunArray(from, to);
-		if (!runs) return;
-		for (int32 i = 0; i < runs->count; ++i)
-			runs->runs[i].font.SetSize(runs->runs[i].font.Size() * ratio);
-		fOutput->SetRunArray(from, to, runs);
-		free(runs);
-	};
-
-	// Clamp the previously-scaled boundary in case text was cleared.
-	if (fZoomedLen > len) fZoomedLen = len;
-
-	// Region 1: already-scaled text → adjust by the incremental ratio.
+	// Incremental ratio from the last applied zoom to the new one.
 	const float ratio = (fAppliedZoom > 0.0f) ? (fZoomFactor / fAppliedZoom)
 	                                           : fZoomFactor;
-	scaleRange(0, fZoomedLen, ratio);
-
-	// Region 2: new text appended since the last apply → full factor.
-	scaleRange(fZoomedLen, len, fZoomFactor);
+	if (ratio != 1.0f) {
+		text_run_array* runs = fOutput->RunArray(0, len);
+		if (runs) {
+			for (int32 i = 0; i < runs->count; ++i)
+				runs->runs[i].font.SetSize(runs->runs[i].font.Size() * ratio);
+			fOutput->SetRunArray(0, len, runs);
+			free(runs);
+		}
+	}
 
 	fAppliedZoom = fZoomFactor;
-	fZoomedLen   = len;
 	fOutput->Invalidate();
 }
 
@@ -4024,7 +4022,8 @@ void ChatWindow::_LoadGuiPrefs()
 	if (prefs.FindFloat("zoom", &zoom) == B_OK
 			&& zoom >= 0.6f && zoom <= 2.5f) {
 		fZoomFactor  = zoom;
-		fAppliedZoom = zoom;   // new text arrives pre-scaled to this
+		fAppliedZoom = zoom;   // empty buffer; new text arrives pre-scaled
+		if (fMdRenderer) fMdRenderer->SetZoom(zoom);
 	}
 
 	// Restore the splitter weight of the sidebar relative to the chat.
@@ -4185,11 +4184,11 @@ void ChatWindow::_LoadSession(const std::string& path)
 				    ? content.substr(0, 57) + "\xE2\x80\xA6"
 				    : content;
 			}
-			AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+			AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
 			_AppendText(content + "\n");
 			++fTurnCount;
 		} else if (role == "assistant") {
-			AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+			AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 			if (fMdRenderer) {
 				fMdRenderer->Write(content);
 				fMdRenderer->Flush();
@@ -4235,9 +4234,9 @@ void ChatWindow::_ShowMarkdownDemo()
 	_DismissWelcome();
 
 	// Emit a user "question" label so the demo looks like a real turn.
-	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
 	_AppendText("Show me a markdown rendering demo\n");
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 
 	// ── Rich markdown sample ─────────────────────────────────────────────────
 	// Every feature supported by md::MdRenderer is exercised here so the

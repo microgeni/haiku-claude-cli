@@ -438,8 +438,7 @@ private:
 
 	// ── Font zoom ──────────────────────────────────────────────────────────────
 	float          fZoomFactor    = 1.0f;     // desired output font multiplier
-	float          fAppliedZoom   = 1.0f;     // factor applied to text up to fZoomedLen
-	int32          fZoomedLen     = 0;        // output length already scaled to fAppliedZoom
+	float          fAppliedZoom   = 1.0f;     // uniform zoom currently applied to the buffer
 
 	// ── Session sidebar ────────────────────────────────────────────────────────
 	BView*         fSessionPanel  = nullptr;  // left dock container (hidden by default)

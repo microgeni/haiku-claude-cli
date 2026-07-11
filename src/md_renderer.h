@@ -65,6 +65,13 @@ public:
 	void AppendRun(const Run& r);
 	void ScrollToEnd();
 
+	// Set the zoom multiplier applied to every run's font size at render
+	// time. New text (streamed or appended) is emitted pre-scaled to this
+	// factor so it matches the user's chosen zoom immediately, rather than
+	// being retro-scaled after the turn. Defaults to 1.0.
+	void SetZoom(float zoom) { fZoom = (zoom > 0.0f) ? zoom : 1.0f; }
+	float Zoom() const { return fZoom; }
+
 private:
 	// Render one complete line.
 	void RenderLine(const std::string& line);
@@ -96,6 +103,9 @@ private:
 	BTextView*           fView;
 	std::string          fLineBuf;   // partial line accumulator
 	std::vector<std::string> fUrls;
+
+	// Zoom multiplier applied to every run's font size (see SetZoom).
+	float fZoom = 1.0f;
 
 	// Track blank-line state for paragraph spacing.
 	bool fLastWasBlank = false;
