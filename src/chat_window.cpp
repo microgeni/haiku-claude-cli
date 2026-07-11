@@ -1018,7 +1018,7 @@ SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
                                const std::string& workingDir,
                                BMenuField* modelField)
 	: BWindow(BRect(0, 0, ScalePx(640), ScalePx(480)), "Settings",
-	          B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+	          B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
 	          B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
 	  fParent(parent)
 {
