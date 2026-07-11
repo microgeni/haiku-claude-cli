@@ -37,6 +37,7 @@
 #include <Menu.h>
 #include <MenuBar.h>
 #include <Message.h>
+#include <MessageFilter.h>
 #include <MessageRunner.h>
 #include <Notification.h>
 #include <OS.h>
@@ -58,10 +59,7 @@
 
 #include <private/interface/AboutWindow.h>
 #include "api.h"
-#include "agents.h"
 #include "code_styler.h"
-#include "commands.h"
-#include "skills.h"
 #include "syntax_highlight.h"
 #include "config.h"
 #include "gui_sink.h"
@@ -78,6 +76,33 @@
 // stay dark regardless of the system theme (the output area is always dark).
 // ---------------------------------------------------------------------------
 namespace {
+
+// ---------------------------------------------------------------------------
+// HiDPI scaling. Haiku does not expose a monitor DPI directly; instead the
+// system font size grows on high-resolution displays (12pt is the 1x
+// baseline). Deriving a scale factor from be_plain_font lets every hard-coded
+// pixel dimension track the display so dialogs, buttons, bars and icons stay
+// proportional on HiDPI screens. Mirrors the be_control_look convention.
+// ---------------------------------------------------------------------------
+float
+gui_scale()
+{
+	const float base = be_plain_font ? be_plain_font->Size() : 12.0f;
+	const float s    = base / 12.0f;
+	// Clamp so an oddly configured font never produces an unusable window.
+	if (s < 1.0f) return 1.0f;
+	if (s > 4.0f) return 4.0f;
+	return s;
+}
+
+// Scale a 1x pixel measurement to the current display, rounded up so we
+// never lose a pixel that would clip glyphs. Named ScalePx (not Scale)
+// because BView::Scale() already exists and would shadow a free Scale().
+float
+ScalePx(float px)
+{
+	return std::ceil(px * gui_scale());
+}
 
 // Standard RFC 4648 base64 encoder (not URL-safe — the Anthropic image
 // API wants '+' / '/' with '=' padding). Used to embed dropped image
@@ -443,24 +468,35 @@ const rgb_color kColorDiffHeader  = { 140, 180, 220, 255 }; // steel-blue — di
 const rgb_color kColorInputCyan   = {  60, 200, 215, 255 };
 
 // Known Anthropic models listed in the model picker.
+// Fallback model list shown in the picker until the live /v1/models fetch
+// replaces it. Kept roughly current with the API lineup; the background
+// fetch in _PopulateModelMenu() is the source of truth at runtime.
 const char* kKnownModels[] = {
+	"claude-opus-4-8",
+	"claude-opus-4-7",
+	"claude-opus-4-6",
 	"claude-opus-4-5",
+	"claude-sonnet-5",
+	"claude-sonnet-4-6",
 	"claude-sonnet-4-5",
 	"claude-haiku-4-5",
-	"claude-opus-4",
-	"claude-sonnet-4",
+	"claude-opus-4-1",
 	"claude-3-7-sonnet-20250219",
 	"claude-3-5-sonnet-20241022",
 	"claude-3-5-haiku-20241022",
-	"claude-3-opus-20240229",
 	nullptr
 };
 
-void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
+void AppendWithColor(BTextView* view, const std::string& text, rgb_color color,
+                     float zoom = 1.0f)
 {
 	if (text.empty()) return;
 	BFont font;
 	view->GetFont(&font);
+	// Render at the current zoom so appended (non-markdown) text matches
+	// the user's chosen size immediately.
+	if (zoom > 0.0f && zoom != 1.0f)
+		font.SetSize(font.Size() * zoom);
 	text_run_array* tra = static_cast<text_run_array*>(
 		malloc(sizeof(text_run_array) + sizeof(text_run)));
 	if (!tra) {
@@ -478,63 +514,6 @@ void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
 
 } // namespace
 
-
-// ===========================================================================
-// CommandPopup  (BPopUpMenu wrapper)
-// ===========================================================================
-
-void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
-{
-	static const char* kBuiltins[] = {
-		"/help", "/clear", "/new", "/model", "/compact",
-		"/memory", "/usage", "/version", "/skills", "/agents", nullptr
-	};
-
-	// Collect matching commands.
-	std::vector<std::string> matches;
-	for (const auto& name : commands::Names()) {
-		if (name.size() >= prefix.size() &&
-		    name.substr(0, prefix.size()) == prefix)
-			matches.push_back(name);
-	}
-	// Agent Skills are invoked the same way as custom commands
-	// (/skill-name), so offer them in the completion popup too.
-	for (const auto& name : skills::Names()) {
-		if (name.size() >= prefix.size() &&
-		    name.substr(0, prefix.size()) == prefix) {
-			bool dup = false;
-			for (const auto& m : matches) if (m == name) { dup = true; break; }
-			if (!dup) matches.push_back(name);
-		}
-	}
-	for (int i = 0; kBuiltins[i]; ++i) {
-		const std::string b(kBuiltins[i]);
-		if (b.size() >= prefix.size() &&
-		    b.substr(0, prefix.size()) == prefix) {
-			bool dup = false;
-			for (const auto& m : matches) if (m == b) { dup = true; break; }
-			if (!dup) matches.push_back(b);
-		}
-	}
-	std::sort(matches.begin(), matches.end());
-	if (matches.empty()) return;
-
-	// Build the BPopUpMenu.
-	BPopUpMenu* menu = new BPopUpMenu("commands", false, false);
-	for (const auto& m : matches) {
-		BMessage* msg = new BMessage(gui::MSG_COMPLETE_CMD);
-		msg->AddString("cmd", m.c_str());
-		menu->AddItem(new BMenuItem(m.c_str(), msg));
-	}
-	menu->SetTargetForItems(fTarget);
-
-	// Go() runs a nested event loop — safe from MessageReceived context.
-	// It blocks until the user picks or dismisses.
-	fVisible = true;
-	menu->Go(screenPt, true, true, true);
-	fVisible = false;
-	delete menu;
-}
 
 // ===========================================================================
 // InputView
@@ -637,26 +616,28 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 			if (Window()) Window()->PostMessage(gui::MSG_CANCEL);
 			return;
 		}
-	}
-
-	// Up/Down → history.
-	if (numBytes == 3 && bytes[0] == '\x1B') {
-		if (bytes[2] == 'A') { _HistoryUp();   return; }
-		if (bytes[2] == 'B') { _HistoryDown(); return; }
+		// Up/Down → prompt history, but only at the text boundaries so a
+		// multi-line draft can still be navigated with the arrows. On Haiku
+		// the arrow keys arrive as single bytes (B_UP_ARROW / B_DOWN_ARROW),
+		// not a VT escape sequence.
+		if (bytes[0] == B_UP_ARROW || bytes[0] == B_DOWN_ARROW) {
+			int32 selStart = 0, selEnd = 0;
+			GetSelection(&selStart, &selEnd);
+			const int32 curLine  = LineAt(selStart);
+			const int32 lastLine = CountLines() - 1;
+			if (bytes[0] == B_UP_ARROW && curLine == 0) {
+				_HistoryUp();
+				return;
+			}
+			if (bytes[0] == B_DOWN_ARROW && curLine == lastLine) {
+				_HistoryDown();
+				return;
+			}
+			// Otherwise fall through to normal cursor movement.
+		}
 	}
 
 	BTextView::KeyDown(bytes, numBytes);
-
-	// After inserting '/' as the first character, show the command popup.
-	// BPopUpMenu::Go() handles its own keyboard navigation.
-	if (Window()) {
-		const std::string txt(Text(), static_cast<size_t>(TextLength()));
-		if (!txt.empty() && txt[0] == '/') {
-			BMessage upd(gui::MSG_POPUP_UPDATE);
-			upd.AddString("prefix", txt.c_str());
-			Window()->PostMessage(&upd);
-		}
-	}
 
 	Invalidate();
 }
@@ -776,6 +757,13 @@ void InputView::SaveHistory(const std::string& path) const
 		f << fHistory[i] << '\n';
 }
 
+void InputView::ClearHistory()
+{
+	fHistory.clear();
+	fHistIdx = -1;
+	fDraft.clear();
+}
+
 void InputView::_HistoryUp()
 {
 	if (fHistory.empty()) return;
@@ -817,13 +805,13 @@ TokenBar::TokenBar()
 	// had an unused extra row.
 	font_height fh;
 	be_plain_font->GetHeight(&fh);
-	float height = std::ceil(fh.ascent + fh.descent + fh.leading) + 6.0f;
+	float height = std::ceil(fh.ascent + fh.descent + fh.leading) + ScalePx(6.0f);
 	// Pin a small explicit min WIDTH (not B_SIZE_UNSET): a custom BView with an
 	// unset min width reports its current frame width as the minimum, which at
 	// the initial window size latches the whole chat column — and thus the
 	// window — to a huge minimum width, letting the bottom input bar overflow
 	// and clip its buttons. A small min lets the bar and window shrink freely.
-	SetExplicitMinSize(BSize(40, height));
+	SetExplicitMinSize(BSize(ScalePx(40), height));
 	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, height));
 	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
@@ -874,8 +862,12 @@ void TokenBar::Draw(BRect updateRect)
 	const std::string pct  = std::to_string(static_cast<int>(filled * 100.0f + 0.5f)) + "%";
 	const std::string lbl  = commaNum(fUsed) + " / " + shortK(fMax) + "  (" + pct + ")";
 
+	// Track the system font but render the label two points smaller: the
+	// token bar is a compact status strip, so a slightly smaller size than
+	// be_plain_font reads better while still scaling with the system font
+	// on HiDPI displays.
 	BFont f(be_plain_font);
-	f.SetSize(12.0f);
+	f.SetSize(f.Size() - 2.0f);
 	SetFont(&f);
 	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
 
@@ -887,7 +879,7 @@ void TokenBar::Draw(BRect updateRect)
 	const float baseline = std::floor((r.Height() - textH) / 2.0f + fh.ascent);
 
 	const float lblW    = f.StringWidth(lbl.c_str());
-	const float lblLeft = std::floor(r.right - lblW - 8.0f);
+	const float lblLeft = std::floor(r.right - lblW - ScalePx(8.0f));
 	// The context-window label is the priority indicator, so draw it first
 	// and reserve its space; the left-aligned stats yield to it.
 	MovePenTo(lblLeft, baseline);
@@ -910,7 +902,7 @@ void TokenBar::Draw(BRect updateRect)
 	// When ludicrous mode is on, draw a yellow "⚡ LUDICROUS" badge at the
 	// far left so the auto-approve state is always visible, mirroring the
 	// CLI status bar. The session stats start after the badge(s).
-	float statsLeft = r.left + 4.0f;
+	float statsLeft = r.left + ScalePx(4.0f);
 	const std::string sep = "  \xC2\xB7  ";
 	if (fLudicrous) {
 		const std::string badge = "\xE2\x9A\xA1 LUDICROUS";
@@ -934,7 +926,7 @@ void TokenBar::Draw(BRect updateRect)
 	// window is narrow the stats are dropped rather than overdrawing the
 	// always-important "x / 200k (n%)" indicator.
 	const float statsWidth = f.StringWidth(stats.c_str());
-	if (statsLeft + statsWidth + 8.0f <= lblLeft) {
+	if (statsLeft + statsWidth + ScalePx(8.0f) <= lblLeft) {
 		MovePenTo(statsLeft, baseline);
 		DrawString(stats.c_str());
 	}
@@ -985,8 +977,8 @@ SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
                                int maxTokens, int notifyMinSec,
                                const std::string& workingDir,
                                BMenuField* modelField)
-	: BWindow(BRect(0, 0, 640, 480), "Settings",
-	          B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+	: BWindow(BRect(0, 0, ScalePx(640), ScalePx(480)), "Settings",
+	          B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
 	          B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
 	  fParent(parent)
 {
@@ -994,7 +986,8 @@ SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
 	// Give the window a sensible default size: wide enough to read a full
 	// working-directory path, then center it. AUTO_UPDATE_SIZE_LIMITS only
 	// sets the minimum, so resize explicitly to the preferred width.
-	ResizeTo(640, 480);
+	// Scaled so the dialog grows with the system font on HiDPI displays.
+	ResizeTo(ScalePx(640), ScalePx(480));
 	CenterOnScreen();
 	// Start the looper running but keep the window off-screen: Hide() before
 	// Show() leaves a net-hidden window whose looper is alive, so Toggle()
@@ -1012,10 +1005,10 @@ void SettingsDialog::_BuildLayout(const std::string& systemPrompt, int maxTokens
 	fSysPromptView        = new BTextView("sysprompt", B_WILL_DRAW | B_FRAME_EVENTS);
 	fSysPromptView->SetWordWrap(true);
 	fSysPromptView->SetText(systemPrompt.c_str());
-	fSysPromptView->SetExplicitMinSize(BSize(80, 80));
+	fSysPromptView->SetExplicitMinSize(BSize(ScalePx(80), ScalePx(80)));
 	BScrollView* sysScroll = new BScrollView("sysscroll", fSysPromptView,
 	                                          0, false, true, B_FANCY_BORDER);
-	sysScroll->SetExplicitMinSize(BSize(100, 80));
+	sysScroll->SetExplicitMinSize(BSize(ScalePx(100), ScalePx(80)));
 	sysScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
 	// Max tokens field.
@@ -1046,7 +1039,7 @@ void SettingsDialog::_BuildLayout(const std::string& systemPrompt, int maxTokens
 	fWorkingDirCtl->SetToolTip("Directory Claude uses as the root for "
 	                            "relative file paths and tool calls.");
 	// Make the path field roomy enough to read a full path without scrolling.
-	fWorkingDirCtl->SetExplicitMinSize(BSize(360, B_SIZE_UNSET));
+	fWorkingDirCtl->SetExplicitMinSize(BSize(ScalePx(360), B_SIZE_UNSET));
 	BButton* browseBtn = new BButton("browseworkdir", "Browse" B_UTF8_ELLIPSIS,
 	                                  new BMessage(gui::MSG_BROWSE_WORKDIR));
 	BButton* closeBtn = new BButton("closesettings", "Close",
@@ -1224,7 +1217,10 @@ WelcomeView::WelcomeView()
 		uint8* data = nullptr;
 		size_t size = 0;
 		if (fileInfo.GetIcon(&data, &size) == B_OK && data != nullptr) {
-			BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
+			// Render the vector HVIF into a scaled bitmap so the icon stays
+			// crisp (not upscaled) on HiDPI displays.
+			const int32 px = static_cast<int32>(ScalePx(64.0f)) - 1;
+			BBitmap* icon = new BBitmap(BRect(0, 0, px, px), B_RGBA32);
 			if (BIconUtils::GetVectorIcon(data, size, icon) == B_OK)
 				fIcon = icon;
 			else
@@ -1239,8 +1235,8 @@ WelcomeView::WelcomeView()
 	// latches the whole chat column — and thus the window — to a huge minimum
 	// width, letting the bottom input bar overflow and clip its buttons. A
 	// small explicit min lets the column and window shrink freely.
-	SetExplicitMinSize(BSize(40, 96));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 96));
+	SetExplicitMinSize(BSize(ScalePx(40), ScalePx(96)));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, ScalePx(96)));
 }
 
 WelcomeView::~WelcomeView()
@@ -1252,14 +1248,18 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 {
 	const BRect b = Bounds();
 
-	// Icon on the left, vertically centred.
-	float textLeft = 16.0f;
+	// Icon on the left, vertically centred. fIcon is already rendered at the
+	// scaled size, so use its real dimensions and scale the margins.
+	const float margin = ScalePx(16.0f);
+	float textLeft = margin;
 	if (fIcon != nullptr) {
-		const float iconY = (b.Height() - 64.0f) / 2.0f;
+		const float iconH = fIcon->Bounds().Height() + 1.0f;
+		const float iconW = fIcon->Bounds().Width() + 1.0f;
+		const float iconY = (b.Height() - iconH) / 2.0f;
 		SetDrawingMode(B_OP_ALPHA);
-		DrawBitmap(fIcon, BPoint(16.0f, iconY));
+		DrawBitmap(fIcon, BPoint(margin, iconY));
 		SetDrawingMode(B_OP_COPY);
-		textLeft = 16.0f + 64.0f + 16.0f;
+		textLeft = margin + iconW + margin;
 	}
 
 	// Title line: bold "Claude" in the model accent colour.
@@ -1267,7 +1267,7 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 	titleFont.SetSize(titleFont.Size() * 1.6f);
 	SetFont(&titleFont);
 	SetHighColor(kColorModelLabel);
-	const float titleY = b.Height() / 2.0f - 6.0f;
+	const float titleY = b.Height() / 2.0f - ScalePx(6.0f);
 	DrawString("Claude", BPoint(textLeft, titleY));
 
 	// Subtitle: dim hint, regular font.
@@ -1275,7 +1275,7 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 	SetFont(&subFont);
 	SetHighColor(kColorToolLine);
 	DrawString("Join the AI revolution, resistance is futile!",
-	           BPoint(textLeft, titleY + 22.0f));
+	           BPoint(textLeft, titleY + ScalePx(22.0f)));
 }
 
 
@@ -1290,6 +1290,7 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
 	, fModel(model)
+	, fConfigModel(model)
 	, fMaxTokens(maxTokens)
 	, fSystemPrompt(systemPrompt)
 	, fWorkingDir(workingDir)
@@ -1309,9 +1310,12 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
-
-	// Create the slash-command popup.
-	fCommandPopup = new CommandPopup(this);
+	// ChatWindow owns scroll positioning: it does a single _ScrollToBottom()
+	// per streamed chunk. Disable the renderer's own per-line ScrollToEnd()
+	// calls so the two don't issue several competing ScrollToOffset()s while
+	// the buffer is still reflowing — that fight is what makes the view
+	// jitter up and down after Send when the user had scrolled up.
+	fMdRenderer->SetAutoScroll(false);
 
 	// Update title with model name.
 	_UpdateTitle();
@@ -1402,6 +1406,9 @@ void ChatWindow::_BuildMenuBar()
 	editMenu->AddSeparatorItem();
 	editMenu->AddItem(new BMenuItem("Compact Conversation",
 		new BMessage(gui::MSG_COMPACT), 'K'));
+	editMenu->AddSeparatorItem();
+	editMenu->AddItem(new BMenuItem("Clear Prompt History" B_UTF8_ELLIPSIS,
+		new BMessage(gui::MSG_CLEAR_HISTORY)));
 	fMenuBar->AddItem(editMenu);
 
 	// ── View ────────────────────────────────────────────────────────────────
@@ -1426,11 +1433,17 @@ void ChatWindow::_BuildMenuBar()
 
 	// Remote control: starts a background Telegram poller so allowed users can
 	// drive turns on this machine. The checkmark mirrors fRemote's running
-	// state, kept in sync by _ToggleRemote().
+	// state, kept in sync by _ToggleRemote(). The item is disabled (grayed
+	// out) when there is no valid Telegram config, so it is visibly
+	// unavailable rather than erroring on click.
 	fRemoteItem = new BMenuItem(
 		"\xF0\x9F\x93\xA1 Remote Control  \xE2\x80\x94  Telegram bridge",
 		new BMessage(gui::MSG_REMOTE_CONTROL));
 	fRemoteItem->SetMarked(false);
+	std::string remoteWhy;
+	const bool remoteConfigured =
+		telegram::RemoteControl::ConfigIsValid(config::Load(), &remoteWhy);
+	fRemoteItem->SetEnabled(remoteConfigured);
 	toolsMenu->AddItem(fRemoteItem);
 	fMenuBar->AddItem(toolsMenu);
 
@@ -1505,7 +1518,7 @@ void ChatWindow::_BuildLayout()
 	// Floating jump-to-bottom button (overlaid, repositioned in FrameResized).
 	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93 New", // ↓
 	                        new BMessage(gui::MSG_JUMP_BOTTOM));
-	fJumpBtn->SetExplicitSize(BSize(80, 26));
+	fJumpBtn->SetExplicitSize(BSize(ScalePx(80), ScalePx(26)));
 	fJumpBtn->Hide();
 	AddChild(fJumpBtn); // added directly to window, not layout
 
@@ -1573,8 +1586,8 @@ void ChatWindow::_BuildLayout()
 	// Keep the panel usable but let the window shrink: a small min-width
 	// (the splitter governs the actual width). A large min here would be
 	// summed into the window's minimum and block reducing the window.
-	fSessionPanel->SetExplicitMinSize(BSize(80, B_SIZE_UNSET));
-	fSessionPanel->SetExplicitMaxSize(BSize(500, B_SIZE_UNLIMITED));
+	fSessionPanel->SetExplicitMinSize(BSize(ScalePx(80), B_SIZE_UNSET));
+	fSessionPanel->SetExplicitMaxSize(BSize(ScalePx(500), B_SIZE_UNLIMITED));
 
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
@@ -1619,6 +1632,23 @@ void ChatWindow::_BuildLayout()
 	fFindField = new BTextControl("findfield", nullptr, "",
 	                              new BMessage(gui::MSG_FIND_NEXT));
 	fFindField->SetModificationMessage(new BMessage(gui::MSG_FIND_LIVE));
+	// Esc inside the find field closes the find bar. The filter must go on the
+	// inner BTextView (the view that is actually focused and receives key
+	// events) — a filter on the BTextControl itself never sees the keystroke.
+	if (BTextView* findTV = fFindField->TextView()) {
+		findTV->AddFilter(new BMessageFilter(B_KEY_DOWN,
+			[](BMessage* msg, BHandler** /*target*/, BMessageFilter* filter)
+				-> filter_result {
+				const char* bytes = nullptr;
+				if (msg->FindString("bytes", &bytes) == B_OK
+				    && bytes != nullptr && bytes[0] == B_ESCAPE) {
+					if (BLooper* looper = filter->Looper())
+						looper->PostMessage(gui::MSG_FIND_CLOSE);
+					return B_SKIP_MESSAGE;
+				}
+				return B_DISPATCH_MESSAGE;
+			}));
+	}
 	fFindStatus = new BStringView("findstatus", "");
 	BButton* findPrev  = new BButton("findprev",  "\xE2\x97\x80", // ◀
 	                                  new BMessage(gui::MSG_FIND_PREV));
@@ -1626,9 +1656,9 @@ void ChatWindow::_BuildLayout()
 	                                  new BMessage(gui::MSG_FIND_NEXT));
 	BButton* findClose = new BButton("findclose", "\xE2\x9C\x95", // ✕
 	                                  new BMessage(gui::MSG_FIND_CLOSE));
-	findPrev->SetExplicitSize(BSize(32, B_SIZE_UNSET));
-	findNext->SetExplicitSize(BSize(32, B_SIZE_UNSET));
-	findClose->SetExplicitSize(BSize(32, B_SIZE_UNSET));
+	findPrev->SetExplicitSize(BSize(ScalePx(32), B_SIZE_UNSET));
+	findNext->SetExplicitSize(BSize(ScalePx(32), B_SIZE_UNSET));
+	findClose->SetExplicitSize(BSize(ScalePx(32), B_SIZE_UNSET));
 
 	fFindBar = new BView("findbar", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
 	fFindBar->SetResizingMode(B_FOLLOW_NONE);
@@ -1783,21 +1813,21 @@ void ChatWindow::_BuildLayout()
 	const float kInputPaneMinH = fInputBar->MinSize().height;
 	// Keep the chat area itself usable; its derived min (a tiny BTextView min
 	// plus the token bar) can be near-zero, so floor it to a few visible lines.
-	const float kChatAreaMinH  = std::max(120.0f, chatArea->MinSize().height);
+	const float kChatAreaMinH  = std::max(ScalePx(120.0f), chatArea->MinSize().height);
 	const float kMenuH         = fMenuBar ? fMenuBar->PreferredSize().height
-	                                      : 20.0f;
+	                                      : ScalePx(20.0f);
 	const float kSplitterH     = fVSplit->SplitterSize();
 
 	const float minH = kMenuH + kChatAreaMinH + kSplitterH + kInputPaneMinH
-	                 + 8.0f /*frame slack*/;
+	                 + ScalePx(8.0f) /*frame slack*/;
 
 	// Horizontal floor: the window must be at least as wide as the widest of
 	// its full-width rows — the input bar (input field + button column) and
 	// the chat area (chat split + token bar) — plus a little frame slack, so
 	// the button column is never pushed off the right edge.
-	const float minW = std::max({ 360.0f,
-	                              fInputBar->MinSize().width + 8.0f,
-	                              chatArea->MinSize().width + 8.0f });
+	const float minW = std::max({ ScalePx(360.0f),
+	                              fInputBar->MinSize().width + ScalePx(8.0f),
+	                              chatArea->MinSize().width + ScalePx(8.0f) });
 	SetSizeLimits(minW, 32767, minH, 32767);
 	fWindowMinH = minH;
 	fWindowMinW = minW;
@@ -1816,6 +1846,20 @@ void ChatWindow::_BuildLayout()
 
 	// Session sidebar starts hidden; View ▸ Sessions reveals it.
 	if (fSessionPanel) fSessionPanel->Hide();
+
+	// Enlarge the default window on HiDPI so the initial size stays
+	// proportional to the scaled widgets (the constructor's BRect is the
+	// 1x baseline of 800x580). Only grow — never shrink below the default.
+	const float scale = gui_scale();
+	if (scale > 1.0f) {
+		ResizeTo(std::ceil(800.0f * scale), std::ceil(580.0f * scale));
+		CenterOnScreen();
+	}
+
+	// Load persisted prompt history so Up/Down recalls prompts from previous
+	// GUI sessions (a plain-text file, separate from the CLI's libedit
+	// repl_history).
+	if (fInput) fInput->LoadHistory(paths::GuiHistoryPath());
 
 	// Give input focus on startup.
 	fInput->MakeFocus(true);
@@ -2059,6 +2103,31 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		_LaunchCompact();
 		break;
 
+	case gui::MSG_CLEAR_HISTORY: {
+		// Confirm before wiping persisted prompt history.
+		const size_t n = fInput ? fInput->HistoryCount() : 0;
+		if (n == 0) {
+			BAlert* none = new BAlert("Prompt History",
+				"There are no saved prompts to clear.", "OK");
+			none->SetType(B_INFO_ALERT);
+			none->Go();
+			break;
+		}
+		BString msg;
+		msg.SetToFormat("Clear all %zu saved prompt%s? This cannot be undone.",
+		                n, n == 1 ? "" : "s");
+		BAlert* confirm = new BAlert("Clear Prompt History", msg.String(),
+			"Cancel", "Clear", nullptr,
+			B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		confirm->SetShortcut(0, B_ESCAPE);
+		if (confirm->Go() == 1) {   // "Clear"
+			if (fInput) fInput->ClearHistory();
+			// Remove the on-disk file so the cleared state persists.
+			BEntry(paths::GuiHistoryPath().c_str()).Remove();
+		}
+		break;
+	}
+
 	case gui::MSG_SESSION_NEW:
 		_NewChat();
 		_RefreshSessionList();
@@ -2127,44 +2196,6 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				_ExportTranscript(full.Path());
 			}
 		}
-		break;
-	}
-
-	
-
-	case gui::MSG_POPUP_UPDATE: {
-		if (!fCommandPopup || !fInput) break;
-		const char* prefix = nullptr;
-		msg->FindString("prefix", &prefix);
-		// Compute screen point: top-left of the input view. fInput now lives
-		// inside fInputScroll, so convert from the input view's own
-		// coordinate space (Bounds), not via the window.
-		BPoint pt = fInput->Bounds().LeftTop();
-		fInput->ConvertToScreen(&pt);
-
-		fCommandPopup->Show(prefix ? prefix : "/", pt);
-		break;
-	}
-
-	// Arrow-key navigation and Escape/Enter are handled inside BPopUpMenu's
-	// own event loop — these messages are no longer needed but kept for
-	// safety in case old messages arrive.
-	case gui::MSG_POPUP_NEXT:
-	case gui::MSG_POPUP_PREV:
-	case gui::MSG_POPUP_CONF:
-	case gui::MSG_POPUP_HIDE:
-
-		break;
-
-	case gui::MSG_COMPLETE_CMD: {
-		const char* cmd = nullptr;
-		if (msg->FindString("cmd", &cmd) == B_OK && cmd) {
-			fInput->SetText(cmd);
-			const int32 len = fInput->TextLength();
-			fInput->Select(len, len);
-			fInput->MakeFocus(true);
-		}
-
 		break;
 	}
 
@@ -2254,6 +2285,12 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_CHUNK: {
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text) {
+			// Decide once, before inserting, whether to keep the view pinned
+			// to the bottom: only if the user was already near the bottom.
+			// If they had scrolled up to read, leave their position alone so
+			// streaming text doesn't yank (and jitter) the view back down.
+			const bool stick = _IsNearBottom();
+
 			// First real output of the turn — erase the thinking spinner.
 			_SpinnerStop();
 			if (fInWebFetch) {
@@ -2272,6 +2309,14 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				_ProcessChunk(text);
 			}
 			fPendingAssistantText += text;
+
+			// Exactly one scroll per chunk (the renderer's own scrolling is
+			// disabled), so the view settles in a single move instead of
+			// fighting several competing ScrollToOffset() calls.
+			if (stick)
+				_ScrollToBottom();
+			else if (fJumpBtn && fJumpBtn->IsHidden())
+				fJumpBtn->Show();  // let the user jump back down when ready
 		}
 		break;
 	}
@@ -2343,33 +2388,33 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (!rawDiff || !rawDiff[0]) break;
 
 		// Blank line before the diff block for visual separation.
-		AppendWithColor(fOutput, "\n", kColorToolLine);
+		AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
 
 		std::istringstream iss(rawDiff);
 		std::string line;
 		while (std::getline(iss, line)) {
 			if (line.empty()) {
-				AppendWithColor(fOutput, "\n", kColorToolLine);
+				AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
 				continue;
 			}
 			const char sigil = line[0];
 			const std::string text = line.substr(1) + "\n";
 			switch (sigil) {
 				case '!':
-					AppendWithColor(fOutput, text, kColorDiffHeader);
+					AppendWithColor(fOutput, text, kColorDiffHeader, fZoomFactor);
 					break;
 				case '+':
-					AppendWithColor(fOutput, "+ " + text, kColorDiffAdd);
+					AppendWithColor(fOutput, "+ " + text, kColorDiffAdd, fZoomFactor);
 					break;
 				case '-':
-					AppendWithColor(fOutput, "- " + text, kColorDiffRemove);
+					AppendWithColor(fOutput, "- " + text, kColorDiffRemove, fZoomFactor);
 					break;
 				default: // ' ' context
-					AppendWithColor(fOutput, "  " + text, kColorToolLine);
+					AppendWithColor(fOutput, "  " + text, kColorToolLine, fZoomFactor);
 					break;
 			}
 		}
-		AppendWithColor(fOutput, "\n", kColorToolLine);
+		AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
 		if (!fUserScrolled) _ScrollToBottom();
 		break;
 	}
@@ -2405,7 +2450,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		if (msg->FindString("text", &text) == B_OK && text) {
 			AppendWithColor(fOutput,
 			    std::string("\n\xE2\x9A\xA0 ") + text + "\n", // ⚠
-			    kColorError);
+			    kColorError, fZoomFactor);
 			_ScrollToBottom();
 		}
 		break;
@@ -2508,10 +2553,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		_SetBusy(false);
 		_UpdateTitle();
 
-		// If the user has zoomed, scale the text that just streamed in
-		// (it arrived at base size) so the whole transcript stays at the
-		// chosen zoom level.
-		if (fZoomFactor != 1.0f) _ApplyZoom();
+		// Streamed text is now inserted pre-scaled to the current zoom
+		// (the renderer and AppendWithColor honour fZoomFactor), so no
+		// retro-scaling is needed here.
 
 		// Auto-save session to BFS after every completed turn.
 		_SaveSession();
@@ -2679,9 +2723,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				// Render the exchange. A dim 📡 marker on the user label
 				// signals the turn originated from Telegram, not the GUI.
 				_DismissWelcome();
-				AppendWithColor(fOutput, "\n\xF0\x9F\x93\xA1 you \xE2\x96\xB8 ", kColorUserLabel);
+				AppendWithColor(fOutput, "\n\xF0\x9F\x93\xA1 you \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
 				_AppendText(userText + "\n");
-				AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+				AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 				if (!asstText.empty()) _AppendText(asstText + "\n");
 			} catch (const std::exception& e) {
 				config::LogLine(std::string("remote append parse failed: ")
@@ -2700,6 +2744,9 @@ bool ChatWindow::QuitRequested()
 {
 	// Persist window frame / zoom / model before tearing down.
 	_SaveGuiPrefs();
+
+	// Persist prompt history so future GUI sessions can recall these prompts.
+	if (fInput) fInput->SaveHistory(paths::GuiHistoryPath());
 
 	if (fWorkerRunning.load()) {
 		// Ask the in-flight request to abort, then wait for the worker
@@ -2738,13 +2785,13 @@ bool ChatWindow::QuitRequested()
 
 void ChatWindow::_AppendText(const std::string& text)
 {
-	AppendWithColor(fOutput, text, kColorText);
+	AppendWithColor(fOutput, text, kColorText, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
 void ChatWindow::_AppendToolLine(const std::string& text)
 {
-	AppendWithColor(fOutput, text, kColorToolLine);
+	AppendWithColor(fOutput, text, kColorToolLine, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
@@ -2774,7 +2821,7 @@ void ChatWindow::_SpinnerStart()
 	fSpinnerOffset = fOutput->TextLength();
 	fSpinnerActive = true;
 	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
-	                                         fSpinnerStart), kColorInputCyan);
+	                                         fSpinnerStart), kColorInputCyan, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
@@ -2789,7 +2836,7 @@ void ChatWindow::_SpinnerTick()
 	if (fSpinnerOffset <= end)
 		fOutput->Delete(fSpinnerOffset, end);
 	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
-	                                         fSpinnerStart), kColorInputCyan);
+	                                         fSpinnerStart), kColorInputCyan, fZoomFactor);
 	if (!fUserScrolled) _ScrollToBottom();
 }
 
@@ -3005,119 +3052,15 @@ void ChatWindow::_FlushCodeBlock()
 // Turn lifecycle
 // ---------------------------------------------------------------------------
 
-// Handle GUI slash commands typed into the input field. Returns true when
-// the command was fully handled here (info commands like /skills, /agents);
-// returns false otherwise. For a /skill-name match, `userText` is rewritten
-// in place to the expanded skill body so the caller sends it as a turn.
-bool ChatWindow::_HandleSlashCommand(std::string& userText)
-{
-	// Split into command word and trailing args.
-	std::string line = userText;
-	while (!line.empty() && (line.back() == ' ' || line.back() == '\t'
-	        || line.back() == '\n' || line.back() == '\r'))
-		line.pop_back();
-	std::string cmd = line, args;
-	if (const auto sp = line.find(' '); sp != std::string::npos) {
-		cmd  = line.substr(0, sp);
-		args = line.substr(sp + 1);
-		while (!args.empty() && args.front() == ' ') args.erase(args.begin());
-	}
-
-	auto info = [&](const std::string& text) {
-		AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 " + userText + "\n", kColorUserLabel);
-		AppendWithColor(fOutput, text, kColorToolLine);
-		if (!fUserScrolled) _ScrollToBottom();
-	};
-
-	if (cmd == "/skills") {
-		const auto& all = skills::All();
-		if (all.empty()) {
-			info("[no skills loaded — add one under .claude/skills/<name>/SKILL.md "
-			     "or " + paths::UserSkillsDir() + "/<name>/SKILL.md]\n");
-			return true;
-		}
-		std::string body = "skills (invoke with /<name>):\n";
-		for (const auto& s : all) {
-			body += "  /" + s.name;
-			if (s.disableModelInvocation) body += "  (manual)";
-			if (!s.description.empty()) body += "  \xE2\x80\x94 " + s.description;
-			body += "\n";
-		}
-		info(body);
-		return true;
-	}
-
-	if (cmd == "/agents") {
-		const auto& all = agents::All();
-		if (all.empty()) {
-			info("[no subagents loaded — add one under .claude/agents/<name>.md "
-			     "or " + paths::UserAgentsDir() + "/<name>.md]\n");
-			return true;
-		}
-		std::string body = "subagents (Claude delegates via the Task tool):\n";
-		for (const auto& a : all) {
-			body += "  " + a.name;
-			if (!a.model.empty()) body += "  [" + a.model + "]";
-			if (!a.description.empty()) body += "  \xE2\x80\x94 " + a.description;
-			body += "\n";
-		}
-		info(body);
-		return true;
-	}
-
-	// /skill-name → expand the skill body (with {{args}} + dynamic context)
-	// and rewrite userText so the caller sends the expansion as a turn.
-	if (cmd.size() > 1 && cmd[0] == '/') {
-		const std::string name = cmd.substr(1);
-		bool found = false;
-		std::string expanded = skills::Expand(name, args, found);
-		if (found) {
-			userText = expanded;
-			return false; // fall through: send the expanded text as a turn
-		}
-	}
-
-	return false; // not a GUI-handled command; send verbatim
-}
-
 void ChatWindow::_SendTurn()
 {
 	const char* raw = fInput->Text();
 	if (!raw || raw[0] == '\0') return;
 	std::string userText(raw);
 
-	// Recognise the /compact slash command typed into the input — clear
-	// the field and run the compact flow instead of sending it as a turn.
-	{
-		std::string trimmed = userText;
-		while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
-			trimmed.pop_back();
-		if (trimmed == "/compact") {
-			fInput->SetText("");
-			fInput->PushHistory(userText);
-			_LaunchCompact();
-			return;
-		}
-	}
-
-	// Other GUI-handled slash commands: /skills, /agents (local info) and
-	// /skill-name (expand a skill into the turn text). _HandleSlashCommand
-	// returns true when it fully handled the line (info commands). For a
-	// /skill-name match it expands the skill into `userText` and returns
-	// false so we fall through and send the expansion as a normal turn.
-	if (!userText.empty() && userText[0] == '/') {
-		const std::string original = userText;
-		if (_HandleSlashCommand(userText)) {
-			fInput->SetText("");
-			fInput->PushHistory(original);
-			return;
-		}
-		if (userText != original) {
-			// Skill expansion: record the typed command in history, but
-			// send the expanded text as the turn.
-			fInput->PushHistory(original);
-		}
-	}
+	// The GUI has no slash commands — everything the CLI exposes via
+	// /commands is available through the menus here. Any text starting with
+	// '/' is sent verbatim as a normal turn.
 
 	fInput->SetText("");
 	if (userText == std::string(raw)) fInput->PushHistory(userText);
@@ -3130,9 +3073,14 @@ void ChatWindow::_SendTurn()
 	}
 
 	// Emit user label + text into the output.
-	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);   // ▸
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);   // ▸
 	_AppendText(userText + "\n");
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
+
+	// Sending is an explicit "show me this exchange" action: snap to the
+	// bottom and hide the jump button so streaming follows the reply.
+	_ScrollToBottom();
+	if (fJumpBtn && !fJumpBtn->IsHidden()) fJumpBtn->Hide();
 
 	_LaunchWorker(userText);
 }
@@ -3210,7 +3158,7 @@ void ChatWindow::_LaunchCompact()
 
 	// Visible markers in the scrollback so the user sees what happened.
 	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 /compact\n", kColorUserLabel);
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 
 	fPendingUserText.clear();
 	fPendingAssistantText.clear();
@@ -3371,10 +3319,11 @@ void ChatWindow::_ClearOutput()
 	fCodeViews.clear();
 	// Reset the TextRect to fit the now-empty view.
 	fOutput->SetTextRect(fOutput->Bounds().InsetByCopy(4, 4));
-	// The buffer is empty; reset the zoom-applied boundary but keep the
-	// user's chosen factor so new text is scaled to it on next append.
-	fZoomedLen   = 0;
+	// The buffer is empty; keep the user's chosen factor so new text is
+	// inserted pre-scaled to it. fAppliedZoom tracks the buffer's uniform
+	// zoom (nothing on screen, so it equals the current factor).
 	fAppliedZoom = fZoomFactor;
+	if (fMdRenderer) fMdRenderer->SetZoom(fZoomFactor);
 
 	// The output is empty again — bring back the welcome splash with the
 	// app icon and greeting, just as on a fresh window.
@@ -3798,6 +3747,17 @@ void ChatWindow::_ToggleFindBar()
 {
 	if (!fFindBar) return;
 	if (fFindBar->IsHidden()) {
+		// The find bar lives inside the input pane; if that pane is collapsed
+		// (View > Input), revealing the find bar alone would draw nothing.
+		// Show the pane first so the find bar is actually visible.
+		if (fInputPane && fInputPane->IsHidden()) {
+			fInputPane->Show();
+			if (fInputItem) fInputItem->SetMarked(true);
+			if (fVSplit) {
+				fVSplit->InvalidateLayout(true);
+				fVSplit->Relayout();
+			}
+		}
 		fFindBar->Show();
 		if (fFindField) {
 			// Pre-fill with the current selection, if any, then focus.
@@ -3887,7 +3847,8 @@ void ChatWindow::_FindNext(bool forward)
 // delta: +1 = zoom in, -1 = zoom out, 0 = reset to 100%.
 void ChatWindow::_Zoom(int delta)
 {
-	constexpr float kStep = 0.1f;
+	// 5% per step gives fine-grained zoom control; the range spans 60%–250%.
+	constexpr float kStep = 0.05f;
 	constexpr float kMin  = 0.6f;
 	constexpr float kMax  = 2.5f;
 
@@ -3898,46 +3859,39 @@ void ChatWindow::_Zoom(int delta)
 		if (fZoomFactor < kMin) fZoomFactor = kMin;
 		if (fZoomFactor > kMax) fZoomFactor = kMax;
 	}
+	// Rescale text already on screen to the new factor, and make the
+	// renderer emit future streamed runs pre-scaled so new replies match.
 	_ApplyZoom();
+	if (fMdRenderer) fMdRenderer->SetZoom(fZoomFactor);
 }
 
-// Rescale the output runs to the desired zoom factor. Two regions are
-// handled: text already scaled to fAppliedZoom (offsets 0..fZoomedLen) is
-// adjusted by the incremental ratio, and freshly-streamed text beyond
-// fZoomedLen (which arrived at base size) is scaled by the full factor.
-// Relative sizes the markdown renderer chose (headings vs body) are
-// preserved because each run is scaled multiplicatively. Called on every
-// zoom command and after each turn (MSG_WORKER_DONE) so streamed text
-// catches up.
+// Rescale all on-screen text from the previously-applied zoom
+// (fAppliedZoom) to the current one (fZoomFactor). Because new text is now
+// inserted pre-scaled to fZoomFactor by the renderer and AppendWithColor,
+// the whole buffer is always at a single uniform zoom, so one incremental
+// rescale by (fZoomFactor / fAppliedZoom) covers everything. Relative sizes
+// the markdown renderer chose (headings vs body) are preserved because each
+// run is scaled multiplicatively. Called only from _Zoom().
 void ChatWindow::_ApplyZoom()
 {
 	if (!fOutput) return;
 	const int32 len = fOutput->TextLength();
-	if (len <= 0) { fAppliedZoom = fZoomFactor; fZoomedLen = 0; return; }
+	if (len <= 0) { fAppliedZoom = fZoomFactor; return; }
 
-	auto scaleRange = [&](int32 from, int32 to, float ratio) {
-		if (from >= to || ratio == 1.0f) return;
-		text_run_array* runs = fOutput->RunArray(from, to);
-		if (!runs) return;
-		for (int32 i = 0; i < runs->count; ++i)
-			runs->runs[i].font.SetSize(runs->runs[i].font.Size() * ratio);
-		fOutput->SetRunArray(from, to, runs);
-		free(runs);
-	};
-
-	// Clamp the previously-scaled boundary in case text was cleared.
-	if (fZoomedLen > len) fZoomedLen = len;
-
-	// Region 1: already-scaled text → adjust by the incremental ratio.
+	// Incremental ratio from the last applied zoom to the new one.
 	const float ratio = (fAppliedZoom > 0.0f) ? (fZoomFactor / fAppliedZoom)
 	                                           : fZoomFactor;
-	scaleRange(0, fZoomedLen, ratio);
-
-	// Region 2: new text appended since the last apply → full factor.
-	scaleRange(fZoomedLen, len, fZoomFactor);
+	if (ratio != 1.0f) {
+		text_run_array* runs = fOutput->RunArray(0, len);
+		if (runs) {
+			for (int32 i = 0; i < runs->count; ++i)
+				runs->runs[i].font.SetSize(runs->runs[i].font.Size() * ratio);
+			fOutput->SetRunArray(0, len, runs);
+			free(runs);
+		}
+	}
 
 	fAppliedZoom = fZoomFactor;
-	fZoomedLen   = len;
 	fOutput->Invalidate();
 }
 
@@ -4093,7 +4047,8 @@ void ChatWindow::_LoadGuiPrefs()
 	if (prefs.FindFloat("zoom", &zoom) == B_OK
 			&& zoom >= 0.6f && zoom <= 2.5f) {
 		fZoomFactor  = zoom;
-		fAppliedZoom = zoom;   // new text arrives pre-scaled to this
+		fAppliedZoom = zoom;   // empty buffer; new text arrives pre-scaled
+		if (fMdRenderer) fMdRenderer->SetZoom(zoom);
 	}
 
 	// Restore the splitter weight of the sidebar relative to the chat.
@@ -4114,12 +4069,16 @@ void ChatWindow::_LoadGuiPrefs()
 		fVSplit->SetItemWeight((int32)0, 1.0f, true);
 	}
 
-	// Last-used model — only when the caller didn't already pin one via
-	// a session or CLI flag (fModel still at the constructor default is
-	// hard to detect, so we just adopt the saved model and re-mark the
-	// menu; a loaded session overrides this later anyway).
+	// Last-used model — only adopt the auto-saved GUI model when the user
+	// hasn't explicitly pinned one in config.json / via a CLI flag. If the
+	// constructor model differs from the built-in default, that value was
+	// deliberately chosen and must win over the saved last-used model.
+	// A loaded session still overrides this later.
+	const bool userPinnedModel =
+		!fConfigModel.empty() && fConfigModel != config::kDefaultModel;
 	const char* model = nullptr;
-	if (prefs.FindString("model", &model) == B_OK && model && model[0]) {
+	if (!userPinnedModel
+			&& prefs.FindString("model", &model) == B_OK && model && model[0]) {
 		fModel = model;
 		_UpdateTitle();
 		if (fModelMenu) {
@@ -4250,11 +4209,11 @@ void ChatWindow::_LoadSession(const std::string& path)
 				    ? content.substr(0, 57) + "\xE2\x80\xA6"
 				    : content;
 			}
-			AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+			AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
 			_AppendText(content + "\n");
 			++fTurnCount;
 		} else if (role == "assistant") {
-			AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+			AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 			if (fMdRenderer) {
 				fMdRenderer->Write(content);
 				fMdRenderer->Flush();
@@ -4300,9 +4259,9 @@ void ChatWindow::_ShowMarkdownDemo()
 	_DismissWelcome();
 
 	// Emit a user "question" label so the demo looks like a real turn.
-	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel);
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
 	_AppendText("Show me a markdown rendering demo\n");
-	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel);
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 
 	// ── Rich markdown sample ─────────────────────────────────────────────────
 	// Every feature supported by md::MdRenderer is exercised here so the

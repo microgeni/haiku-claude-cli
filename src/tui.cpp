@@ -79,58 +79,14 @@ void Init() {
 
 namespace {
 
-std::mutex   g_turn_pending_mu;
-std::string  g_turn_pending;
-std::streambuf* g_cout_orig_buf = nullptr;
-
-// Custom streambuf: while active, all cout writes go to g_turn_pending.
-class TurnOutputBuf : public std::streambuf {
-public:
-	std::streamsize xsputn(const char* s, std::streamsize n) override {
-		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
-		g_turn_pending.append(s, static_cast<size_t>(n));
-		return n;
-	}
-	// Single-character write (fallback path used by some libc impls).
-	int overflow(int c) override {
-		if (c == EOF) return c;
-		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
-		g_turn_pending.push_back(static_cast<char>(c));
-		return c;
-	}
-};
-
-TurnOutputBuf g_turn_buf;
-
-// Flush timer: wakes every ~16 ms while a turn is active and calls
-// FlushTurnOutput() so the response appears even when the user is not
-// typing (keystroke-driven flushing alone produces no output at idle).
-std::atomic<bool> g_flush_timer_running{false};
-std::thread       g_flush_timer_thread;
-
-// Pause/resume flag for the flush timer.  When g_flush_timer_paused is
-// true the timer loop spins on a short sleep without calling
-// FlushTurnOutput() or touching stdout, giving SelectOption() exclusive
-// access to the terminal.  g_flush_timer_paused_ack is set by the
-// timer loop once it has acknowledged the pause.
-std::atomic<bool> g_flush_timer_paused    {false};
-std::atomic<bool> g_flush_timer_paused_ack{false};
-
-// Scroll-region cursor tracking across flushes. Set to scroll-region
-// bottom col 1 on the first flush; updated by simulating cursor movement
-// through each chunk so subsequent flushes CUP to the correct position.
+// Scroll-region cursor tracking. Set to the scroll-region bottom col 1
+// and updated by SuspendScrollRegion/RestoreScrollRegion cursor logic so
+// the "> " input line is parked correctly when the permission menu opens.
 bool g_turn_started = false;
 int  g_turn_row2    = 0;
 int  g_turn_col     = 1;
 
-// Callback installed by session.cpp so the flush timer can detect when
-// the worker has finished and inject a synthetic keypress to unblock
-// ReadMessage(). Cleared by EndTurn().
-std::function<bool()> g_turn_done_check;
-
 // Extra rows currently allocated to the expanding multi-line input area.
-// Declared here (before FlushTurnOutput) so the scroll_bottom
-// calculation in FlushTurnOutput can account for the expanded geometry.
 // Managed by ExpandInputArea() and CollapseInputArea().
 int g_extra_input_rows = 0;
 
@@ -141,137 +97,11 @@ std::vector<std::string> g_completed_lines;
 
 } // namespace
 
-// Exposed so session.cpp can clear it at the top of the main loop.
-std::atomic<bool> g_turn_just_completed{false};
-
-// Set to true by raw_getc_or_wake while blocked in poll() — i.e. while
-// libedit is idle waiting for a keystroke. The flush timer checks this
-// before calling FlushTurnOutput() to avoid writing to the terminal
-// while libedit is mid-redraw between bracketed_getc calls.
-std::atomic<bool> g_libedit_polling{false};
-
-// Write directly to the real terminal, bypassing the cout interceptor.
+// Write directly to the terminal.
 static void DirectWrite(const std::string& s) {
 	if (s.empty()) return;
-	if (g_cout_orig_buf) {
-		g_cout_orig_buf->sputn(s.data(), static_cast<std::streamsize>(s.size()));
-		g_cout_orig_buf->pubsync();
-	} else {
-		const ssize_t n = ::write(fileno(stdout), s.data(), s.size());
-		(void)n;
-	}
-}
-
-// Flush buffered turn output to the scroll region using DECSC/DECRC.
-// The timer thread calls this every 16ms; bracketed_getc also calls it
-// before blocking. Safe to call from any thread.
-void FlushTurnOutput() {
-	std::string chunk;
-	{
-		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
-		if (g_turn_pending.empty()) return;
-		chunk.swap(g_turn_pending);
-	}
-
-	const int rows = TerminalRows();
-	const int scroll_bottom = rows > (4 + g_extra_input_rows)
-		? rows - 4 - g_extra_input_rows
-		: rows - 1;
-
-	if (!g_turn_started) {
-		g_turn_col  = 1;
-		g_turn_row2 = scroll_bottom;
-		g_turn_started = true;
-	}
-
-	std::string out;
-	out.reserve(32 + chunk.size());
-	out += "\x1b""7";    // DECSC — save libedit's cursor
-	out += "\x1b[" + std::to_string(g_turn_row2) + ";" + std::to_string(g_turn_col) + "H";
-	out += chunk;
-
-	bool in_esc = false, in_csi = false;
-	for (unsigned char c : chunk) {
-		if (in_csi) {
-			if (c >= 0x40 && c <= 0x7E) in_csi = in_esc = false;
-		} else if (in_esc) {
-			if (c == '[') in_csi = true; else in_esc = false;
-		} else if (c == '\x1b') { in_esc = true;
-		} else if (c == '\r')   { g_turn_col = 1;
-		} else if (c == '\n')   {
-			g_turn_col = 1;
-			if (g_turn_row2 < scroll_bottom) ++g_turn_row2;
-		} else if (c >= 0x20 && c < 0x7F) { ++g_turn_col; }
-	}
-	out += "\x1b""8";    // DECRC — restore libedit's cursor
-
-	if (g_cout_orig_buf) {
-		g_cout_orig_buf->sputn(out.data(), static_cast<std::streamsize>(out.size()));
-		g_cout_orig_buf->pubsync();
-	} else {
-		const ssize_t n = ::write(fileno(stdout), out.data(), out.size());
-		(void)n;
-	}
-}
-
-void BeginTurn() {
-	if (!isatty(fileno(stdout))) return;
-	if (g_cout_orig_buf) return; // already active
-	{
-		std::lock_guard<std::mutex> lk(g_turn_pending_mu);
-		g_turn_pending.clear();
-	}
-	g_turn_started = false;
-	g_turn_row2    = 0;
-	g_turn_col     = 1;
-	g_cout_orig_buf = std::cout.rdbuf(&g_turn_buf);
-
-	g_flush_timer_running.store(true);
-	g_flush_timer_paused.store(false);
-	g_flush_timer_paused_ack.store(false);
-	g_flush_timer_thread = std::thread([]() {
-		while (g_flush_timer_running.load()) {
-			if (g_flush_timer_paused.load()) {
-				g_flush_timer_paused_ack.store(true);
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				continue;
-			}
-			g_flush_timer_paused_ack.store(false);
-			// Wake the main thread's poll() so it calls FlushTurnOutput()
-			// from the safe timeout path. Only wake when output is pending.
-			{
-				std::lock_guard<std::mutex> lk(g_turn_pending_mu);
-				if (!g_turn_pending.empty())
-					repl::WakeReadMessage();
-			}
-			if (g_turn_done_check && g_turn_done_check()) {
-				g_turn_just_completed.store(true);
-				repl::WakeReadMessage();
-				g_flush_timer_running.store(false);
-				break;
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(16));
-			if (!g_flush_timer_running.load()) break;
-			if (g_flush_timer_paused.load())   continue;
-		}
-	});
-}
-
-void EndTurn() {
-	g_flush_timer_running.store(false);
-	if (g_flush_timer_thread.joinable())
-		g_flush_timer_thread.join();
-	g_turn_done_check = nullptr;
-
-	if (!g_cout_orig_buf) return;
-	std::cout.rdbuf(g_cout_orig_buf);
-	g_cout_orig_buf = nullptr;
-	FlushTurnOutput();
-	std::cout.flush();
-}
-
-void SetTurnDoneCheck(std::function<bool()> fn) {
-	g_turn_done_check = std::move(fn);
+	const ssize_t n = ::write(fileno(stdout), s.data(), s.size());
+	(void)n;
 }
 
 namespace {
@@ -704,59 +534,6 @@ void ShowCursor() {
 	DirectWrite("\x1b[?25h");
 }
 
-void PauseFlushTimer() {
-	if (!g_flush_timer_running.load()) return;
-	g_flush_timer_paused.store(true);
-	// Wait until the timer loop acknowledges the pause so we know it
-	// is no longer mid-FlushTurnOutput() when SelectOption() starts.
-	// Worst-case wait: one 16 ms sleep + one 10 ms spin cycle ≈ 30 ms.
-	for (int i = 0; i < 50 && !g_flush_timer_paused_ack.load(); ++i)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-	// Flush any pending turn output so it appears above the menu.
-	// FlushTurnOutput wraps output in DECSC/CUP/DECRC; after it returns
-	// the physical cursor is back at the libedit input row (DECRC).
-	FlushTurnOutput();
-
-	// Bypass the interceptor so SelectOption()'s std::cout writes go
-	// directly to the terminal.  SuspendScrollRegion() will reset the
-	// DECSTBM region and position the cursor correctly; here we only
-	// swap the streambuf.
-	if (g_cout_orig_buf) {
-		std::cout.rdbuf(g_cout_orig_buf);
-	}
-}
-
-void ResumeFlushTimer() {
-	// RestoreScrollRegion() has already re-established DECSTBM and
-	// redrawn the status bar.  Here we only need to reconnect the
-	// turn-output interceptor and resume the flush timer.
-	if (g_cout_orig_buf && g_status_bar_active) {
-		if (g_term_dirty) refresh_dims();
-		const int rows        = TerminalRows();
-		const int chat_bottom = rows > kStatusBarRows ? rows - kStatusBarRows : 1;
-		const int input_row   = rows > 2 ? rows - 2 : rows;
-
-		// Update the output-position tracker to chat_bottom so the next
-		// FlushTurnOutput() CUPs there rather than a stale pre-menu position.
-		g_turn_row2    = chat_bottom;
-		g_turn_col     = 1;
-		g_turn_started = true;
-
-		// Park the physical cursor at the input row so DECSC inside
-		// FlushTurnOutput() saves N-2 and DECRC restores there.
-		const std::string cup = "\x1b[" + std::to_string(input_row) + ";1H";
-		g_cout_orig_buf->sputn(cup.data(), static_cast<std::streamsize>(cup.size()));
-		g_cout_orig_buf->pubsync();
-	}
-
-	// Reconnect the interceptor so worker output is buffered again.
-	if (g_cout_orig_buf)
-		std::cout.rdbuf(&g_turn_buf);
-	g_flush_timer_paused_ack.store(false);
-	g_flush_timer_paused.store(false);
-}
-
 // SuspendScrollRegion / RestoreScrollRegion
 //
 // Park the cursor at the scroll-region bottom (chat_bottom = N-4) before
@@ -769,11 +546,11 @@ void ResumeFlushTimer() {
 // Both functions are safe no-ops when no status bar is installed.
 //
 // Call order:
-//   PauseFlushTimer()        — stop concurrent output (parks cursor at N-2)
+//   BlockStdin()             — give SelectOption exclusive tty input
 //   SuspendScrollRegion()    — CUP to chat_bottom (N-4)
 //   ... SelectOption() ...
 //   RestoreScrollRegion()    — re-establish \x1b[1;chat_bottom r + redraw status bar
-//   ResumeFlushTimer()       — re-enable turn output
+//   UnblockStdin()           — restore libedit's stdin
 void SuspendScrollRegion() {
 	if (!g_status_bar_active) return;
 	if (g_term_dirty) refresh_dims();

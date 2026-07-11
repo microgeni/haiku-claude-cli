@@ -177,11 +177,9 @@ api::Permission TerminalSink::AskPermission(const std::string& tool_name,
 
 	if (api::g_active_esc_guard) api::g_active_esc_guard->pause();
 	repl::BlockStdin();
-	tui::PauseFlushTimer();
 	tui::SuspendScrollRegion();
 	const int picked = tui::SelectOption(choices, question, nullptr, pre_lines);
 	tui::RestoreScrollRegion();
-	tui::ResumeFlushTimer();
 	if (isatty(STDIN_FILENO)) tcflush(STDIN_FILENO, TCIFLUSH);
 	repl::UnblockStdin();
 	repl::RequestClearEditBuffer();

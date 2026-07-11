@@ -250,7 +250,7 @@ void MdRenderer::FlushTable()
 	emit("\n", monoPlain, kColorTableCell);
 
 	// Scroll so the bottom of the table is visible.
-	fView->ScrollToOffset(fView->TextLength());
+	ScrollToEnd();
 
 	// ── 7. Reset state ────────────────────────────────────────────────────
 	fInTable = false;
@@ -268,8 +268,11 @@ void MdRenderer::AppendRun(const Run& r)
 
 	// Build font.
 	BFont font(r.monospace ? be_fixed_font : be_plain_font);
-	if (r.sizeScale != 1.0f) {
-		font.SetSize(font.Size() * r.sizeScale);
+	// Apply the heading/body relative scale and the user's zoom factor so
+	// new text renders at the chosen size immediately.
+	const float sizeMul = r.sizeScale * fZoom;
+	if (sizeMul != 1.0f) {
+		font.SetSize(font.Size() * sizeMul);
 	}
 	uint16 face = B_REGULAR_FACE;
 	if (r.bold)   face |= B_BOLD_FACE;
@@ -304,6 +307,7 @@ void MdRenderer::AppendRun(const Run& r)
 
 void MdRenderer::ScrollToEnd()
 {
+	if (!fAutoScroll) return;
 	fView->ScrollToOffset(fView->TextLength());
 }
 

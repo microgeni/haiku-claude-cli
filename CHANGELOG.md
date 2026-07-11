@@ -6,6 +6,65 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-07-11
+
+### Added
+
+- **GUI: HiDPI scaling** — the main window, settings dialog, welcome
+  splash, and token bar now derive their measurements from the system
+  font, so the whole app scales crisply on high-resolution displays
+  instead of rendering at a fixed 1× size.
+- **GUI: persistent prompt history** — prompts you send are saved across
+  sessions and recalled with the Up/Down arrow keys in the input field.
+  A new **Edit ▸ Clear Prompt History** menu item wipes the stored list.
+- **GUI: finer zoom steps** — Zoom In/Out now moves in 5% increments
+  (was 10%) for more precise text sizing.
+- **GUI: Esc closes the Find bar**, and opening Find while the input pane
+  is hidden now reveals it first.
+
+### Changed
+
+- **Synchronous REPL turns.** The interactive CLI now runs each Claude
+  turn inline on the main thread instead of on a background "type-ahead"
+  worker. You can no longer type a new prompt while Claude is working —
+  which keeps the terminal state simple and removes a large class of
+  multiline-edit and cursor glitches that came from the old flush-timer
+  and output-interceptor racing with libedit. The permission menu, Ctrl+X
+  cancel-and-retype, and Telegram remote-control are unaffected. Roughly
+  700 lines of concurrency plumbing were removed.
+- **GUI: slash commands removed** — the desktop app never dispatched
+  slash commands; everything the CLI exposes via `/commands` is available
+  through the menus, so text starting with `/` is now sent verbatim as a
+  normal turn.
+- **GUI: Remote Control menu item is disabled** when Telegram is not
+  configured, instead of failing when clicked.
+- **GUI: token-bar label** inherits the system font size (two points
+  smaller) so it stays legible without crowding the bar.
+- **CI: lint step degrades gracefully** — it repairs or skips a broken
+  `cppcheck` package rather than failing the whole build.
+
+### Fixed
+
+- **GUI: chat no longer jitters while streaming.** After Send, replies
+  bounced the view up and down for a second when the transcript was tall
+  enough to scroll. The markdown renderer and the window were both
+  issuing scroll-to-bottom on every rendered line, so several competing
+  `ScrollToOffset()` calls landed on a still-reflowing buffer. Scrolling
+  is now coalesced to one move per streamed chunk with a sticky-bottom
+  check: the view follows only when you are already at the bottom, and
+  scrolling up mid-stream shows the jump button instead of yanking you
+  back down.
+- **GUI: zoom applies to new text.** Changing the zoom level now scales
+  replies that arrive afterward, not just the text already on screen. New
+  runs are rendered pre-scaled to the chosen factor rather than being
+  retro-scaled at turn end (a boundary-tracking scheme that drifted across
+  turns and left new replies at the default size).
+- **GUI: config-pinned model** now overrides the auto-saved last-used
+  model, so a `model` set in `config.json` is respected on launch.
+- **GUI: Find field** — the Esc key filter is attached to the inner
+  `BTextView` so Esc reliably closes the bar, and the settings dialog no
+  longer floats above the file-Browse panel.
+
 ## [1.9.1] - 2026-06-30
 
 ### Fixed
