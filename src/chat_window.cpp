@@ -59,10 +59,7 @@
 
 #include <private/interface/AboutWindow.h>
 #include "api.h"
-#include "agents.h"
 #include "code_styler.h"
-#include "commands.h"
-#include "skills.h"
 #include "syntax_highlight.h"
 #include "config.h"
 #include "gui_sink.h"
@@ -508,63 +505,6 @@ void AppendWithColor(BTextView* view, const std::string& text, rgb_color color)
 
 
 // ===========================================================================
-// CommandPopup  (BPopUpMenu wrapper)
-// ===========================================================================
-
-void CommandPopup::Show(const std::string& prefix, BPoint screenPt)
-{
-	static const char* kBuiltins[] = {
-		"/help", "/clear", "/new", "/model", "/compact",
-		"/memory", "/usage", "/version", "/skills", "/agents", nullptr
-	};
-
-	// Collect matching commands.
-	std::vector<std::string> matches;
-	for (const auto& name : commands::Names()) {
-		if (name.size() >= prefix.size() &&
-		    name.substr(0, prefix.size()) == prefix)
-			matches.push_back(name);
-	}
-	// Agent Skills are invoked the same way as custom commands
-	// (/skill-name), so offer them in the completion popup too.
-	for (const auto& name : skills::Names()) {
-		if (name.size() >= prefix.size() &&
-		    name.substr(0, prefix.size()) == prefix) {
-			bool dup = false;
-			for (const auto& m : matches) if (m == name) { dup = true; break; }
-			if (!dup) matches.push_back(name);
-		}
-	}
-	for (int i = 0; kBuiltins[i]; ++i) {
-		const std::string b(kBuiltins[i]);
-		if (b.size() >= prefix.size() &&
-		    b.substr(0, prefix.size()) == prefix) {
-			bool dup = false;
-			for (const auto& m : matches) if (m == b) { dup = true; break; }
-			if (!dup) matches.push_back(b);
-		}
-	}
-	std::sort(matches.begin(), matches.end());
-	if (matches.empty()) return;
-
-	// Build the BPopUpMenu.
-	BPopUpMenu* menu = new BPopUpMenu("commands", false, false);
-	for (const auto& m : matches) {
-		BMessage* msg = new BMessage(gui::MSG_COMPLETE_CMD);
-		msg->AddString("cmd", m.c_str());
-		menu->AddItem(new BMenuItem(m.c_str(), msg));
-	}
-	menu->SetTargetForItems(fTarget);
-
-	// Go() runs a nested event loop — safe from MessageReceived context.
-	// It blocks until the user picks or dismisses.
-	fVisible = true;
-	menu->Go(screenPt, true, true, true);
-	fVisible = false;
-	delete menu;
-}
-
-// ===========================================================================
 // InputView
 // ===========================================================================
 
@@ -674,17 +614,6 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 	}
 
 	BTextView::KeyDown(bytes, numBytes);
-
-	// After inserting '/' as the first character, show the command popup.
-	// BPopUpMenu::Go() handles its own keyboard navigation.
-	if (Window()) {
-		const std::string txt(Text(), static_cast<size_t>(TextLength()));
-		if (!txt.empty() && txt[0] == '/') {
-			BMessage upd(gui::MSG_POPUP_UPDATE);
-			upd.AddString("prefix", txt.c_str());
-			Window()->PostMessage(&upd);
-		}
-	}
 
 	Invalidate();
 }
@@ -1349,9 +1278,6 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 
 	// Markdown renderer (needs fOutput to exist).
 	fMdRenderer = new md::MdRenderer(fOutput);
-
-	// Create the slash-command popup.
-	fCommandPopup = new CommandPopup(this);
 
 	// Update title with model name.
 	_UpdateTitle();
@@ -2202,44 +2128,6 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 	}
 
-	
-
-	case gui::MSG_POPUP_UPDATE: {
-		if (!fCommandPopup || !fInput) break;
-		const char* prefix = nullptr;
-		msg->FindString("prefix", &prefix);
-		// Compute screen point: top-left of the input view. fInput now lives
-		// inside fInputScroll, so convert from the input view's own
-		// coordinate space (Bounds), not via the window.
-		BPoint pt = fInput->Bounds().LeftTop();
-		fInput->ConvertToScreen(&pt);
-
-		fCommandPopup->Show(prefix ? prefix : "/", pt);
-		break;
-	}
-
-	// Arrow-key navigation and Escape/Enter are handled inside BPopUpMenu's
-	// own event loop — these messages are no longer needed but kept for
-	// safety in case old messages arrive.
-	case gui::MSG_POPUP_NEXT:
-	case gui::MSG_POPUP_PREV:
-	case gui::MSG_POPUP_CONF:
-	case gui::MSG_POPUP_HIDE:
-
-		break;
-
-	case gui::MSG_COMPLETE_CMD: {
-		const char* cmd = nullptr;
-		if (msg->FindString("cmd", &cmd) == B_OK && cmd) {
-			fInput->SetText(cmd);
-			const int32 len = fInput->TextLength();
-			fInput->Select(len, len);
-			fInput->MakeFocus(true);
-		}
-
-		break;
-	}
-
 	case B_SIMPLE_DATA:
 	case B_REFS_RECEIVED: {
 		// If the message carries a directory ref from the working-dir
@@ -3077,119 +2965,15 @@ void ChatWindow::_FlushCodeBlock()
 // Turn lifecycle
 // ---------------------------------------------------------------------------
 
-// Handle GUI slash commands typed into the input field. Returns true when
-// the command was fully handled here (info commands like /skills, /agents);
-// returns false otherwise. For a /skill-name match, `userText` is rewritten
-// in place to the expanded skill body so the caller sends it as a turn.
-bool ChatWindow::_HandleSlashCommand(std::string& userText)
-{
-	// Split into command word and trailing args.
-	std::string line = userText;
-	while (!line.empty() && (line.back() == ' ' || line.back() == '\t'
-	        || line.back() == '\n' || line.back() == '\r'))
-		line.pop_back();
-	std::string cmd = line, args;
-	if (const auto sp = line.find(' '); sp != std::string::npos) {
-		cmd  = line.substr(0, sp);
-		args = line.substr(sp + 1);
-		while (!args.empty() && args.front() == ' ') args.erase(args.begin());
-	}
-
-	auto info = [&](const std::string& text) {
-		AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 " + userText + "\n", kColorUserLabel);
-		AppendWithColor(fOutput, text, kColorToolLine);
-		if (!fUserScrolled) _ScrollToBottom();
-	};
-
-	if (cmd == "/skills") {
-		const auto& all = skills::All();
-		if (all.empty()) {
-			info("[no skills loaded — add one under .claude/skills/<name>/SKILL.md "
-			     "or " + paths::UserSkillsDir() + "/<name>/SKILL.md]\n");
-			return true;
-		}
-		std::string body = "skills (invoke with /<name>):\n";
-		for (const auto& s : all) {
-			body += "  /" + s.name;
-			if (s.disableModelInvocation) body += "  (manual)";
-			if (!s.description.empty()) body += "  \xE2\x80\x94 " + s.description;
-			body += "\n";
-		}
-		info(body);
-		return true;
-	}
-
-	if (cmd == "/agents") {
-		const auto& all = agents::All();
-		if (all.empty()) {
-			info("[no subagents loaded — add one under .claude/agents/<name>.md "
-			     "or " + paths::UserAgentsDir() + "/<name>.md]\n");
-			return true;
-		}
-		std::string body = "subagents (Claude delegates via the Task tool):\n";
-		for (const auto& a : all) {
-			body += "  " + a.name;
-			if (!a.model.empty()) body += "  [" + a.model + "]";
-			if (!a.description.empty()) body += "  \xE2\x80\x94 " + a.description;
-			body += "\n";
-		}
-		info(body);
-		return true;
-	}
-
-	// /skill-name → expand the skill body (with {{args}} + dynamic context)
-	// and rewrite userText so the caller sends the expansion as a turn.
-	if (cmd.size() > 1 && cmd[0] == '/') {
-		const std::string name = cmd.substr(1);
-		bool found = false;
-		std::string expanded = skills::Expand(name, args, found);
-		if (found) {
-			userText = expanded;
-			return false; // fall through: send the expanded text as a turn
-		}
-	}
-
-	return false; // not a GUI-handled command; send verbatim
-}
-
 void ChatWindow::_SendTurn()
 {
 	const char* raw = fInput->Text();
 	if (!raw || raw[0] == '\0') return;
 	std::string userText(raw);
 
-	// Recognise the /compact slash command typed into the input — clear
-	// the field and run the compact flow instead of sending it as a turn.
-	{
-		std::string trimmed = userText;
-		while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
-			trimmed.pop_back();
-		if (trimmed == "/compact") {
-			fInput->SetText("");
-			fInput->PushHistory(userText);
-			_LaunchCompact();
-			return;
-		}
-	}
-
-	// Other GUI-handled slash commands: /skills, /agents (local info) and
-	// /skill-name (expand a skill into the turn text). _HandleSlashCommand
-	// returns true when it fully handled the line (info commands). For a
-	// /skill-name match it expands the skill into `userText` and returns
-	// false so we fall through and send the expansion as a normal turn.
-	if (!userText.empty() && userText[0] == '/') {
-		const std::string original = userText;
-		if (_HandleSlashCommand(userText)) {
-			fInput->SetText("");
-			fInput->PushHistory(original);
-			return;
-		}
-		if (userText != original) {
-			// Skill expansion: record the typed command in history, but
-			// send the expanded text as the turn.
-			fInput->PushHistory(original);
-		}
-	}
+	// The GUI has no slash commands — everything the CLI exposes via
+	// /commands is available through the menus here. Any text starting with
+	// '/' is sent verbatim as a normal turn.
 
 	fInput->SetText("");
 	if (userText == std::string(raw)) fInput->PushHistory(userText);

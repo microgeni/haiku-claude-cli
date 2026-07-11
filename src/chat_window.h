@@ -53,12 +53,6 @@ constexpr uint32_t MSG_TOKENS       = 'TOKN'; // int32 "input","output","max"
 constexpr uint32_t MSG_JUMP_BOTTOM  = 'JBOT'; // jump-to-bottom button
 constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
 // MSG_SESSIONS / MSG_SESSION_LOAD reserved for future project.
-constexpr uint32_t MSG_COMPLETE_CMD = 'CCMD'; // slash command selected (string "cmd")
-constexpr uint32_t MSG_POPUP_UPDATE = 'PUPT'; // InputView → ChatWindow: update popup
-constexpr uint32_t MSG_POPUP_NEXT   = 'PNXT'; // InputView → ChatWindow: next item
-constexpr uint32_t MSG_POPUP_PREV   = 'PPRV'; // InputView → ChatWindow: prev item
-constexpr uint32_t MSG_POPUP_CONF   = 'PCNF'; // InputView → ChatWindow: confirm
-constexpr uint32_t MSG_POPUP_HIDE   = 'PDIS'; // InputView → ChatWindow: hide
 constexpr uint32_t MSG_MODELS_READY = 'MDLS'; // background model fetch complete
 constexpr uint32_t MSG_ABOUT        = 'ABUT'; // Help > About Claude
 constexpr uint32_t MSG_HELP_DOCS    = 'HDOC'; // Help > Documentation
@@ -86,27 +80,6 @@ constexpr uint32_t MSG_SESSION_RENAME  = 'SRNM'; // sidebar: rename selected ses
 constexpr uint32_t MSG_NEW_WINDOW      = 'NWIN'; // File > New Session: spawn a window
 constexpr uint32_t MSG_COMPACT         = 'CMPT'; // Edit: compact conversation context
 } // namespace gui
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CommandPopup — thin wrapper around BPopUpMenu for slash-command completion.
-// BPopUpMenu::Go() runs its own nested event loop safely from MessageReceived.
-// ChatWindow calls Show(prefix, screenPt) which blocks until user picks or
-// dismisses, then posts MSG_COMPLETE_CMD with the chosen command.
-// ─────────────────────────────────────────────────────────────────────────────
-class CommandPopup {
-public:
-	explicit CommandPopup(BHandler* target) : fTarget(target) {}
-
-	// Show the menu at screenPt. Blocks until dismissed (BPopUpMenu::Go).
-	// Posts MSG_COMPLETE_CMD to fTarget if an item was selected.
-	void	Show(const std::string& prefix, BPoint screenPt);
-
-	bool	IsPopupVisible() const { return fVisible; }
-
-private:
-	BHandler* fTarget  = nullptr;
-	bool      fVisible = false;
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InputView — multi-line BTextView that sends on Enter (Shift+Enter inserts a
@@ -386,12 +359,6 @@ private:
 
 	// ── Turn lifecycle ───────────────────────────────────────────────────────
 	void _SendTurn();
-	// Intercept GUI-handled slash commands typed into the input. Returns
-	// true when the line was fully handled here (info commands like
-	// /skills and /agents). For a /skill-name match, `userText` is
-	// rewritten in place to the expanded skill body and false is returned
-	// so _SendTurn sends the expansion as a normal turn.
-	bool _HandleSlashCommand(std::string& userText);
 	void _LaunchWorker(const std::string& userText);
 	void _LaunchCompact();       // summarize + replace context, keep scrollback
 	void _SpawnWorker();         // shared: start spinner + worker thread on fWorkerMessages
@@ -517,9 +484,6 @@ private:
 
 	// ── Session persistence ──────────────────────────────────────────────────
 	std::string    fSessionPath;   // path of the current saved session file
-
-	// ── Slash-command autocomplete ───────────────────────────────────────────
-	CommandPopup*  fCommandPopup  = nullptr;
 
 	// ── Export transcript ─────────────────────────────────────────────────────
 	BFilePanel*    fExportPanel   = nullptr;  // lazily created B_SAVE_PANEL
