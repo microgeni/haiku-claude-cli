@@ -79,6 +79,33 @@
 // ---------------------------------------------------------------------------
 namespace {
 
+// ---------------------------------------------------------------------------
+// HiDPI scaling. Haiku does not expose a monitor DPI directly; instead the
+// system font size grows on high-resolution displays (12pt is the 1x
+// baseline). Deriving a scale factor from be_plain_font lets every hard-coded
+// pixel dimension track the display so dialogs, buttons, bars and icons stay
+// proportional on HiDPI screens. Mirrors the be_control_look convention.
+// ---------------------------------------------------------------------------
+float
+gui_scale()
+{
+	const float base = be_plain_font ? be_plain_font->Size() : 12.0f;
+	const float s    = base / 12.0f;
+	// Clamp so an oddly configured font never produces an unusable window.
+	if (s < 1.0f) return 1.0f;
+	if (s > 4.0f) return 4.0f;
+	return s;
+}
+
+// Scale a 1x pixel measurement to the current display, rounded up so we
+// never lose a pixel that would clip glyphs. Named ScalePx (not Scale)
+// because BView::Scale() already exists and would shadow a free Scale().
+float
+ScalePx(float px)
+{
+	return std::ceil(px * gui_scale());
+}
+
 // Standard RFC 4648 base64 encoder (not URL-safe — the Anthropic image
 // API wants '+' / '/' with '=' padding). Used to embed dropped image
 // files as base64 `image` content blocks in the outgoing message.
@@ -817,13 +844,13 @@ TokenBar::TokenBar()
 	// had an unused extra row.
 	font_height fh;
 	be_plain_font->GetHeight(&fh);
-	float height = std::ceil(fh.ascent + fh.descent + fh.leading) + 6.0f;
+	float height = std::ceil(fh.ascent + fh.descent + fh.leading) + ScalePx(6.0f);
 	// Pin a small explicit min WIDTH (not B_SIZE_UNSET): a custom BView with an
 	// unset min width reports its current frame width as the minimum, which at
 	// the initial window size latches the whole chat column — and thus the
 	// window — to a huge minimum width, letting the bottom input bar overflow
 	// and clip its buttons. A small min lets the bar and window shrink freely.
-	SetExplicitMinSize(BSize(40, height));
+	SetExplicitMinSize(BSize(ScalePx(40), height));
 	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, height));
 	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
@@ -985,7 +1012,7 @@ SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
                                int maxTokens, int notifyMinSec,
                                const std::string& workingDir,
                                BMenuField* modelField)
-	: BWindow(BRect(0, 0, 640, 480), "Settings",
+	: BWindow(BRect(0, 0, ScalePx(640), ScalePx(480)), "Settings",
 	          B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
 	          B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
 	  fParent(parent)
@@ -994,7 +1021,8 @@ SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
 	// Give the window a sensible default size: wide enough to read a full
 	// working-directory path, then center it. AUTO_UPDATE_SIZE_LIMITS only
 	// sets the minimum, so resize explicitly to the preferred width.
-	ResizeTo(640, 480);
+	// Scaled so the dialog grows with the system font on HiDPI displays.
+	ResizeTo(ScalePx(640), ScalePx(480));
 	CenterOnScreen();
 	// Start the looper running but keep the window off-screen: Hide() before
 	// Show() leaves a net-hidden window whose looper is alive, so Toggle()
@@ -1012,10 +1040,10 @@ void SettingsDialog::_BuildLayout(const std::string& systemPrompt, int maxTokens
 	fSysPromptView        = new BTextView("sysprompt", B_WILL_DRAW | B_FRAME_EVENTS);
 	fSysPromptView->SetWordWrap(true);
 	fSysPromptView->SetText(systemPrompt.c_str());
-	fSysPromptView->SetExplicitMinSize(BSize(80, 80));
+	fSysPromptView->SetExplicitMinSize(BSize(ScalePx(80), ScalePx(80)));
 	BScrollView* sysScroll = new BScrollView("sysscroll", fSysPromptView,
 	                                          0, false, true, B_FANCY_BORDER);
-	sysScroll->SetExplicitMinSize(BSize(100, 80));
+	sysScroll->SetExplicitMinSize(BSize(ScalePx(100), ScalePx(80)));
 	sysScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
 	// Max tokens field.
@@ -1046,7 +1074,7 @@ void SettingsDialog::_BuildLayout(const std::string& systemPrompt, int maxTokens
 	fWorkingDirCtl->SetToolTip("Directory Claude uses as the root for "
 	                            "relative file paths and tool calls.");
 	// Make the path field roomy enough to read a full path without scrolling.
-	fWorkingDirCtl->SetExplicitMinSize(BSize(360, B_SIZE_UNSET));
+	fWorkingDirCtl->SetExplicitMinSize(BSize(ScalePx(360), B_SIZE_UNSET));
 	BButton* browseBtn = new BButton("browseworkdir", "Browse" B_UTF8_ELLIPSIS,
 	                                  new BMessage(gui::MSG_BROWSE_WORKDIR));
 	BButton* closeBtn = new BButton("closesettings", "Close",
@@ -1224,7 +1252,10 @@ WelcomeView::WelcomeView()
 		uint8* data = nullptr;
 		size_t size = 0;
 		if (fileInfo.GetIcon(&data, &size) == B_OK && data != nullptr) {
-			BBitmap* icon = new BBitmap(BRect(0, 0, 63, 63), B_RGBA32);
+			// Render the vector HVIF into a scaled bitmap so the icon stays
+			// crisp (not upscaled) on HiDPI displays.
+			const int32 px = static_cast<int32>(ScalePx(64.0f)) - 1;
+			BBitmap* icon = new BBitmap(BRect(0, 0, px, px), B_RGBA32);
 			if (BIconUtils::GetVectorIcon(data, size, icon) == B_OK)
 				fIcon = icon;
 			else
@@ -1239,8 +1270,8 @@ WelcomeView::WelcomeView()
 	// latches the whole chat column — and thus the window — to a huge minimum
 	// width, letting the bottom input bar overflow and clip its buttons. A
 	// small explicit min lets the column and window shrink freely.
-	SetExplicitMinSize(BSize(40, 96));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 96));
+	SetExplicitMinSize(BSize(ScalePx(40), ScalePx(96)));
+	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, ScalePx(96)));
 }
 
 WelcomeView::~WelcomeView()
@@ -1252,14 +1283,18 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 {
 	const BRect b = Bounds();
 
-	// Icon on the left, vertically centred.
-	float textLeft = 16.0f;
+	// Icon on the left, vertically centred. fIcon is already rendered at the
+	// scaled size, so use its real dimensions and scale the margins.
+	const float margin = ScalePx(16.0f);
+	float textLeft = margin;
 	if (fIcon != nullptr) {
-		const float iconY = (b.Height() - 64.0f) / 2.0f;
+		const float iconH = fIcon->Bounds().Height() + 1.0f;
+		const float iconW = fIcon->Bounds().Width() + 1.0f;
+		const float iconY = (b.Height() - iconH) / 2.0f;
 		SetDrawingMode(B_OP_ALPHA);
-		DrawBitmap(fIcon, BPoint(16.0f, iconY));
+		DrawBitmap(fIcon, BPoint(margin, iconY));
 		SetDrawingMode(B_OP_COPY);
-		textLeft = 16.0f + 64.0f + 16.0f;
+		textLeft = margin + iconW + margin;
 	}
 
 	// Title line: bold "Claude" in the model accent colour.
@@ -1267,7 +1302,7 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 	titleFont.SetSize(titleFont.Size() * 1.6f);
 	SetFont(&titleFont);
 	SetHighColor(kColorModelLabel);
-	const float titleY = b.Height() / 2.0f - 6.0f;
+	const float titleY = b.Height() / 2.0f - ScalePx(6.0f);
 	DrawString("Claude", BPoint(textLeft, titleY));
 
 	// Subtitle: dim hint, regular font.
@@ -1275,7 +1310,7 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 	SetFont(&subFont);
 	SetHighColor(kColorToolLine);
 	DrawString("Join the AI revolution, resistance is futile!",
-	           BPoint(textLeft, titleY + 22.0f));
+	           BPoint(textLeft, titleY + ScalePx(22.0f)));
 }
 
 
@@ -1505,7 +1540,7 @@ void ChatWindow::_BuildLayout()
 	// Floating jump-to-bottom button (overlaid, repositioned in FrameResized).
 	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93 New", // ↓
 	                        new BMessage(gui::MSG_JUMP_BOTTOM));
-	fJumpBtn->SetExplicitSize(BSize(80, 26));
+	fJumpBtn->SetExplicitSize(BSize(ScalePx(80), ScalePx(26)));
 	fJumpBtn->Hide();
 	AddChild(fJumpBtn); // added directly to window, not layout
 
@@ -1573,8 +1608,8 @@ void ChatWindow::_BuildLayout()
 	// Keep the panel usable but let the window shrink: a small min-width
 	// (the splitter governs the actual width). A large min here would be
 	// summed into the window's minimum and block reducing the window.
-	fSessionPanel->SetExplicitMinSize(BSize(80, B_SIZE_UNSET));
-	fSessionPanel->SetExplicitMaxSize(BSize(500, B_SIZE_UNLIMITED));
+	fSessionPanel->SetExplicitMinSize(BSize(ScalePx(80), B_SIZE_UNSET));
+	fSessionPanel->SetExplicitMaxSize(BSize(ScalePx(500), B_SIZE_UNLIMITED));
 
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
@@ -1626,9 +1661,9 @@ void ChatWindow::_BuildLayout()
 	                                  new BMessage(gui::MSG_FIND_NEXT));
 	BButton* findClose = new BButton("findclose", "\xE2\x9C\x95", // ✕
 	                                  new BMessage(gui::MSG_FIND_CLOSE));
-	findPrev->SetExplicitSize(BSize(32, B_SIZE_UNSET));
-	findNext->SetExplicitSize(BSize(32, B_SIZE_UNSET));
-	findClose->SetExplicitSize(BSize(32, B_SIZE_UNSET));
+	findPrev->SetExplicitSize(BSize(ScalePx(32), B_SIZE_UNSET));
+	findNext->SetExplicitSize(BSize(ScalePx(32), B_SIZE_UNSET));
+	findClose->SetExplicitSize(BSize(ScalePx(32), B_SIZE_UNSET));
 
 	fFindBar = new BView("findbar", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
 	fFindBar->SetResizingMode(B_FOLLOW_NONE);
@@ -1783,21 +1818,21 @@ void ChatWindow::_BuildLayout()
 	const float kInputPaneMinH = fInputBar->MinSize().height;
 	// Keep the chat area itself usable; its derived min (a tiny BTextView min
 	// plus the token bar) can be near-zero, so floor it to a few visible lines.
-	const float kChatAreaMinH  = std::max(120.0f, chatArea->MinSize().height);
+	const float kChatAreaMinH  = std::max(ScalePx(120.0f), chatArea->MinSize().height);
 	const float kMenuH         = fMenuBar ? fMenuBar->PreferredSize().height
-	                                      : 20.0f;
+	                                      : ScalePx(20.0f);
 	const float kSplitterH     = fVSplit->SplitterSize();
 
 	const float minH = kMenuH + kChatAreaMinH + kSplitterH + kInputPaneMinH
-	                 + 8.0f /*frame slack*/;
+	                 + ScalePx(8.0f) /*frame slack*/;
 
 	// Horizontal floor: the window must be at least as wide as the widest of
 	// its full-width rows — the input bar (input field + button column) and
 	// the chat area (chat split + token bar) — plus a little frame slack, so
 	// the button column is never pushed off the right edge.
-	const float minW = std::max({ 360.0f,
-	                              fInputBar->MinSize().width + 8.0f,
-	                              chatArea->MinSize().width + 8.0f });
+	const float minW = std::max({ ScalePx(360.0f),
+	                              fInputBar->MinSize().width + ScalePx(8.0f),
+	                              chatArea->MinSize().width + ScalePx(8.0f) });
 	SetSizeLimits(minW, 32767, minH, 32767);
 	fWindowMinH = minH;
 	fWindowMinW = minW;
@@ -1816,6 +1851,15 @@ void ChatWindow::_BuildLayout()
 
 	// Session sidebar starts hidden; View ▸ Sessions reveals it.
 	if (fSessionPanel) fSessionPanel->Hide();
+
+	// Enlarge the default window on HiDPI so the initial size stays
+	// proportional to the scaled widgets (the constructor's BRect is the
+	// 1x baseline of 800x580). Only grow — never shrink below the default.
+	const float scale = gui_scale();
+	if (scale > 1.0f) {
+		ResizeTo(std::ceil(800.0f * scale), std::ceil(580.0f * scale));
+		CenterOnScreen();
+	}
 
 	// Give input focus on startup.
 	fInput->MakeFocus(true);
