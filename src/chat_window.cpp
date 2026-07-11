@@ -605,12 +605,25 @@ void InputView::KeyDown(const char* bytes, int32 numBytes)
 			if (Window()) Window()->PostMessage(gui::MSG_CANCEL);
 			return;
 		}
-	}
-
-	// Up/Down → history.
-	if (numBytes == 3 && bytes[0] == '\x1B') {
-		if (bytes[2] == 'A') { _HistoryUp();   return; }
-		if (bytes[2] == 'B') { _HistoryDown(); return; }
+		// Up/Down → prompt history, but only at the text boundaries so a
+		// multi-line draft can still be navigated with the arrows. On Haiku
+		// the arrow keys arrive as single bytes (B_UP_ARROW / B_DOWN_ARROW),
+		// not a VT escape sequence.
+		if (bytes[0] == B_UP_ARROW || bytes[0] == B_DOWN_ARROW) {
+			int32 selStart = 0, selEnd = 0;
+			GetSelection(&selStart, &selEnd);
+			const int32 curLine  = LineAt(selStart);
+			const int32 lastLine = CountLines() - 1;
+			if (bytes[0] == B_UP_ARROW && curLine == 0) {
+				_HistoryUp();
+				return;
+			}
+			if (bytes[0] == B_DOWN_ARROW && curLine == lastLine) {
+				_HistoryDown();
+				return;
+			}
+			// Otherwise fall through to normal cursor movement.
+		}
 	}
 
 	BTextView::KeyDown(bytes, numBytes);
