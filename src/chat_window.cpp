@@ -1815,6 +1815,11 @@ void ChatWindow::_BuildLayout()
 		CenterOnScreen();
 	}
 
+	// Load persisted prompt history so Up/Down recalls prompts from previous
+	// GUI sessions (a plain-text file, separate from the CLI's libedit
+	// repl_history).
+	if (fInput) fInput->LoadHistory(paths::GuiHistoryPath());
+
 	// Give input focus on startup.
 	fInput->MakeFocus(true);
 }
@@ -2660,6 +2665,9 @@ bool ChatWindow::QuitRequested()
 {
 	// Persist window frame / zoom / model before tearing down.
 	_SaveGuiPrefs();
+
+	// Persist prompt history so future GUI sessions can recall these prompts.
+	if (fInput) fInput->SaveHistory(paths::GuiHistoryPath());
 
 	if (fWorkerRunning.load()) {
 		// Ask the in-flight request to abort, then wait for the worker
