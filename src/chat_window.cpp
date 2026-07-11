@@ -3935,7 +3935,8 @@ void ChatWindow::_FindNext(bool forward)
 // delta: +1 = zoom in, -1 = zoom out, 0 = reset to 100%.
 void ChatWindow::_Zoom(int delta)
 {
-	constexpr float kStep = 0.1f;
+	// 5% per step gives fine-grained zoom control; the range spans 60%–250%.
+	constexpr float kStep = 0.05f;
 	constexpr float kMin  = 0.6f;
 	constexpr float kMax  = 2.5f;
 
