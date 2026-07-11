@@ -746,6 +746,13 @@ void InputView::SaveHistory(const std::string& path) const
 		f << fHistory[i] << '\n';
 }
 
+void InputView::ClearHistory()
+{
+	fHistory.clear();
+	fHistIdx = -1;
+	fDraft.clear();
+}
+
 void InputView::_HistoryUp()
 {
 	if (fHistory.empty()) return;
@@ -1381,6 +1388,9 @@ void ChatWindow::_BuildMenuBar()
 	editMenu->AddSeparatorItem();
 	editMenu->AddItem(new BMenuItem("Compact Conversation",
 		new BMessage(gui::MSG_COMPACT), 'K'));
+	editMenu->AddSeparatorItem();
+	editMenu->AddItem(new BMenuItem("Clear Prompt History" B_UTF8_ELLIPSIS,
+		new BMessage(gui::MSG_CLEAR_HISTORY)));
 	fMenuBar->AddItem(editMenu);
 
 	// ── View ────────────────────────────────────────────────────────────────
@@ -2074,6 +2084,31 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	case gui::MSG_COMPACT:
 		_LaunchCompact();
 		break;
+
+	case gui::MSG_CLEAR_HISTORY: {
+		// Confirm before wiping persisted prompt history.
+		const size_t n = fInput ? fInput->HistoryCount() : 0;
+		if (n == 0) {
+			BAlert* none = new BAlert("Prompt History",
+				"There are no saved prompts to clear.", "OK");
+			none->SetType(B_INFO_ALERT);
+			none->Go();
+			break;
+		}
+		BString msg;
+		msg.SetToFormat("Clear all %zu saved prompt%s? This cannot be undone.",
+		                n, n == 1 ? "" : "s");
+		BAlert* confirm = new BAlert("Clear Prompt History", msg.String(),
+			"Cancel", "Clear", nullptr,
+			B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		confirm->SetShortcut(0, B_ESCAPE);
+		if (confirm->Go() == 1) {   // "Clear"
+			if (fInput) fInput->ClearHistory();
+			// Remove the on-disk file so the cleared state persists.
+			BEntry(paths::GuiHistoryPath().c_str()).Remove();
+		}
+		break;
+	}
 
 	case gui::MSG_SESSION_NEW:
 		_NewChat();

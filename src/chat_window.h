@@ -79,6 +79,7 @@ constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
 constexpr uint32_t MSG_SESSION_RENAME  = 'SRNM'; // sidebar: rename selected session
 constexpr uint32_t MSG_NEW_WINDOW      = 'NWIN'; // File > New Session: spawn a window
 constexpr uint32_t MSG_COMPACT         = 'CMPT'; // Edit: compact conversation context
+constexpr uint32_t MSG_CLEAR_HISTORY   = 'CLRH'; // Edit: clear saved prompt history
 } // namespace gui
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +108,10 @@ public:
 	// Load / save history from a file (one entry per line).
 	void	LoadHistory(const std::string& path);
 	void	SaveHistory(const std::string& path) const;
+
+	// Clear the in-memory prompt history ring. Number of stored entries.
+	void	ClearHistory();
+	size_t	HistoryCount() const { return fHistory.size(); }
 
 	// Enable / disable editing (analogous to BControl::SetEnabled).
 	void	SetEnabled(bool enabled);
