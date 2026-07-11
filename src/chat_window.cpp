@@ -901,12 +901,12 @@ void TokenBar::Draw(BRect updateRect)
 	const std::string pct  = std::to_string(static_cast<int>(filled * 100.0f + 0.5f)) + "%";
 	const std::string lbl  = commaNum(fUsed) + " / " + shortK(fMax) + "  (" + pct + ")";
 
-	// Track the system font but render the label one point smaller: the
+	// Track the system font but render the label two points smaller: the
 	// token bar is a compact status strip, so a slightly smaller size than
 	// be_plain_font reads better while still scaling with the system font
 	// on HiDPI displays.
 	BFont f(be_plain_font);
-	f.SetSize(f.Size() - 1.0f);
+	f.SetSize(f.Size() - 2.0f);
 	SetFont(&f);
 	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
 
