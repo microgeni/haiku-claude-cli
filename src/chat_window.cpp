@@ -37,6 +37,7 @@
 #include <Menu.h>
 #include <MenuBar.h>
 #include <Message.h>
+#include <MessageFilter.h>
 #include <MessageRunner.h>
 #include <Notification.h>
 #include <OS.h>
@@ -1664,6 +1665,21 @@ void ChatWindow::_BuildLayout()
 	fFindField = new BTextControl("findfield", nullptr, "",
 	                              new BMessage(gui::MSG_FIND_NEXT));
 	fFindField->SetModificationMessage(new BMessage(gui::MSG_FIND_LIVE));
+	// Esc inside the find field closes the find bar. A message filter catches
+	// the key before the inner BTextView swallows it and posts MSG_FIND_CLOSE
+	// to the window.
+	fFindField->AddFilter(new BMessageFilter(B_KEY_DOWN,
+		[](BMessage* msg, BHandler** /*target*/, BMessageFilter* filter)
+			-> filter_result {
+			const char* bytes = nullptr;
+			if (msg->FindString("bytes", &bytes) == B_OK
+			    && bytes != nullptr && bytes[0] == B_ESCAPE) {
+				if (BLooper* looper = filter->Looper())
+					looper->PostMessage(gui::MSG_FIND_CLOSE);
+				return B_SKIP_MESSAGE;
+			}
+			return B_DISPATCH_MESSAGE;
+		}));
 	fFindStatus = new BStringView("findstatus", "");
 	BButton* findPrev  = new BButton("findprev",  "\xE2\x97\x80", // ◀
 	                                  new BMessage(gui::MSG_FIND_PREV));
