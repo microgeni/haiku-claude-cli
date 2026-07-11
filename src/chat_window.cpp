@@ -468,16 +468,22 @@ const rgb_color kColorDiffHeader  = { 140, 180, 220, 255 }; // steel-blue — di
 const rgb_color kColorInputCyan   = {  60, 200, 215, 255 };
 
 // Known Anthropic models listed in the model picker.
+// Fallback model list shown in the picker until the live /v1/models fetch
+// replaces it. Kept roughly current with the API lineup; the background
+// fetch in _PopulateModelMenu() is the source of truth at runtime.
 const char* kKnownModels[] = {
+	"claude-opus-4-8",
+	"claude-opus-4-7",
+	"claude-opus-4-6",
 	"claude-opus-4-5",
+	"claude-sonnet-5",
+	"claude-sonnet-4-6",
 	"claude-sonnet-4-5",
 	"claude-haiku-4-5",
-	"claude-opus-4",
-	"claude-sonnet-4",
+	"claude-opus-4-1",
 	"claude-3-7-sonnet-20250219",
 	"claude-3-5-sonnet-20241022",
 	"claude-3-5-haiku-20241022",
-	"claude-3-opus-20240229",
 	nullptr
 };
 
