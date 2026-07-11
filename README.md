@@ -460,7 +460,7 @@ Branching: `dev` for active work, `main` for release tags. See
 `docs/GIT_WORKFLOW.md`.
 
 CI: macOS runner checks out the repo and SSHes to a Haiku machine
-(Taurus) to run the build + functional tests for every push to
+to run the build + functional tests for every push to
 `dev`/`main`, and to produce HPKG release assets for every `v*` tag.
 The workflow lives in `.gitea/workflows/build-test.yml`; the shell
 scripts under `ci_scripts/`.
