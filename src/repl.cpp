@@ -90,10 +90,10 @@ struct termios g_saved_termios {};
 bool           g_saved_termios_valid = false;
 
 // Read one raw byte from stdin, also watching g_wake_pipe[0].
-// When the wake pipe fires, flush pending output and check
-// g_turn_just_completed; if set and the edit buffer is empty,
-// return '\r' to simulate Enter and unblock ReadMessage().
-// Returns EOF on real EOF or unrecoverable error.
+// The wake pipe is written by BlockStdin()/UnblockStdin() (and
+// RequestClearEditBuffer()) so the poll() breaks promptly when
+// SelectOption() takes over or releases the tty. Returns EOF on real
+// EOF or unrecoverable error.
 static int raw_getc_or_wake(FILE* f) {
     while (true) {
         const int stdin_fd = fileno(f);
@@ -116,86 +116,35 @@ static int raw_getc_or_wake(FILE* f) {
         pfds[1].revents = 0;
         const int nfds = blocked ? 1 : 2;
 
-        // Use a 16ms timeout so the main thread can flush streaming
-        // output periodically without needing the timer thread to write
-        // to the terminal concurrently with libedit. A real keystroke
-        // wakes poll() immediately — zero added latency.
-        const int r = ::poll(pfds + (blocked ? 1 : 0), nfds, 16);
+        // Block until a keystroke or a wake-pipe byte arrives.
+        const int r = ::poll(pfds + (blocked ? 1 : 0), nfds, -1);
         if (r < 0) {
             if (errno == EINTR) continue;
             return EOF;
         }
 
-        // Timeout — flush pending output (safe: libedit is idle) and loop.
-        if (r == 0) {
-            tui::FlushTurnOutput();
-            if (tui::g_turn_just_completed.load() && rl_end == 0) {
-                tui::g_turn_just_completed.store(false);
-                return '\r';
-            }
-            tui::g_turn_just_completed.store(false);
-            continue;
-        }
-
-        // One or both fds are ready. Flush output first if wake pipe fired
-        // OR if there is pending output (timer may have written since last
-        // flush). Then read a keystroke if stdin is ready.
-        // Flushing before reading ensures libedit's echo starts from the
-        // correct cursor position restored by DECRC.
         bool stdin_ready = !blocked && (pfds[0].revents & POLLIN);
 
         const struct pollfd& wake_pfd = pfds[1];
         if (wake_pfd.revents & (POLLIN | POLLHUP)) {
             char discard[64];
             ::read(wake_fd, discard, sizeof(discard));
-            tui::FlushTurnOutput();
             // If we just transitioned from blocked→unblocked (UnblockStdin()
             // ran while we were polling), flush the kernel tty input buffer
-            // now — before re-reading stdin_ready.  This closes the window
-            // between UnblockStdin()'s own tcflush() and the moment our
-            // poll() re-arms stdin (pfds[0].events = POLLIN), during which a
-            // user keystroke (e.g. an impatient Enter) can slip into the tty
-            // buffer and show up as a spurious readline() return on the next
-            // call, causing the "double-Enter" symptom.
+            // now so a keystroke that slipped in while SelectOption() owned
+            // the menu doesn't surface as a spurious readline() return.
             if (blocked && !g_stdin_blocked.load()) {
-                // We were blocked; now we're not.  Flush stale tty input.
                 if (isatty(stdin_fd))
                     ::tcflush(stdin_fd, TCIFLUSH);
-                // Re-evaluate stdin_ready: the flush may have cleared bytes
-                // that had already raised POLLIN on pfds[0] before the poll
-                // call (when blocked, pfds[0].events was 0 so pfds[0].revents
-                // is 0 — stdin_ready is already false here; the tcflush is
-                // purely a safety net for the next poll iteration).
                 stdin_ready = false;
             }
-            // Only inject a synthetic Enter when the edit buffer is empty
-            // AND stdin has no real keystroke pending.  If both the wake
-            // pipe and stdin fired simultaneously (user pressed Enter at
-            // the exact moment the turn completed), skip the synthetic '\r'
-            // and fall through to return the real character below.
-            // Without this guard the synthetic '\r' consumes one readline
-            // call as an empty line; the real '\r' then becomes a second
-            // empty readline call, so the user effectively has to press
-            // Enter twice to send their next message.
-            if (tui::g_turn_just_completed.load() && rl_end == 0 && !stdin_ready) {
-                tui::g_turn_just_completed.store(false);
-                return '\r';
-            }
-            tui::g_turn_just_completed.store(false);
             if (!g_stdin_blocked.load() && g_clear_edit_buffer_requested.exchange(false)) {
                 rl_replace_line("", 0);
                 rl_point = 0;
             }
-            if (!(wake_pfd.revents & POLLIN)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        } else {
-            // No wake, but flush any output that accumulated since last cycle
-            // so the cursor is correct before libedit echoes the keystroke.
-            tui::FlushTurnOutput();
         }
 
-        // Stdin ready — return the keystroke immediately after flushing.
+        // Stdin ready — return the keystroke.
         if (stdin_ready) {
             unsigned char buf;
             const ssize_t n = ::read(stdin_fd, &buf, 1);
@@ -274,20 +223,6 @@ static int bracketed_getc_impl(FILE* f) {
         return static_cast<unsigned char>(g_paste_buf[g_paste_pos++]);
     g_paste_buf.clear();
     g_paste_pos = 0;
-
-    // If the flush timer detected the turn just completed, return a
-    // synthetic '\r' (Enter) so ReadMessage() returns an empty line
-    // and the main loop's drain_turn() fires — but only when the
-    // edit buffer is empty (rl_end == 0) so we don't submit partial input.
-    if (tui::g_turn_just_completed.load()) {
-        if (rl_end == 0) {
-            tui::g_turn_just_completed.store(false);
-            return '\r';
-        }
-        // Edit buffer non-empty — drain_turn() will fire when the
-        // user next presses Enter.
-        tui::g_turn_just_completed.store(false);
-    }
 
     const int c = raw_getc(f);
     if (c == EOF) return c;
@@ -742,25 +677,6 @@ void Init(const std::string& history_file) {
 	}
 
 	rl_attempted_completion_function = slash_completion;
-
-	// Wrap libedit's completion-list display so the flush timer is
-	// paused while the match list is on screen.  Without this, the
-	// 16 ms flush-timer thread fires during a turn, writes Claude's
-	// streaming output via DECSC/CUP/DECRC, and either overwrites the
-	// completion list or corrupts the cursor position so the list
-	// appears at the wrong row.  PauseFlushTimer()/ResumeFlushTimer()
-	// are the same primitives used by SelectOption() — they drain any
-	// pending turn output first, then give libedit exclusive access to
-	// stdout for the duration of the completion display.
-	//
-	// rl_completion_display_matches_hook, when non-null, is called by
-	// libedit instead of its built-in rl_display_match_list(), so we
-	// call that function ourselves after pausing the timer.
-	rl_completion_display_matches_hook = [](char** matches, int num, int max) {
-		tui::PauseFlushTimer();
-		rl_display_match_list(matches, num, max);
-		tui::ResumeFlushTimer();
-	};
 
 	// Install our custom getc function — already set at the top of Init()
 	// before read_history() to ensure rl_initialize() picks it up.

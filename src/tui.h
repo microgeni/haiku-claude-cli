@@ -37,34 +37,9 @@ int TerminalRows();
 void InstallSigwinchHandler();
 
 // Concurrent turn-output interception.
-//
-// While a turn is in progress the worker thread writes to std::cout
-// concurrently with libedit reading from stdin.  Direct writes would
-// corrupt the terminal because libedit also writes (to row N-2) and
-// partial ANSI sequences from either side can interleave.
-//
-// BeginTurn() redirects std::cout through an interceptor that
-// accumulates output in a mutex-protected pending buffer instead of
-// writing directly to the terminal.  FlushTurnOutput() (called by
-// the repl getcfn hook before every libedit keypress read, and also
-// from the main REPL loop after SIGWINCH) drains the buffer to the
-// scroll region using DECSC/DECRC so libedit's cursor on the input
-// row (N-2) is preserved.  EndTurn() restores std::cout and flushes
-// any remaining buffered output.
-//
-// Thread safety: FlushTurnOutput() and the worker's writes to the
-// buffer are each protected by an internal mutex. BeginTurn() and
-// EndTurn() must only be called from the main thread.
-void BeginTurn();
-void EndTurn();
-void FlushTurnOutput();
-
-// Pause / resume the flush-timer thread so SelectOption() has
-// exclusive access to stdout and stdin without concurrent rendering
-// corrupting the menu or leaking terminal query responses into the
-// input queue.  No-ops when no turn is active (safe to call always).
-void PauseFlushTimer();
-void ResumeFlushTimer();
+// The synchronous REPL turn writes streamed output directly to stdout
+// on the main thread; the user cannot type while it runs, so no output
+// interceptor is needed.
 
 // Park the cursor at the scroll-region bottom (chat_bottom = N-4) so
 // SelectOption() can render the permission menu above the "> " input
@@ -73,28 +48,10 @@ void ResumeFlushTimer();
 // within the chat area rather than overwriting the status-bar rows.
 // RestoreScrollRegion() re-establishes the 1..chat_bottom region and
 // redraws the status bar.  Both are no-ops when no status bar is
-// installed (safe to call always).  Must be called AFTER
-// PauseFlushTimer() and BEFORE SelectOption(); RestoreScrollRegion()
-// must be called AFTER SelectOption() and BEFORE ResumeFlushTimer().
+// installed (safe to call always).  Must be called BEFORE SelectOption();
+// RestoreScrollRegion() must be called AFTER SelectOption().
 void SuspendScrollRegion();
 void RestoreScrollRegion();
-
-// Signal whether libedit is currently blocked in poll() (idle).
-// The flush timer only writes to the terminal when this is true,
-// preventing races with libedit's own terminal output.
-extern std::atomic<bool> g_libedit_polling;
-// Read by bracketed_getc in repl.cpp to inject a synthetic Enter
-// (only when the edit buffer is empty) so the main loop drains the
-// result without waiting for a real keypress. Cleared by the main
-// loop at the top of each iteration.
-extern std::atomic<bool> g_turn_just_completed;
-
-// Install a callback that the flush-timer thread calls every 16 ms to
-// check whether the worker has finished its turn.  When the callback
-// returns true the timer sets g_turn_just_completed so bracketed_getc
-// can return a synthetic Enter to unblock ReadMessage().
-// Pass nullptr to clear.
-void SetTurnDoneCheck(std::function<bool()> fn);
 
 // Fixed-bottom status frame. Carves off the bottom two rows of
 // the terminal via DECSTBM scroll region:
