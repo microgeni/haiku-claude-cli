@@ -3852,6 +3852,17 @@ void ChatWindow::_ToggleFindBar()
 {
 	if (!fFindBar) return;
 	if (fFindBar->IsHidden()) {
+		// The find bar lives inside the input pane; if that pane is collapsed
+		// (View > Input), revealing the find bar alone would draw nothing.
+		// Show the pane first so the find bar is actually visible.
+		if (fInputPane && fInputPane->IsHidden()) {
+			fInputPane->Show();
+			if (fInputItem) fInputItem->SetMarked(true);
+			if (fVSplit) {
+				fVSplit->InvalidateLayout(true);
+				fVSplit->Relayout();
+			}
+		}
 		fFindBar->Show();
 		if (fFindField) {
 			// Pre-fill with the current selection, if any, then focus.
