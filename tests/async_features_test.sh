@@ -91,21 +91,21 @@ FIELD=$(awk -v s="$LINE_TR" -v e="$LINE_TR_END" \
 [ -n "$FIELD" ] || fail "cancelledInput not inside TurnResult struct body"
 pass
 
-# ── B7: LocalWorkerFunc sets cancelledInput when g_cancel_retype is set ───────
-step "B7: LocalWorkerFunc populates result.cancelledInput from job.userText on Ctrl+X"
-grep -q 'result\.cancelledInput = job\.userText' "$SESS" \
-    || fail "result.cancelledInput = job.userText not found in $SESS"
+# ── B7: RunTurn sets cancelledInput when g_cancel_retype is set ───────────────
+step "B7: RunTurn populates result.cancelledInput from userText on Ctrl+X"
+grep -q 'result\.cancelledInput = userText' "$SESS" \
+    || fail "result.cancelledInput = userText not found in $SESS"
 # The assignment must be guarded by g_cancel_retype.
-LINE_CI=$(grep -n 'result\.cancelledInput = job\.userText' "$SESS" | head -1 | cut -d: -f1)
+LINE_CI=$(grep -n 'result\.cancelledInput = userText' "$SESS" | head -1 | cut -d: -f1)
 GUARD=$(awk -v s="$((LINE_CI-5))" -v e="$LINE_CI" \
     'NR>=s && NR<=e && /g_cancel_retype/' "$SESS")
 [ -n "$GUARD" ] \
     || fail "g_cancel_retype guard not found within 5 lines before cancelledInput assignment"
 pass
 
-# ── B8: LocalWorkerFunc clears g_cancel_retype after recording it ─────────────
-step "B8: LocalWorkerFunc clears g_cancel_retype = 0 after setting cancelledInput"
-LINE_CI=$(grep -n 'result\.cancelledInput = job\.userText' "$SESS" | head -1 | cut -d: -f1)
+# ── B8: RunTurn clears g_cancel_retype after recording it ─────────────────────
+step "B8: RunTurn clears g_cancel_retype = 0 after setting cancelledInput"
+LINE_CI=$(grep -n 'result\.cancelledInput = userText' "$SESS" | head -1 | cut -d: -f1)
 CLEAR=$(awk -v after="$LINE_CI" \
     'NR > after && NR <= after+3 && /g_cancel_retype = 0/' "$SESS")
 [ -n "$CLEAR" ] \
@@ -136,16 +136,16 @@ grep -q 'size() - 1; i >= 0; --i\|static_cast.*size.*- 1' "$REPL" \
 pass
 
 # ── B12: InteractiveLoop calls RestoreInput when cancelledInput is non-empty ──
-step "B12: drain_turn calls repl::RestoreInput on non-empty cancelledInput"
+step "B12: run_turn calls repl::RestoreInput on non-empty cancelledInput"
 grep -q 'repl::RestoreInput' "$SESS" \
     || fail "repl::RestoreInput not called in $SESS"
-# Must appear inside the drain_turn lambda failure path.
-LINE_DRAIN=$(grep -n 'auto drain_turn' "$SESS" | head -1 | cut -d: -f1)
+# Must appear inside the run_turn lambda failure path.
+LINE_RUN=$(grep -n 'auto run_turn' "$SESS" | head -1 | cut -d: -f1)
 LINE_RESTORE=$(grep -n 'repl::RestoreInput' "$SESS" | head -1 | cut -d: -f1)
-[ -n "$LINE_DRAIN"   ] || fail "drain_turn lambda not found in $SESS"
+[ -n "$LINE_RUN"     ] || fail "run_turn lambda not found in $SESS"
 [ -n "$LINE_RESTORE" ] || fail "repl::RestoreInput not found in $SESS"
-[ "$LINE_RESTORE" -gt "$LINE_DRAIN" ] \
-    || fail "RestoreInput (L$LINE_RESTORE) must appear inside drain_turn (L$LINE_DRAIN)"
+[ "$LINE_RESTORE" -gt "$LINE_RUN" ] \
+    || fail "RestoreInput (L$LINE_RESTORE) must appear inside run_turn (L$LINE_RUN)"
 pass
 
 # ── B12b: RemoveLastRecord is called before RestoreInput (history clean-up) ───
@@ -180,31 +180,34 @@ grep -q '!result\.cancelledInput\.empty()' "$SESS" \
     || fail "!result.cancelledInput.empty() guard missing — RestoreInput called unconditionally"
 pass
 
-# ── B14: status bar shows ctrl+x hint while worker is active ─────────────────
-step "B14: status bar is updated with ctrl+x hint after job is enqueued"
+# ── B14: status bar shows ctrl+x hint while the turn is in flight ────────────
+step "B14: status bar is updated with a ctrl+x hint before the turn runs"
 grep -q 'ctrl+x.*amend\|ctrl+x:amend' "$SESS" \
     || fail "ctrl+x: amend hint not found in $SESS"
-# The hint must appear after notify_one() (i.e. after the job is dispatched).
-LINE_NOTIFY=$(grep -n 'worker\.fJobCv\.notify_one()' "$SESS" | head -1 | cut -d: -f1)
-LINE_HINT=$(grep -n 'ctrl+x' "$SESS" | head -1 | cut -d: -f1)
-[ -n "$LINE_NOTIFY" ] || fail "fJobCv.notify_one() not found in $SESS"
-[ -n "$LINE_HINT"   ] || fail "ctrl+x hint not found in $SESS"
-[ "$LINE_HINT" -gt "$LINE_NOTIFY" ] \
-    || fail "ctrl+x hint (L$LINE_HINT) must appear after notify_one() (L$LINE_NOTIFY)"
+# The hint must appear inside run_turn, before the RunTurn() call.
+LINE_RUN=$(grep -n 'auto run_turn' "$SESS" | head -1 | cut -d: -f1)
+LINE_HINT=$(awk -v after="$LINE_RUN" \
+    'NR > after && /ctrl\+x/ {print NR; exit}' "$SESS")
+LINE_CALL=$(awk -v after="$LINE_RUN" \
+    'NR > after && /RunTurn\(/ {print NR; exit}' "$SESS")
+[ -n "$LINE_RUN"  ] || fail "run_turn lambda not found in $SESS"
+[ -n "$LINE_HINT" ] || fail "ctrl+x hint not found in run_turn in $SESS"
+[ -n "$LINE_CALL" ] || fail "RunTurn() call not found in run_turn in $SESS"
+[ "$LINE_HINT" -lt "$LINE_CALL" ] \
+    || fail "ctrl+x hint (L$LINE_HINT) must be set before RunTurn() (L$LINE_CALL)"
 pass
 
-# ── B15: status bar is restored after the wait (hint removed) ────────────────
-step "B15: status bar is reset to compose_status() in drain_turn after turn completes"
-# The drain_turn lambda calls tui::EndTurn() then tui::SetStatusBar(compose_status()).
-LINE_DRAIN=$(grep -n 'auto drain_turn' "$SESS" | head -1 | cut -d: -f1)
-LINE_END_TURN=$(awk -v after="$LINE_DRAIN" \
-    'NR > after && /tui::EndTurn/ {print NR; exit}' "$SESS")
-LINE_RESTORE_STATUS=$(awk -v after="${LINE_END_TURN:-0}" \
+# ── B15: status bar is restored after the turn completes (hint removed) ───────
+step "B15: status bar is reset to compose_status() in run_turn after RunTurn"
+LINE_RUN=$(grep -n 'auto run_turn' "$SESS" | head -1 | cut -d: -f1)
+LINE_CALL=$(awk -v after="$LINE_RUN" \
+    'NR > after && /RunTurn\(/ {print NR; exit}' "$SESS")
+LINE_RESTORE_STATUS=$(awk -v after="${LINE_CALL:-0}" \
     'NR > after && NR <= after+15 && /tui::SetStatusBar.*compose_status/ {print NR; exit}' "$SESS")
-[ -n "$LINE_DRAIN"          ] || fail "drain_turn lambda not found in $SESS"
-[ -n "$LINE_END_TURN"       ] || fail "tui::EndTurn() not found in drain_turn"
+[ -n "$LINE_RUN"            ] || fail "run_turn lambda not found in $SESS"
+[ -n "$LINE_CALL"           ] || fail "RunTurn() call not found in run_turn"
 [ -n "$LINE_RESTORE_STATUS" ] \
-    || fail "tui::SetStatusBar(compose_status()) not found within 15 lines after EndTurn()"
+    || fail "tui::SetStatusBar(compose_status()) not found within 15 lines after RunTurn()"
 pass
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -293,8 +296,8 @@ grep -q '\.swap\(tl_written_summary_paths\)\|tl_written_summary_paths.*swap\|out
     || fail "swap-drain of tl_written_summary_paths not found in DrainWrittenSummaryPaths"
 pass
 
-# ── B26: LocalWorkerFunc calls DrainWrittenSummaryPaths after SendWithTools ───
-step "B26: LocalWorkerFunc calls api::DrainWrittenSummaryPaths() and stores result"
+# ── B26: RunTurn calls DrainWrittenSummaryPaths after SendWithTools ───────────
+step "B26: RunTurn calls api::DrainWrittenSummaryPaths() and stores result"
 grep -q 'DrainWrittenSummaryPaths' "$SESS" \
     || fail "api::DrainWrittenSummaryPaths not called in $SESS"
 # Must appear after SendWithTools.
@@ -371,187 +374,6 @@ rm -rf "$home"
 [ "$rc" -ne 124 ] || fail "binary timed out (possible thread hang)"
 [ "$rc" -lt 128 ] || fail "binary crashed (exit $rc — possible signal)"
 [ "$rc" -ne 0   ] || fail "expected non-zero exit without auth"
-pass
-
-# ════════════════════════════════════════════════════════════════════════════
-# True async / concurrent output (TurnOutputBuf + BeginTurn/EndTurn)
-# ════════════════════════════════════════════════════════════════════════════
-TUI="src/tui.cpp"
-TUIH="src/tui.h"
-
-# ── C1: TurnOutputBuf class is defined in tui.cpp ────────────────────────────
-step "C1: TurnOutputBuf custom streambuf is defined in tui.cpp"
-grep -q 'class TurnOutputBuf' "$TUI" \
-    || fail "TurnOutputBuf class not found in $TUI"
-grep -q 'std::streambuf\|public.*streambuf' "$TUI" \
-    || fail "TurnOutputBuf must inherit from std::streambuf"
-pass
-
-# ── C2: TurnOutputBuf overrides xsputn and overflow ──────────────────────────
-step "C2: TurnOutputBuf overrides xsputn() and overflow() for complete write coverage"
-grep -q 'xsputn' "$TUI" || fail "xsputn not overridden in TurnOutputBuf"
-grep -q 'overflow' "$TUI" || fail "overflow not overridden in TurnOutputBuf"
-pass
-
-# ── C3: Pending buffer is protected by a mutex ───────────────────────────────
-step "C3: g_turn_pending buffer is protected by g_turn_pending_mu (std::mutex)"
-grep -q 'g_turn_pending_mu' "$TUI" \
-    || fail "g_turn_pending_mu not found in $TUI"
-grep -q 'g_turn_pending' "$TUI" \
-    || fail "g_turn_pending buffer not found in $TUI"
-# Both must appear near each other (the mutex protects the buffer).
-LINE_MU=$(grep -n 'std::mutex.*g_turn_pending_mu\|g_turn_pending_mu.*std::mutex' "$TUI" | head -1 | cut -d: -f1)
-LINE_BUF=$(grep -n 'std::string.*g_turn_pending;\|g_turn_pending;' "$TUI" | head -1 | cut -d: -f1)
-[ -n "$LINE_MU"  ] || fail "g_turn_pending_mu declaration not found"
-[ -n "$LINE_BUF" ] || fail "g_turn_pending declaration not found"
-DIFF=$(( LINE_BUF > LINE_MU ? LINE_BUF - LINE_MU : LINE_MU - LINE_BUF ))
-[ "$DIFF" -le 5 ] || fail "g_turn_pending and g_turn_pending_mu are $DIFF lines apart — should be adjacent"
-pass
-
-# ── C4: BeginTurn, EndTurn, FlushTurnOutput are declared in tui.h ─────────────
-step "C4: BeginTurn(), EndTurn(), FlushTurnOutput() are declared in tui.h"
-grep -q 'void BeginTurn'        "$TUIH" || fail "BeginTurn not declared in $TUIH"
-grep -q 'void EndTurn'          "$TUIH" || fail "EndTurn not declared in $TUIH"
-grep -q 'void FlushTurnOutput'  "$TUIH" || fail "FlushTurnOutput not declared in $TUIH"
-pass
-
-# ── C5: BeginTurn installs the TurnOutputBuf via cout.rdbuf() ─────────────────
-step "C5: BeginTurn() redirects std::cout through TurnOutputBuf via rdbuf()"
-LINE_BEGIN=$(grep -n 'void BeginTurn' "$TUI" | head -1 | cut -d: -f1)
-RDBUF=$(awk -v after="$LINE_BEGIN" \
-    'NR > after && NR <= after+20 && /cout\.rdbuf/ {print NR; exit}' "$TUI")
-[ -n "$RDBUF" ] || fail "cout.rdbuf() not called in BeginTurn in $TUI"
-pass
-
-# ── C6: EndTurn restores cout.rdbuf before flushing ──────────────────────────
-step "C6: EndTurn() restores the original rdbuf before calling FlushTurnOutput"
-LINE_END=$(grep -n 'void EndTurn' "$TUI" | head -1 | cut -d: -f1)
-# Restore must precede flush within EndTurn body.
-LINE_RESTORE=$(awk -v after="$LINE_END" \
-    'NR > after && NR <= after+20 && /g_cout_orig_buf/ {print NR; exit}' "$TUI")
-LINE_FLUSH=$(awk -v after="$LINE_END" \
-    'NR > after && NR <= after+20 && /FlushTurnOutput/ {print NR; exit}' "$TUI")
-[ -n "$LINE_RESTORE" ] || fail "g_cout_orig_buf restore not found in EndTurn"
-[ -n "$LINE_FLUSH"   ] || fail "FlushTurnOutput not called in EndTurn"
-[ "$LINE_RESTORE" -lt "$LINE_FLUSH" ] \
-    || fail "rdbuf restore (L$LINE_RESTORE) must precede FlushTurnOutput (L$LINE_FLUSH) in EndTurn"
-pass
-
-# ── C7: FlushTurnOutput uses DECSC/DECRC to preserve libedit cursor ───────────
-step "C7: FlushTurnOutput wraps output in DECSC (ESC 7) and DECRC (ESC 8)"
-grep -q '"\\\\x1b""7"\|\\\\x1b7\|ESC.*7\|DECSC\|\\\\""7"' "$TUI" \
-    || grep -q '"7"' "$TUI" \
-    || fail "DECSC (ESC 7) not found in FlushTurnOutput in $TUI"
-grep -q '"\\\\x1b""8"\|\\\\x1b8\|ESC.*8\|DECRC\|\\\\""8"' "$TUI" \
-    || grep -q '"8"' "$TUI" \
-    || fail "DECRC (ESC 8) not found in FlushTurnOutput in $TUI"
-pass
-
-# ── C8: FlushTurnOutput writes to g_cout_orig_buf (bypasses interceptor) ──────
-step "C8: FlushTurnOutput writes via g_cout_orig_buf to avoid re-entrant buffering"
-grep -q 'g_cout_orig_buf' "$TUI" \
-    || fail "g_cout_orig_buf not used in $TUI"
-LINE_FLUSH_FN=$(grep -n 'void FlushTurnOutput' "$TUI" | head -1 | cut -d: -f1)
-ORIG_USE=$(awk -v after="$LINE_FLUSH_FN" \
-    'NR > after && NR <= after+80 && /g_cout_orig_buf/ {print NR; exit}' "$TUI")
-[ -n "$ORIG_USE" ] || fail "g_cout_orig_buf not used inside FlushTurnOutput body"
-pass
-
-# ── C9: FlushTurnOutput swaps (drains) the pending buffer atomically ──────────
-step "C9: FlushTurnOutput swaps g_turn_pending under the mutex before writing"
-LINE_FLUSH_FN=$(grep -n 'void FlushTurnOutput' "$TUI" | head -1 | cut -d: -f1)
-SWAP=$(awk -v after="$LINE_FLUSH_FN" \
-    'NR > after && NR <= after+20 && /\.swap\(g_turn_pending\)|chunk\.swap/ {print NR; exit}' "$TUI")
-[ -n "$SWAP" ] || fail "swap of g_turn_pending not found in FlushTurnOutput — buffer not drained atomically"
-pass
-
-# ── C10: FlushTurnOutput is called from bracketed_getc in repl.cpp ────────────
-step "C10: FlushTurnOutput() is called inside bracketed_getc (before each libedit read)"
-grep -q 'FlushTurnOutput' "$REPL" \
-    || fail "tui::FlushTurnOutput not called in $REPL"
-# Must appear before the blocking raw_getc call.
-LINE_FLUSH=$(grep -n 'FlushTurnOutput' "$REPL" | head -1 | cut -d: -f1)
-LINE_BRACKET=$(grep -n 'bracketed_getc' "$REPL" | head -1 | cut -d: -f1)
-# Find the raw_getc call inside bracketed_getc (not the definition).
-LINE_RAWGETC=$(awk -v after="$LINE_BRACKET" \
-    'NR > after && /raw_getc\(f\)/ {print NR; exit}' "$REPL")
-[ -n "$LINE_FLUSH"   ] || fail "FlushTurnOutput call not found in $REPL"
-[ -n "$LINE_RAWGETC" ] || fail "raw_getc(f) call not found inside bracketed_getc in $REPL"
-[ "$LINE_FLUSH" -lt "$LINE_RAWGETC" ] \
-    || fail "FlushTurnOutput (L$LINE_FLUSH) must precede raw_getc (L$LINE_RAWGETC) in bracketed_getc"
-pass
-
-# ── C11: BeginTurn is called in dispatch_turn (before worker wakes) ───────────
-step "C11: BeginTurn() is called in dispatch_turn before fJobCv.notify_one()"
-grep -q 'tui::BeginTurn' "$SESS" \
-    || fail "tui::BeginTurn not called in $SESS"
-LINE_BEGIN=$(grep -n 'tui::BeginTurn' "$SESS" | head -1 | cut -d: -f1)
-LINE_NOTIFY=$(grep -n 'worker\.fJobCv\.notify_one' "$SESS" | head -1 | cut -d: -f1)
-[ -n "$LINE_BEGIN"  ] || fail "tui::BeginTurn not found in $SESS"
-[ -n "$LINE_NOTIFY" ] || fail "fJobCv.notify_one not found in $SESS"
-[ "$LINE_BEGIN" -lt "$LINE_NOTIFY" ] \
-    || fail "BeginTurn (L$LINE_BEGIN) must precede notify_one (L$LINE_NOTIFY)"
-pass
-
-# ── C12: EndTurn is called in drain_turn (restores cout before bookkeeping) ───
-step "C12: EndTurn() is called at the start of drain_turn before result drain"
-LINE_DRAIN=$(grep -n 'auto drain_turn' "$SESS" | head -1 | cut -d: -f1)
-LINE_END=$(awk -v after="$LINE_DRAIN" \
-    'NR > after && NR <= after+10 && /tui::EndTurn/ {print NR; exit}' "$SESS")
-[ -n "$LINE_END" ] || fail "tui::EndTurn not found within 10 lines of drain_turn start"
-pass
-
-# ── C13: Main loop checks fWorkerOwnsDisplay without blocking ─────────────────
-step "C13: main loop polls fWorkerOwnsDisplay non-blocking (no unconditional wait)"
-# The new design polls at the top of the loop rather than blocking.
-# fWorkerOwnsDisplay must be read under fDisplayMu in a non-blocking check.
-grep -q 'done = !worker\.fWorkerOwnsDisplay\|!worker\.fWorkerOwnsDisplay' "$SESS" \
-    || fail "non-blocking fWorkerOwnsDisplay poll not found in $SESS"
-# The top-of-loop check must NOT be an unconditional fDisplayCv.wait inside
-# the main turn dispatch path (only in the EOF drain path).
-LINE_DRAIN_LAMBDA=$(grep -n 'auto drain_turn' "$SESS" | head -1 | cut -d: -f1)
-LINE_DISPATCH_LAMBDA=$(grep -n 'auto dispatch_turn' "$SESS" | head -1 | cut -d: -f1)
-# fDisplayCv.wait must not appear between dispatch_lambda and drain_lambda
-# (i.e. not as an unconditional block in the hot path).
-BETWEEN=$(awk -v s="$LINE_DISPATCH_LAMBDA" -v e="$LINE_DRAIN_LAMBDA" \
-    'NR>s && NR<e && /fDisplayCv\.wait/' "$SESS")
-[ -z "$BETWEEN" ] \
-    || fail "unconditional fDisplayCv.wait found in dispatch path — main thread should not block"
-pass
-
-# ── C14: Input while turn active is queued (type-ahead, not a block) ──────────
-step "C14: input while turn active is staged in fQueuedInput (type-ahead)"
-# The new design does NOT block on fDisplayCv.wait in the dispatch path.
-# Instead, a line submitted while the turn is Streaming is stashed in
-# worker.fQueuedInput and the loop returns to the prompt.
-grep -q 'fQueuedInput' "$SESS" \
-    || fail "fQueuedInput not found in $SESS (type-ahead queue missing)"
-# The tri-state DisplayState must distinguish Streaming from Done.
-grep -q 'DisplayState::Streaming' "$SESS" \
-    || fail "DisplayState::Streaming not found in $SESS"
-grep -q 'DisplayState::Done' "$SESS" \
-    || fail "DisplayState::Done not found in $SESS"
-# The turn_active block must stage the line and continue, not wait.
-LINE_ACTIVE=$(grep -n 'If a turn is still active' "$SESS" | head -1 | cut -d: -f1)
-[ -n "$LINE_ACTIVE" ] || fail "'If a turn is still active' comment not found in $SESS"
-LINE_QUEUE=$(awk -v after="${LINE_ACTIVE:-0}" \
-    'NR > after && NR <= after+40 && /fQueuedInput = line/ {print NR; exit}' "$SESS")
-[ -n "$LINE_QUEUE" ] || fail "fQueuedInput assignment not found within 40 lines of turn_active block"
-# A dim "[queued" annotation must be shown to the user.
-grep -q '\[queued' "$SESS" \
-    || fail "[queued] annotation not found in $SESS"
-pass
-
-# ── C15: EOF / Ctrl+D drains active turn before breaking ──────────────────────
-step "C15: EOF/Ctrl+D path waits for active turn via fDisplayCv.wait before break"
-# The only remaining fDisplayCv.wait should be in the EOF drain path.
-grep -q 'fDisplayCv\.wait' "$SESS" \
-    || fail "fDisplayCv.wait not found in $SESS (needed for EOF drain)"
-# Confirm it appears after the ReadMessage() EOF check.
-LINE_EOF=$(grep -n 'tui::ClearInputRow.*break\|EOF.*drain\|active.*turn.*finish' "$SESS" \
-    | head -1 | cut -d: -f1)
-LINE_WAIT=$(grep -n 'fDisplayCv\.wait' "$SESS" | head -1 | cut -d: -f1)
-[ -n "$LINE_WAIT" ] || fail "fDisplayCv.wait not found in $SESS"
 pass
 
 echo
