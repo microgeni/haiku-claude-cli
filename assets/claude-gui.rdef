@@ -1,0 +1,28 @@
+/*
+ * Resource definition for the native Claude GUI app.
+ *
+ * These become proper application *resources* in the linked binary (via
+ * `rc` + `xres` in the Makefile), which is what Tracker, Deskbar and the
+ * roster read. Writing them only as loose BFS attributes (addattr) is not
+ * enough — BAppFileInfo::GetIcon() reads resources, so the app icon would
+ * otherwise appear blank once any duplicate copy is removed.
+ *
+ * The vector icon (assets/claude-icon.hvif) is added separately as a raw
+ * 'VICN' resource by the Makefile, so it is intentionally not inlined here.
+ */
+
+resource app_signature "application/x-vnd.Microgeni-claude-gui";
+
+resource app_flags B_SINGLE_LAUNCH;
+
+resource app_version {
+	major  = 1,
+	middle = 8,
+	minor  = 1,
+
+	variety = B_APPV_FINAL,
+	internal = 0,
+
+	short_info = "Claude",
+	long_info  = "Claude for Haiku — native Claude GUI client."
+};
