@@ -1465,11 +1465,17 @@ void ChatWindow::_BuildMenuBar()
 
 	// Remote control: starts a background Telegram poller so allowed users can
 	// drive turns on this machine. The checkmark mirrors fRemote's running
-	// state, kept in sync by _ToggleRemote().
+	// state, kept in sync by _ToggleRemote(). The item is disabled (grayed
+	// out) when there is no valid Telegram config, so it is visibly
+	// unavailable rather than erroring on click.
 	fRemoteItem = new BMenuItem(
 		"\xF0\x9F\x93\xA1 Remote Control  \xE2\x80\x94  Telegram bridge",
 		new BMessage(gui::MSG_REMOTE_CONTROL));
 	fRemoteItem->SetMarked(false);
+	std::string remoteWhy;
+	const bool remoteConfigured =
+		telegram::RemoteControl::ConfigIsValid(config::Load(), &remoteWhy);
+	fRemoteItem->SetEnabled(remoteConfigured);
 	toolsMenu->AddItem(fRemoteItem);
 	fMenuBar->AddItem(toolsMenu);
 
