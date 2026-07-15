@@ -1,12 +1,13 @@
 // ipc_test_sender — standalone Haiku app that exercises the Genio→Claude IPC
 // path without requiring Genio to be running.
 //
-// Protocol summary (see src/gui_sink.h MSG_ASK_PROMPT):
+// Protocol summary (canonical: src/app_main_gui.cpp kMsgAskPrompt / 'ASKP',
+// documented in docs/IPC.md):
 //   Target app signature : application/x-vnd.Microgeni-claude-gui
-//   BMessage::what       : 'ASKP'  (gui::MSG_ASK_PROMPT)
+//   BMessage::what       : 'ASKP'
 //   Fields:
 //     "prompt"      B_STRING_TYPE  — the question/instruction (required)
-//     "context"     B_STRING_TYPE  — extra context prepended before the prompt (optional)
+//     "context"     B_STRING_TYPE  — extra context appended below the prompt (optional)
 //     "working_dir" B_STRING_TYPE  — override working directory for tool calls (optional)
 //
 // Usage:
@@ -29,7 +30,7 @@
 // Must match the signature in app_main_gui.cpp / Makefile GUI_APP_SIG.
 static const char* kClaudeGuiSig = "application/x-vnd.Microgeni-claude-gui";
 
-// Must match gui::MSG_ASK_PROMPT in src/gui_sink.h.
+// Must match gui::kMsgAskPrompt in src/app_main_gui.cpp.
 static const uint32_t kMsgAskPrompt = 'ASKP';
 
 static void print_usage(const char* argv0)

@@ -6,6 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-07-15
+
+### Added
+
+- **Documented `'ASKP'` IPC for external apps.** The desktop app's
+  "ask Claude" entry point — already used by Genio's **Tools ▸ Claude**
+  integration — is now a documented public contract any Haiku application
+  can use. Send an `'ASKP'` `BMessage` to
+  `application/x-vnd.Microgeni-claude-gui` (or launch `Claude` with
+  `--prompt` / `--working-dir` / `--file` / `--line` / `--send`) to open a
+  scoped chat window with the input box pre-filled and, optionally,
+  auto-submitted. The new [`docs/IPC.md`](docs/IPC.md) describes the message
+  `what`, every field (`prompt`, `context`, `working_dir`, `file`, `line`,
+  `send`), the command-line equivalents, the "launched externally" file
+  round-trip, and how to test with `make ipc-test`. The README and the
+  Genio contrib guide now link to it.
+
+### Fixed
+
+- **`tests/ipc_test_sender.cpp` comments** corrected to match the shipping
+  behaviour: `context` is appended below the prompt (not prepended), and the
+  canonical constant is `kMsgAskPrompt` in `app_main_gui.cpp` (there is no
+  `gui::MSG_ASK_PROMPT`).
+
 ## [1.10.0] - 2026-07-11
 
 ### Added
