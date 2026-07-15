@@ -1285,7 +1285,8 @@ void WelcomeView::Draw(BRect /*updateRect*/)
 
 ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int maxTokens, const std::string& systemPrompt,
-                        int notifyMinSec, const std::string& workingDir)
+                        int notifyMinSec, const std::string& workingDir,
+                        const std::string& initialPrompt, bool autoSend)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
@@ -1341,6 +1342,21 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Register this window as a live remote-control session so the phone
 	// can /sessions list it and /session N route prompts here.
 	_RegisterSession();
+
+	// Seed an initial prompt supplied at launch (e.g. Genio's "Ask Claude
+	// to fix this" via --prompt or the 'ASKP' message). Prefill the input
+	// box so the user can review/edit it; auto-send only if explicitly
+	// requested. Posted (not called inline) so it runs after the window is
+	// shown and the layout has settled.
+	if (!initialPrompt.empty()) {
+		fInput->SetText(initialPrompt.c_str());
+		if (autoSend) {
+			BMessage send(gui::MSG_SEND);
+			PostMessage(&send);
+		} else {
+			fInput->MakeFocus(true);
+		}
+	}
 }
 
 ChatWindow::~ChatWindow()

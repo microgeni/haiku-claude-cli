@@ -334,7 +334,9 @@ public:
 	ChatWindow(const config::Auth& auth, const std::string& model,
 	           int maxTokens, const std::string& systemPrompt,
 	           int notifyMinSec = 5,
-	           const std::string& workingDir = {});
+	           const std::string& workingDir = {},
+	           const std::string& initialPrompt = {},
+	           bool autoSend = false);
 	~ChatWindow() override;
 
 	void MessageReceived(BMessage* msg) override;

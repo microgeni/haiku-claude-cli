@@ -236,12 +236,20 @@ public:
 				fWorkingDir = arg.substr(14);
 				fFromGenio  = true;
 			} else if (arg == "--file" || arg.rfind("--file=", 0) == 0) {
-				// We don't seed the file as context yet, but its presence is
-				// part of Genio's launch contract — treat it as provenance.
-				if (arg == "--file") next(i);
+				// Genio passes the focused file; keep it as provenance and
+				// remember it so it can seed the prompt / working dir.
+				fFile = (arg == "--file") ? next(i) : arg.substr(7);
 				fFromGenio = true;
 			} else if (arg == "--line" || arg.rfind("--line=", 0) == 0) {
-				if (arg == "--line") next(i);
+				fLine = (arg == "--line") ? next(i) : arg.substr(7);
+			} else if (arg == "--prompt" || arg.rfind("--prompt=", 0) == 0) {
+				// Initial prompt to seed the input box (e.g. Genio's
+				// "Ask Claude to fix this"). Not auto-sent from the CLI so
+				// the user can review it first.
+				fInitialPrompt = (arg == "--prompt") ? next(i) : arg.substr(9);
+			} else if (arg == "--send") {
+				// Auto-submit the seeded --prompt without waiting for Enter.
+				fAutoSend = true;
 			}
 		}
 
@@ -332,8 +340,14 @@ public:
 	void _SpawnWindow()
 	{
 		ChatWindow* win = new ChatWindow(fAuth, fModel, fMaxTokens, fSystemPmt,
-		                                 fNotifyMin, fWorkingDir);
+		                                 fNotifyMin, fWorkingDir,
+		                                 fInitialPrompt, fAutoSend);
 		win->Show();
+
+		// The initial prompt is one-shot: consume it so a later
+		// File ▸ New Session (which also calls _SpawnWindow) opens blank.
+		fInitialPrompt.clear();
+		fAutoSend = false;
 	}
 
 	void MessageReceived(BMessage* msg) override
@@ -342,16 +356,68 @@ public:
 			case gui::MSG_NEW_WINDOW:
 				_SpawnWindow();
 				break;
+
+			// 'ASKP' — programmatic "ask Claude" from another app (e.g.
+			// Genio's "Ask Claude to fix this"). Carries optional fields:
+			//   "prompt"      the question / instruction (seeds the input box)
+			//   "context"     extra text appended below the prompt
+			//   "working_dir" project root / working directory
+			//   "file"        focused file (provenance)
+			//   "line"        1-based caret line
+			//   "send"        bool: auto-submit instead of waiting for Enter
+			// A new window is opened scoped to working_dir with the prompt
+			// prefilled. This is the direct alternative to the clipboard.
+			case kMsgAskPrompt:
+			{
+				const char* prompt = nullptr;
+				if (msg->FindString("prompt", &prompt) == B_OK && prompt) {
+					fInitialPrompt = prompt;
+					const char* ctx = nullptr;
+					if (msg->FindString("context", &ctx) == B_OK && ctx
+					    && ctx[0] != '\0') {
+						fInitialPrompt += "\n\n";
+						fInitialPrompt += ctx;
+					}
+				}
+				const char* wd = nullptr;
+				if (msg->FindString("working_dir", &wd) == B_OK && wd
+				    && wd[0] != '\0') {
+					fWorkingDir = wd;
+					fFromGenio  = true;
+					editor::SetLaunchedFromGenio(true);
+				}
+				const char* file = nullptr;
+				if (msg->FindString("file", &file) == B_OK && file
+				    && file[0] != '\0') {
+					fFile      = file;
+					fFromGenio = true;
+					editor::SetLaunchedFromGenio(true);
+				}
+				bool send = false;
+				if (msg->FindBool("send", &send) == B_OK)
+					fAutoSend = send;
+
+				_SpawnWindow();
+				break;
+			}
+
 			default:
 				BApplication::MessageReceived(msg);
 				break;
 		}
 	}
 
+	// BMessage 'what' accepted from external apps to open a prompt.
+	static constexpr uint32 kMsgAskPrompt = 'ASKP';
+
 private:
 	std::string    fWorkingDir; // resolved from -w / --working-dir or env.
 	bool           fFromGenio = false; // launched via Genio Tools ▸ Claude.
 	std::string    fRawArgv;    // joined argv, logged once in ReadyToRun.
+	std::string    fFile;       // --file: focused file (provenance).
+	std::string    fLine;       // --line: 1-based caret line.
+	std::string    fInitialPrompt; // --prompt / 'ASKP': seed for input box.
+	bool           fAutoSend = false;  // --send / 'ASKP' send=true.
 	config::Auth   fAuth;       // spawn parameters captured in ReadyToRun.
 	std::string    fModel;
 	int            fMaxTokens = 0;
