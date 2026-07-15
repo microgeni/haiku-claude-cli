@@ -19,7 +19,13 @@
 
 namespace config {
 
-const char* const kVersion      = "1.11.1";
+// The marketing version is injected at build time from the top-level VERSION
+// file via -DCCH_VERSION (see Makefile), so it always matches the shipped
+// package. The fallback only applies to ad-hoc builds without the define.
+#ifndef CCH_VERSION
+#define CCH_VERSION "0.0.0-dev"
+#endif
+const char* const kVersion      = CCH_VERSION;
 const char* const kDefaultModel = "claude-sonnet-4-6";
 const char* const kApiVersion   = "2023-06-01";
 const char* const kOAuthBeta    = "oauth-2025-04-20";

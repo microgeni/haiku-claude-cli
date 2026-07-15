@@ -92,10 +92,19 @@ ICON_HVIF ?= assets/claude-icon.hvif
 APP_SIG   ?= application/x-vnd.Microgeni-claude-cli
 
 PKG_NAME    ?= claude_cli
-PKG_VERSION ?= 1.11.1
+# Single source of truth for the marketing version: the top-level VERSION
+# file. CI overrides PKG_VERSION with the git tag (leading "v" stripped);
+# locally it defaults to VERSION so the Makefile, the .hpkg, and the compiled
+# binary's config::kVersion can never drift apart.
+PKG_VERSION ?= $(strip $(shell cat VERSION 2>/dev/null))
 PKG_BUILD   ?= 1
 PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
+
+# Compile the marketing version into the binary from the same PKG_VERSION,
+# so config::kVersion always matches the package that shipped it.
+CXXFLAGS += -DCCH_VERSION='"$(PKG_VERSION)"'
+
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
 .PHONY: all gui clean install install-gui package release lint security check
