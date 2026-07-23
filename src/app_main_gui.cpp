@@ -328,7 +328,7 @@ public:
 		fAuth      = auth;
 		fModel     = cfg.model;
 		fMaxTokens = cfg.max_tokens;
-		fSystemPmt = cfg.system;
+		fSystemPmt = cfg.system;  // flawfinder: ignore (member read, not the system() call)
 		fNotifyMin = static_cast<int>(cfg.notify_min_duration_sec);
 
 		_SpawnWindow();
