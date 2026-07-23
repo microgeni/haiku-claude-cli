@@ -193,7 +193,7 @@ int main(int argc, char* argv[]) {
 	// working directory.  Allow them to set CLAUDE_WORKING_DIR in the
 	// environment so that the process lands in the right project root before
 	// any flag parsing occurs.  --working-dir/-w below overrides this.
-	if (const char* env_wd = std::getenv("CLAUDE_WORKING_DIR")) {
+	if (const char* env_wd = std::getenv("CLAUDE_WORKING_DIR")) {  // flawfinder: ignore (null-checked; used only as a path)
 		if (*env_wd && chdir(env_wd) != 0) {
 			std::cerr << "warning: cannot chdir to CLAUDE_WORKING_DIR="
 			          << env_wd << ": " << std::strerror(errno) << "\n";

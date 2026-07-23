@@ -362,7 +362,7 @@ std::string FindDefaultTheme()
 
 	// 3. Development fallback: assets/data/styles/dark.yaml next to the binary.
 	char exe[PATH_MAX] {};
-	if (readlink("/proc/self/exe", exe, sizeof(exe) - 1) > 0) {
+	if (readlink("/proc/self/exe", exe, sizeof(exe) - 1) > 0) {  // flawfinder: ignore (own binary path; buffer zero-initialized, return checked)
 		std::string dir(exe);
 		auto sl = dir.rfind('/');
 		if (sl != std::string::npos) dir.resize(sl);
@@ -404,7 +404,7 @@ std::string FindLanguagesDir()
 
 	// Development fallback.
 	char exe[PATH_MAX] {};
-	if (readlink("/proc/self/exe", exe, sizeof(exe) - 1) > 0) {
+	if (readlink("/proc/self/exe", exe, sizeof(exe) - 1) > 0) {  // flawfinder: ignore (own binary path; buffer zero-initialized, return checked)
 		std::string dir(exe);
 		auto sl = dir.rfind('/');
 		if (sl != std::string::npos) dir.resize(sl);
