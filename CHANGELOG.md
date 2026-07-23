@@ -6,6 +6,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-07-23
+
+### Added
+
+- **Extended thinking.** A new `/think [on|off|N]` command (and
+  `thinking_budget` config key) gives the model a visible reasoning
+  scratchpad before it answers — the single biggest output-quality lever
+  for hard coding tasks. Wired into the Messages API `thinking` parameter;
+  the SSE parser handles `thinking` / `redacted_thinking` blocks and
+  preserves the block signature so it round-trips through the tool-use loop.
+  Reasoning streams dim under a "thinking…" header (CLI) or as a dim gray
+  block (GUI); Telegram ignores it to keep the remote chat clean.
+- **CLI image input.** Images dropped from Tracker (jpeg / png / gif / webp,
+  up to 5 MB) are now sent as vision content blocks, so you can ask Claude
+  about a screenshot or diagram from the terminal — not just text files.
+  The base64 encoder and media-type mapping were extracted from the GUI into
+  a shared, unit-tested `image_util` module used by both front-ends.
+- **Plan mode.** A new `/plan` and `/execute` pair (CLI) and a **Tools ▸ Plan
+  Mode** menu item (GUI) put Claude in read-only research mode: it
+  investigates and presents a numbered plan without touching anything. The
+  safety is a hard guarantee, not just a prompt — `tools::Definitions()`
+  strips every mutating tool (Bash / Write / Edit / WriteAttr / IndexAttr /
+  MCP) from the request, so the model *can't* act even if asked. A green
+  "PLAN" badge shows in the status bar / token bar while active. Valuable on
+  Haiku, which has no filesystem sandbox.
+
+### Changed
+
+- Unit-test suite grown to **63 cases** (added extended-thinking SSE
+  round-trip tests and the `image_util` base64 / media-type / block tests).
+
 ## [1.12.4] - 2026-07-23
 
 ### Fixed
