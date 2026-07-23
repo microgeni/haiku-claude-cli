@@ -131,6 +131,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/config.cpp      \
     $(SRCDIR)/editor_integration.cpp \
     $(SRCDIR)/hooks.cpp       \
+    $(SRCDIR)/history_util.cpp \
     $(SRCDIR)/mcp.cpp         \
     $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
@@ -364,7 +365,14 @@ $(UNIT_BUILDDIR)/sse_parser_test: tests/unit/sse_parser_test.cpp src/sse_parser.
 	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
 	    tests/unit/sse_parser_test.cpp src/sse_parser.cpp
 
-UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test
+# history_util unit test — links the pure history_util.cpp translation unit.
+$(UNIT_BUILDDIR)/history_util_test: tests/unit/history_util_test.cpp src/history_util.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/history_util_test.cpp src/history_util.cpp
+
+UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test \
+             $(UNIT_BUILDDIR)/history_util_test
 
 test-unit: $(UNIT_BINS)
 	@echo "=== unit tests ==="

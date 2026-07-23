@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`history_max_messages` config key** — bounds the rolling history file
+  (`history.json` and named `--resume` sessions) to its last N messages
+  (default 200, ≈100 turns). Previously the cap was applied only when
+  *loading*, so the file itself could grow without bound on a very long
+  single session; the cap is now enforced on *save* too. The cut skips a
+  leading orphaned `tool_result` so a resumed conversation always starts on
+  a valid turn boundary (no Messages API 400). Extracted the cap into a pure
+  `config::CapHistoryMessages` (`history_util.{h,cpp}`) with 7 unit-test
+  cases.
+
 ## [1.11.1] - 2026-07-15
 
 ### Added

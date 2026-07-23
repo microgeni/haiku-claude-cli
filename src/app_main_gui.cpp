@@ -275,6 +275,7 @@ public:
 		// max_tokens, system prompt, hooks, and MCP servers.
 		const config::Config cfg = config::Load();
 		config::InitLogging(cfg.logging_enabled);
+		config::SetHistoryMessageCap(cfg.history_max_messages);
 		config::LogLine("gui ReadyToRun fromGenio="
 			+ std::string(fFromGenio ? "yes" : "no")
 			+ " argv=[" + fRawArgv + "]");
