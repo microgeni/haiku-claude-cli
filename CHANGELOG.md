@@ -6,6 +6,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **GUI diagnostics panel (Help ▸ Diagnostics).** Surfaces the runtime
+  context that was previously invisible in the GUI: the active model and
+  working directory, which CLAUDE.md memory files are loaded (user +
+  project), the configured MCP servers with their tool counts and
+  alive/down status, and the registered lifecycle hooks (per-event counts).
+  Opens in a scrollable read-only window. Backed by two new introspection
+  accessors — `mcp::ActiveServers()` and `hooks::ActiveSummary()` — and a
+  self-contained `diagnostics::BuildReport()`.
+
 ### Changed
 
 - **`chat_window.cpp` decomposition (part 1).** The 4507-line GUI window is
