@@ -159,7 +159,7 @@ private:
 			_Note("Login", "Could not start the login flow.", B_WARNING_ALERT);
 			return;
 		}
-		const std::string cmd = "open '" + fAuthUrl + "' >/dev/null 2>&1 &";
+		const std::string cmd = "open " + config::ShellSingleQuote(fAuthUrl) + " >/dev/null 2>&1 &";
 		std::system(cmd.c_str());  // flawfinder: ignore
 		fFinishBtn->SetEnabled(true);
 		fCodeField->MakeFocus(true);

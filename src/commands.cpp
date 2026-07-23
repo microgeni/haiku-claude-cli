@@ -186,7 +186,11 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 		}
 		const char* editor_env = std::getenv("EDITOR");  // flawfinder: ignore
 		const std::string editor = editor_env && *editor_env ? editor_env : "nano";
-		const std::string cmdline = editor + " '" + target + "'";
+		// Escape the path so a memory file under a directory with spaces
+		// or shell metacharacters can't break out of the command. $EDITOR
+		// is left unquoted on purpose: it may legitimately contain flags
+		// (e.g. "code --wait"), and it comes from the user's own env.
+		const std::string cmdline = editor + " " + config::ShellSingleQuote(target);
 		std::cout << tui::Meta("[opening " + target + " with " + editor + "]") << "\n";
 		const int rc = std::system(cmdline.c_str());  // flawfinder: ignore
 		if (rc != 0) {
