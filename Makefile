@@ -107,7 +107,7 @@ CXXFLAGS += -DCCH_VERSION='"$(PKG_VERSION)"'
 
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all gui clean install install-gui package release lint security check test test-unit
+.PHONY: all gui clean install install-gui package release lint security check test test-unit version-check
 
 all: $(BIN)
 
@@ -417,7 +417,13 @@ security-full:
 	@echo "=== flawfinder: full security audit (level 2+) ==="
 	flawfinder --minlevel=2 --quiet $(SRCDIR)/
 
+# version-check — fail if VERSION has no matching CHANGELOG.md section.
+# Guards against shipping a binary whose version has no release notes. A
+# '-dev'/pre-release suffix in VERSION is exempt. Cheap; wired into check.
+version-check:
+	@bash ci_scripts/version_check.sh
+
 # check — run all analysis tools in sequence (useful for CI and pre-release).
-check: lint security
+check: version-check lint security
 	@echo "=== all checks passed ==="
 

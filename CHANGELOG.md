@@ -6,6 +6,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-07-15
+
+### Added
+
+- **Unit-test layer (doctest).** A new `tests/unit/` suite built on the
+  single-header [doctest](https://github.com/doctest/doctest) framework
+  covers the pure-logic modules with no BeAPI or network dependency, so it
+  runs on every target including the macOS/nix dev shell. Two suites ship:
+  `md_text_test` (20 cases) for the markdown table/HTML helpers and
+  `sse_parser_test` (14 cases) for the Anthropic SSE state machine and
+  tool-use turn-taking. `make test-unit` builds and runs them; `make test`
+  now runs the unit tests and then the functional suite in
+  `ci_scripts/test.sh` — the `make test` target CLAUDE.md documented but the
+  Makefile never actually defined.
+- **`make version-check`.** Fails if the version in `VERSION` has no matching
+  `## [x.y.z]` section in `CHANGELOG.md` (a `-dev`/pre-release suffix is
+  exempt). Wired into `make check` so CI and the release path catch a binary
+  that would advertise a version with no release notes.
+
+### Changed
+
+- **Refactor: pure logic split out for testability.** `IsTableRow`,
+  `IsSeparatorRow`, `SplitCells`, and `StripHtml` moved from the
+  BTextView-bound `md_renderer.cpp` into a new BeAPI-free `md_text.{h,cpp}`;
+  the SSE `StreamState` and `ProcessSseEvent` moved from `api.cpp`'s
+  anonymous namespace into a new `sse_parser.{h,cpp}`. Behaviour is
+  unchanged — the extractions exist so the code can be unit-tested in
+  isolation. Both the CLI and GUI link the new translation units.
+
 ## [1.11.0] - 2026-07-15
 
 ### Added
