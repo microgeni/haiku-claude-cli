@@ -90,14 +90,8 @@ existing=$(curl -s \
     -H "$API_VER_HEADER" \
     "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null || true)
 
-existing_id=$(python3 -c '
-import sys, json
-try:
-    d = json.loads(sys.stdin.read())
-    print(d.get("id", "") if isinstance(d, dict) else "")
-except Exception:
-    pass
-' <<<"$existing" 2>/dev/null || true)
+existing_id=$(jq -r 'if type == "object" then (.id // "") else "" end' \
+    <<<"$existing" 2>/dev/null || true)
 
 if [ -n "$existing_id" ]; then
     echo "Deleting previous release id=$existing_id..."
@@ -111,18 +105,17 @@ fi
 
 # ── Create the release ──
 echo "Creating GitHub release $TAG..."
-payload=$(TAG="$TAG" VERSION_NUM="$version_num" BODY="$body" python3 -c '
-import json, os
-name = "haiku-claude-cli " + os.environ["VERSION_NUM"]
-print(json.dumps({
-    "tag_name":               os.environ["TAG"],
-    "name":                   name,
-    "body":                   os.environ["BODY"],
-    "draft":                  False,
-    "prerelease":             False,
-    "make_latest":            "true",
-    "generate_release_notes": False,
-}))')
+payload=$(jq -n \
+    --arg tag  "$TAG" \
+    --arg name "haiku-claude-cli $version_num" \
+    --arg body "$body" \
+    '{tag_name: $tag,
+      name: $name,
+      body: $body,
+      draft: false,
+      prerelease: false,
+      make_latest: "true",
+      generate_release_notes: false}')
 
 resp=$(curl -sS --fail-with-body -X POST \
     -H "$AUTH_HEADER" \
@@ -132,13 +125,7 @@ resp=$(curl -sS --fail-with-body -X POST \
     -d "$payload" \
     "$API/repos/$REPO/releases" 2>&1 || true)
 
-rel_id=$(python3 -c '
-import sys, json
-try:
-    print(json.loads(sys.stdin.read()).get("id", ""))
-except Exception:
-    pass
-' <<<"$resp" 2>/dev/null || true)
+rel_id=$(jq -r '.id // ""' <<<"$resp" 2>/dev/null || true)
 
 if [ -z "$rel_id" ]; then
     echo "error: could not create GitHub release"

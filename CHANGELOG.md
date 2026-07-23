@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.4] - 2026-07-23
+
+### Fixed
+
+- **Release upload scripts no longer require python3.** The Gitea and GitHub
+  release-upload scripts used `python3` to parse API responses and build the
+  create-release JSON payload, so the release job failed with exit 127
+  (`python3: command not found`) on the runner even after the CI test symlink
+  was restored — the HPKG built fine but never uploaded. Converted all six
+  invocations (three per script) to `jq`, which is present on the runner:
+  release-id extraction now uses `jq -r`, and the JSON payload is built with
+  `jq -n --arg` (safer than the previous env-var approach — it correctly
+  escapes changelog bodies containing backticks, quotes, `$`, and newlines).
+  The entire release pipeline is now python3-independent.
+
 ## [1.12.3] - 2026-07-23
 
 ### Fixed
