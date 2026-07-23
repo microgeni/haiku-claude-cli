@@ -25,6 +25,7 @@
 #include "hooks.h"
 #include "output_sink.h"
 #include "repl.h"
+#include "sse_parser.h"
 #include "stats.h"
 #include "terminal_sink.h"
 #include "tools.h"
@@ -228,29 +229,10 @@ private:
 // Definition of the global declared extern in api.h.
 EscInterruptGuardHandle* g_active_esc_guard = nullptr;
 
-struct StreamState {
-	std::string          sse_buffer;
-	std::string          raw_buffer;
-	std::string          text;
-	std::atomic<int>     input_tokens        { 0 };
-	std::atomic<int>     output_tokens       { 0 };
-	std::atomic<int>     cache_creation_input_tokens { 0 };
-	std::atomic<int>     cache_read_input_tokens     { 0 };
-	bool                 saw_text            = false;
-	bool                 stream_error        = false;
-	std::string          stream_error_type;
-	std::string          stream_error_message;
-	OutputSink*          sink                = nullptr; // injected
-
-	// Structured content accumulation for tool-use support.
-	std::vector<json>    content_blocks;
-	std::string          current_type;
-	std::string          current_text;
-	std::string          current_tool_id;
-	std::string          current_tool_name;
-	std::string          current_tool_input_raw;
-	std::string          stop_reason;
-};
+// StreamState and ProcessSseEvent moved to sse_parser.{h,cpp} so the SSE
+// state machine can be unit-tested without a live connection. Included via
+// api.h below; the anonymous-namespace callbacks here (HeaderCallback,
+// StreamWriteCallback) still drive it.
 
 size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* /*userp*/) {
 	const size_t total = size * nitems;
@@ -271,116 +253,6 @@ size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* /*userp*/)
 	}
 	g_last_rate_headers[name] = value;
 	return total;
-}
-
-void ProcessSseEvent(const std::string& event, StreamState* state) {
-	std::string data;
-	std::istringstream iss(event);
-	std::string line;
-	while (std::getline(iss, line)) {
-		if (!line.empty() && line.back() == '\r') line.pop_back();
-		if (line.rfind("data:", 0) != 0) continue;
-		std::string payload = line.substr(5);
-		if (!payload.empty() && payload.front() == ' ') payload.erase(0, 1);
-		if (!data.empty()) data += '\n';
-		data += payload;
-	}
-	if (data.empty()) return;
-
-	try {
-		const json j = json::parse(data);
-		const std::string type = j.value("type", "");
-
-		if (type == "content_block_start") {
-			const auto& cb = j.value("content_block", json::object());
-			state->current_type = cb.value("type", std::string{});
-			state->current_text.clear();
-			state->current_tool_id.clear();
-			state->current_tool_name.clear();
-			state->current_tool_input_raw.clear();
-			if (state->current_type == "tool_use") {
-				state->current_tool_id   = cb.value("id",   std::string{});
-				state->current_tool_name = cb.value("name", std::string{});
-			}
-		} else if (type == "content_block_delta") {
-			const auto& delta = j.value("delta", json::object());
-			const std::string dtype = delta.value("type", std::string{});
-			if (dtype == "text_delta") {
-				const std::string chunk = delta.value("text", "");
-				if (state->sink) state->sink->OnText(chunk);
-				state->current_text += chunk;
-				state->text += chunk;
-				state->saw_text = true;
-			} else if (dtype == "input_json_delta") {
-				state->current_tool_input_raw += delta.value("partial_json", "");
-			}
-		} else if (type == "content_block_stop") {
-			if (state->current_type == "text") {
-				state->content_blocks.push_back({
-					{"type", "text"},
-					{"text", state->current_text},
-				});
-			} else if (state->current_type == "tool_use") {
-				json parsed_input = json::object();
-				try {
-					if (!state->current_tool_input_raw.empty()) {
-						parsed_input = json::parse(state->current_tool_input_raw);
-					}
-				} catch (const json::exception&) {
-					parsed_input = json::object();
-				}
-				state->content_blocks.push_back({
-					{"type",  "tool_use"},
-					{"id",    state->current_tool_id},
-					{"name",  state->current_tool_name},
-					{"input", parsed_input},
-				});
-			}
-			state->current_type.clear();
-		} else if (type == "message_start") {
-			// Intentionally leave the spinner running — we want the
-			// "(elapsed · ↑ N tokens)" tail to render during the
-			// window between prompt ingestion and the first
-			// text_delta. MarkdownRenderer::Write() stops the
-			// spinner on first real output.
-			if (j.contains("message") && j["message"].contains("usage")) {
-				const auto& u = j["message"]["usage"];
-				state->input_tokens.store(u.value("input_tokens",  0),
-										  std::memory_order_relaxed);
-				state->output_tokens.store(u.value("output_tokens", 0),
-										   std::memory_order_relaxed);
-				state->cache_creation_input_tokens.store(
-					u.value("cache_creation_input_tokens", 0),
-					std::memory_order_relaxed);
-				state->cache_read_input_tokens.store(
-					u.value("cache_read_input_tokens", 0),
-					std::memory_order_relaxed);
-			}
-		} else if (type == "message_delta") {
-			if (j.contains("delta") && j["delta"].contains("stop_reason")
-				&& j["delta"]["stop_reason"].is_string()) {
-				state->stop_reason = j["delta"]["stop_reason"].get<std::string>();
-			}
-			if (j.contains("usage")) {
-				const auto& u = j["usage"];
-				state->output_tokens.store(
-					u.value("output_tokens",
-							state->output_tokens.load(std::memory_order_relaxed)),
-					std::memory_order_relaxed);
-			}
-		} else if (type == "error") {
-			state->stream_error = true;
-			if (j.contains("error") && j["error"].is_object()) {
-				const auto& e = j["error"];
-				if (e.contains("type") && e["type"].is_string())
-					state->stream_error_type = e["type"].get<std::string>();
-				if (e.contains("message") && e["message"].is_string())
-					state->stream_error_message = e["message"].get<std::string>();
-			}
-		}
-	} catch (const json::exception&) {
-		// Ignore partial/invalid payloads (e.g. ping events).
-	}
 }
 
 size_t StreamWriteCallback(char* data, size_t size, size_t nmemb, void* userp) {
