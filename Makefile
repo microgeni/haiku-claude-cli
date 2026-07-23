@@ -71,6 +71,9 @@ GUI_ONLY_SRCS := \
     $(SRCDIR)/gui_views.cpp         \
     $(SRCDIR)/settings_dialog.cpp   \
     $(SRCDIR)/chat_window.cpp       \
+    $(SRCDIR)/chat_window_find.cpp  \
+    $(SRCDIR)/chat_window_sessions.cpp \
+    $(SRCDIR)/chat_window_prefs.cpp \
     $(SRCDIR)/app_main_gui.cpp
 
 _ALL_SRCS := $(wildcard $(SRCDIR)/*.cpp)
@@ -165,6 +168,9 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/telegram.cpp          \
     $(SRCDIR)/tool_bar.cpp          \
     $(SRCDIR)/chat_window.cpp       \
+    $(SRCDIR)/chat_window_find.cpp  \
+    $(SRCDIR)/chat_window_sessions.cpp \
+    $(SRCDIR)/chat_window_prefs.cpp \
     $(SRCDIR)/app_main_gui.cpp
 
 GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
