@@ -93,6 +93,15 @@ the edited line. It activates only when launched from Genio — a directly
 launched GUI and the CLI are unaffected. Setup is one wrapper script; see
 [`contrib/genio/`](contrib/genio/).
 
+### Talk to Claude from your own app — the `'ASKP'` IPC
+
+The same door Genio uses is open to any application. Send the desktop app
+an `'ASKP'` `BMessage` (or launch it with `--prompt` / `--working-dir` /
+`--send`) to open a scoped chat window, pre-fill the input box, and
+optionally auto-submit — from an editor, a script, or a Tracker add-on.
+The message `what` and app signature are a stable public contract; the
+full protocol is documented in [`docs/IPC.md`](docs/IPC.md).
+
 ---
 
 ## Features
@@ -283,6 +292,7 @@ key is optional; CLI flags override the file.
 {
   "model":      "claude-sonnet-4-6",
   "max_tokens": 8192,
+  "history_max_messages": 200,
   "system":     "Extra system instructions appended after the preamble.",
   "show_usage": false,
 

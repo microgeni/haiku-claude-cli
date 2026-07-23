@@ -69,6 +69,11 @@
 #include "paths.h"
 #include "session_store.h"
 #include "telegram.h"
+#include "transcript_export.h"
+#include "gui_widgets.h"
+#include "gui_scale.h"
+#include "gui_colors.h"
+#include "diagnostics.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -77,32 +82,11 @@
 // ---------------------------------------------------------------------------
 namespace {
 
-// ---------------------------------------------------------------------------
-// HiDPI scaling. Haiku does not expose a monitor DPI directly; instead the
-// system font size grows on high-resolution displays (12pt is the 1x
-// baseline). Deriving a scale factor from be_plain_font lets every hard-coded
-// pixel dimension track the display so dialogs, buttons, bars and icons stay
-// proportional on HiDPI screens. Mirrors the be_control_look convention.
-// ---------------------------------------------------------------------------
-float
-gui_scale()
-{
-	const float base = be_plain_font ? be_plain_font->Size() : 12.0f;
-	const float s    = base / 12.0f;
-	// Clamp so an oddly configured font never produces an unusable window.
-	if (s < 1.0f) return 1.0f;
-	if (s > 4.0f) return 4.0f;
-	return s;
-}
-
-// Scale a 1x pixel measurement to the current display, rounded up so we
-// never lose a pixel that would clip glyphs. Named ScalePx (not Scale)
-// because BView::Scale() already exists and would shadow a free Scale().
-float
-ScalePx(float px)
-{
-	return std::ceil(px * gui_scale());
-}
+// HiDPI scaling helpers moved to gui_scale.{h,cpp} (shared with the
+// extracted widget/dialog units). Thin file-local aliases keep the many
+// unqualified gui_scale()/ScalePx() call sites in this file unchanged.
+float gui_scale() { return gui::Scale(); }
+float ScalePx(float px) { return gui::ScalePx(px); }
 
 // Standard RFC 4648 base64 encoder (not URL-safe — the Anthropic image
 // API wants '+' / '/' with '=' padding). Used to embed dropped image
@@ -150,322 +134,13 @@ std::string ImageMediaType(const std::string& path)
 	return {};
 }
 
-// ChoiceModal — a small modal window presenting one button per option,
-// used by AskChoice when there are more than three options (BAlert caps
-// at three buttons). Runs its own nested event loop via a semaphore so
-// the calling code blocks until the user picks or closes the window.
-//
-// Returns the 0-based index of the chosen option, or -1 if the window is
-// closed without a selection.
-class ChoiceModal : public BWindow {
-public:
-	ChoiceModal(const std::string& prompt,
-	            const std::vector<std::string>& options)
-		: BWindow(BRect(0, 0, 360, 100), "Choose",
-		          B_MODAL_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
-		          B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
-		  fDoneSem(create_sem(0, "choice_modal"))
-	{
-		BStringView* label = new BStringView("prompt", prompt.c_str());
-		label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+// ChoiceModal, SessionItem, RenameModal, SessionListView, and NotifySlider
+// moved to gui_widgets.{h,cpp} — self-contained helper widgets that talk to
+// the window only via gui::MSG_* codes. Included through chat_window.h.
 
-		BLayoutBuilder::Group<> builder(this, B_VERTICAL, B_USE_SMALL_SPACING);
-		builder.SetInsets(B_USE_WINDOW_SPACING);
-		builder.Add(label);
-		BButton* first = nullptr;
-		for (size_t i = 0; i < options.size(); ++i) {
-			BMessage* m = new BMessage('CHpk');
-			m->AddInt32("index", static_cast<int32>(i));
-			BButton* b = new BButton("opt", options[i].c_str(), m);
-			b->SetTarget(this);
-			if (i == 0) first = b;
-			builder.Add(b);
-		}
-
-		// Keyboard a11y: Enter activates the first option, Esc cancels.
-		if (first) {
-			first->MakeDefault(true);
-			first->MakeFocus(true);
-		}
-		AddShortcut(B_ESCAPE, 0, new BMessage('CHcl'));
-		CenterOnScreen();
-	}
-
-	~ChoiceModal() override { delete_sem(fDoneSem); }
-
-	void MessageReceived(BMessage* msg) override
-	{
-		if (msg->what == 'CHpk') {
-			int32 idx = -1;
-			msg->FindInt32("index", &idx);
-			fResult = idx;
-			_Finish();
-			return;
-		}
-		if (msg->what == 'CHcl') {   // Esc — cancel
-			fResult = -1;
-			_Finish();
-			return;
-		}
-		BWindow::MessageReceived(msg);
-	}
-
-	bool QuitRequested() override
-	{
-		// Closing the window without a pick counts as cancel.
-		_Finish();
-		return true;
-	}
-
-	// Show the window and block until a choice is made or it is closed.
-	int Go()
-	{
-		Show();
-		// Block the caller (worker-thread context via the window's
-		// MessageReceived dispatch happens on this window's thread, so
-		// we wait on the semaphore here and let the looper run).
-		acquire_sem(fDoneSem);
-		const int r = fResult;
-		if (Lock()) Quit();   // tears down the window + looper
-		return r;
-	}
-
-private:
-	// Release the wait semaphore exactly once, however the modal ends
-	// (button, Esc, or window close).
-	void _Finish()
-	{
-		if (!fFinished) {
-			fFinished = true;
-			release_sem(fDoneSem);
-		}
-	}
-
-	sem_id fDoneSem;
-	int    fResult   = -1;
-	bool   fFinished = false;
-};
-
-// SessionItem — a BStringItem that remembers the .session file path so
-// the sidebar can load or delete the file behind a selected row.
-class SessionItem : public BStringItem {
-public:
-	SessionItem(const std::string& label, const std::string& path,
-	            const std::string& title)
-		: BStringItem(label.c_str()), fPath(path), fTitle(title) {}
-	const std::string& Path()  const { return fPath; }
-	const std::string& Title() const { return fTitle; }
-private:
-	std::string fPath;
-	std::string fTitle;   // raw title (no "  (N)" turn-count suffix)
-};
-
-// RenameModal — a tiny modal prompt with a single text field, used to
-// rename a saved session. Blocks on a semaphore (same pattern as
-// ChoiceModal) and returns the entered text, or empty on cancel.
-class RenameModal : public BWindow {
-public:
-	RenameModal(const std::string& current)
-		: BWindow(BRect(0, 0, 320, 90), "Rename Session",
-		          B_MODAL_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
-		          B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
-		  fDoneSem(create_sem(0, "rename_modal"))
-	{
-		fField = new BTextControl("name", nullptr, current.c_str(),
-		                          new BMessage('RNok'));
-		fField->SetTarget(this);
-		BButton* ok     = new BButton("ok", "Rename", new BMessage('RNok'));
-		BButton* cancel = new BButton("cancel", "Cancel", new BMessage('RNcl'));
-		ok->MakeDefault(true);
-
-		BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
-			.SetInsets(B_USE_WINDOW_SPACING)
-			.Add(fField)
-			.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-				.AddGlue()
-				.Add(cancel)
-				.Add(ok)
-			.End()
-		.End();
-
-		AddShortcut(B_ESCAPE, 0, new BMessage('RNcl'));
-		CenterOnScreen();
-	}
-
-	~RenameModal() override { delete_sem(fDoneSem); }
-
-	void Show() override
-	{
-		BWindow::Show();
-		if (Lock()) {
-			fField->MakeFocus(true);
-			if (BTextView* tv = fField->TextView()) tv->SelectAll();
-			Unlock();
-		}
-	}
-
-	void MessageReceived(BMessage* msg) override
-	{
-		if (msg->what == 'RNok') {
-			if (const char* t = fField->Text()) fResult = t;
-			_Finish();
-			return;
-		}
-		if (msg->what == 'RNcl') { fResult.clear(); _Finish(); return; }
-		BWindow::MessageReceived(msg);
-	}
-
-	bool QuitRequested() override { _Finish(); return true; }
-
-	// Show modally and return the entered name (empty = cancelled).
-	std::string Go()
-	{
-		Show();
-		acquire_sem(fDoneSem);
-		const std::string r = fResult;
-		if (Lock()) Quit();
-		return r;
-	}
-
-private:
-	void _Finish()
-	{
-		if (!fFinished) { fFinished = true; release_sem(fDoneSem); }
-	}
-
-	BTextControl* fField    = nullptr;
-	sem_id        fDoneSem;
-	std::string   fResult;
-	bool          fFinished = false;
-};
-
-// SessionListView — BListView that pops a right-click context menu
-// (Rename / Open / Delete) on the row under the cursor. The menu items
-// post the existing sidebar messages to the window, so the handlers are
-// shared with the New/Open/Delete buttons.
-class SessionListView : public BListView {
-public:
-	SessionListView(const char* name, BHandler* target)
-		: BListView(name, B_MULTIPLE_SELECTION_LIST), fTarget(target) {}
-
-	void MouseDown(BPoint where) override
-	{
-		uint32 buttons = 0;
-		if (Window()) {
-			BMessage* msg = Window()->CurrentMessage();
-			if (msg) msg->FindInt32("buttons", reinterpret_cast<int32*>(&buttons));
-		}
-
-		if (buttons & B_SECONDARY_MOUSE_BUTTON) {
-			const int32 idx = IndexOf(where);
-			if (idx < 0) { BListView::MouseDown(where); return; }
-			// Right-clicking a row that isn't part of the current
-			// selection makes it the sole selection (Tracker-like).
-			if (!IsItemSelected(idx)) Select(idx);
-
-			BPopUpMenu* menu = new BPopUpMenu("ctx", false, false);
-			menu->AddItem(new BMenuItem("Rename\xE2\x80\xA6",
-				new BMessage(gui::MSG_SESSION_RENAME)));
-			menu->AddItem(new BMenuItem("Open",
-				new BMessage(gui::MSG_SESSION_SELECT)));
-			menu->AddSeparatorItem();
-			menu->AddItem(new BMenuItem("Delete",
-				new BMessage(gui::MSG_SESSION_DELETE)));
-			menu->SetTargetForItems(fTarget);
-
-			BPoint screenPt = where;
-			ConvertToScreen(&screenPt);
-			menu->Go(screenPt, true, true, true);
-			return;
-		}
-		BListView::MouseDown(where);
-	}
-
-private:
-	BHandler* fTarget = nullptr;
-};
-
-// Slider for the notification delay. Snaps to 10-second steps and shows a
-// plain-English label ("Notify is disabled" / "Notify after 30s") that
-// updates live as the thumb moves.
-class NotifySlider : public BSlider {
-public:
-	NotifySlider(const char* name, const char* label, BMessage* message,
-	             int32 minValue, int32 maxValue)
-		: BSlider(name, label, message, minValue, maxValue, B_HORIZONTAL)
-	{
-	}
-
-	// Attach a left-aligned label that mirrors the slider value.
-	void SetValueLabel(BStringView* label)
-	{
-		fLabel = label;
-		_UpdateLabel();
-	}
-
-	// Round every value change to the nearest 10 seconds.
-	virtual void SetValue(int32 value) override
-	{
-		int32 snapped = ((value + 5) / 10) * 10;
-		BSlider::SetValue(snapped);
-		_UpdateLabel();
-	}
-
-	// Suppress the slider's built-in right-aligned value text; the
-	// dedicated left-aligned BStringView shows the value instead.
-	virtual const char* UpdateText() const override
-	{
-		return nullptr;
-	}
-
-	// Render a notify delay (in seconds) as a friendly phrase:
-	//   0   -> "Notify is disabled"
-	//   30  -> "Notify after 30s"
-	//   60  -> "Notify after 1 minute"
-	//   90  -> "Notify after 1 min 30s"
-	//   120 -> "Notify after 2 minutes"
-	static void FormatNotifyDelay(int32 seconds, char* out, size_t outSize)
-	{
-		if (seconds <= 0) {
-			std::snprintf(out, outSize, "Notify is disabled");
-			return;
-		}
-		const int mins = static_cast<int>(seconds) / 60;
-		const int secs = static_cast<int>(seconds) % 60;
-		if (mins == 0)
-			std::snprintf(out, outSize, "Notify after %ds", secs);
-		else if (secs == 0)
-			std::snprintf(out, outSize, "Notify after %d %s",
-			              mins, mins == 1 ? "minute" : "minutes");
-		else
-			std::snprintf(out, outSize, "Notify after %d min %ds", mins, secs);
-	}
-
-private:
-	void _UpdateLabel()
-	{
-		if (!fLabel) return;
-		char text[40];
-		FormatNotifyDelay(Value(), text, sizeof(text));
-		fLabel->SetText(text);
-	}
-
-	BStringView* fLabel = nullptr;
-};
-
-// Output area colours (always dark regardless of system theme).
-const rgb_color kColorChatBg      = {  24,  24,  28, 255 };
-const rgb_color kColorText        = { 215, 215, 220, 255 };
-const rgb_color kColorUserLabel   = {  86, 180, 233, 255 };
-const rgb_color kColorModelLabel  = { 204, 121,  90, 255 };
-const rgb_color kColorToolLine    = { 130, 130, 140, 255 };
-const rgb_color kColorError       = { 230,  75,  75, 255 };
-const rgb_color kColorDiffAdd     = {  80, 200,  80, 255 }; // green  — added lines
-const rgb_color kColorDiffRemove  = { 220,  80,  80, 255 }; // red    — removed lines
-const rgb_color kColorDiffHeader  = { 140, 180, 220, 255 }; // steel-blue — diff header/meta
-// Cyan used for the input text, echoing the CLI's cyan "you>" prompt.
-// Bright cyan that pops on the dark input background (kColorChatBg).
-const rgb_color kColorInputCyan   = {  60, 200, 215, 255 };
+// The chat output palette (kColor*) moved to gui_colors.h so the extracted
+// view classes share the exact same constants. Included at the top of this
+// file; the names are unchanged.
 
 // Known Anthropic models listed in the model picker.
 // Fallback model list shown in the picker until the live /v1/models fetch
@@ -516,657 +191,17 @@ void AppendWithColor(BTextView* view, const std::string& text, rgb_color color,
 
 
 // ===========================================================================
-// InputView
+// InputView, InputContainer, ChatTextView, TokenBar, and WelcomeView moved to
+// gui_views.{h,cpp} — custom views decoupled from ChatWindow (they talk to the
+// window only via gui::MSG_* codes). Declarations included through
+// chat_window.h.
 // ===========================================================================
-
-InputView::InputView(const char* name)
-	: BTextView(BRect(0, 0, 200, 24), name,
-	            BRect(4, 4, 196, 20),
-	            B_FOLLOW_ALL, B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS)
-{
-	SetWordWrap(true);
-	SetStylable(false);
-}
-
-void InputView::AttachedToWindow()
-{
-	BTextView::AttachedToWindow();
-	// Match the dark chat area so the cyan input text pops like the
-	// CLI's bright-cyan-on-dark prompt.
-	SetViewColor(kColorChatBg);
-	SetLowColor(kColorChatBg);
-	SetHighColor(kColorInputCyan);
-	// A slightly larger font than the default for comfortable typing.
-	BFont f(be_plain_font);
-	f.SetSize(f.Size() + 1.0f);
-	SetFontAndColor(&f, B_FONT_ALL, &kColorInputCyan);
-	// Set text rect now that we have a real frame.
-	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-}
-
-void InputView::Draw(BRect updateRect)
-{
-	BTextView::Draw(updateRect);
-	// Draw placeholder text when empty and unfocused.
-	if (TextLength() == 0 && !fFocused)
-		_DrawPlaceholder();
-	// Draw focus ring.
-	if (fFocused) {
-		SetHighColor(ui_color(B_KEYBOARD_NAVIGATION_COLOR));
-		StrokeRect(Bounds().InsetByCopy(-1, -1));
-	}
-	// Draw drop-target highlight when a file is dragged over.
-	if (fDropTarget) {
-		SetHighColor(ui_color(B_KEYBOARD_NAVIGATION_COLOR));
-		SetPenSize(2.0f);
-		StrokeRect(Bounds().InsetByCopy(1, 1));
-		SetPenSize(1.0f);
-	}
-}
-
-void InputView::MouseMoved(BPoint /*where*/, uint32 transit,
-                            const BMessage* drag)
-{
-	const bool wasDrop = fDropTarget;
-	if (drag != nullptr) {
-		fDropTarget = (transit == B_ENTERED_VIEW || transit == B_INSIDE_VIEW);
-	} else {
-		fDropTarget = false;
-	}
-	if (fDropTarget != wasDrop) Invalidate();
-}
-
-void InputView::_DrawPlaceholder()
-{
-	const char* placeholder = "Message Claude\xE2\x80\xA6"; // ellipsis
-	BFont f;
-	GetFont(&f);
-	// Dim gray that reads on the dark input background (matches the
-	// chat's muted tool-line colour).
-	SetHighColor(kColorToolLine);
-	BPoint pen(TextRect().left, TextRect().top + f.Size());
-	DrawString(placeholder, pen);
-	// Restore the cyan typing colour so it isn't left as the dim gray.
-	SetHighColor(kColorInputCyan);
-}
-
-void InputView::MakeFocus(bool focused)
-{
-	BTextView::MakeFocus(focused);
-	fFocused = focused;
-	Invalidate();
-}
-
-void InputView::KeyDown(const char* bytes, int32 numBytes)
-{
-	if (numBytes == 1) {
-		if (bytes[0] == B_ENTER || bytes[0] == B_RETURN) {
-			// Shift+Enter → insert a newline; plain Enter → send.
-			BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr;
-			int32 modifiers = 0;
-			if (cur) cur->FindInt32("modifiers", &modifiers);
-			if (modifiers & B_SHIFT_KEY) {
-				Insert("\n");
-			} else {
-				if (Window()) Window()->PostMessage(gui::MSG_SEND);
-			}
-			return;
-		}
-		if (bytes[0] == B_ESCAPE) {
-			if (Window()) Window()->PostMessage(gui::MSG_CANCEL);
-			return;
-		}
-		// Up/Down → prompt history, but only at the text boundaries so a
-		// multi-line draft can still be navigated with the arrows. On Haiku
-		// the arrow keys arrive as single bytes (B_UP_ARROW / B_DOWN_ARROW),
-		// not a VT escape sequence.
-		if (bytes[0] == B_UP_ARROW || bytes[0] == B_DOWN_ARROW) {
-			int32 selStart = 0, selEnd = 0;
-			GetSelection(&selStart, &selEnd);
-			const int32 curLine  = LineAt(selStart);
-			const int32 lastLine = CountLines() - 1;
-			if (bytes[0] == B_UP_ARROW && curLine == 0) {
-				_HistoryUp();
-				return;
-			}
-			if (bytes[0] == B_DOWN_ARROW && curLine == lastLine) {
-				_HistoryDown();
-				return;
-			}
-			// Otherwise fall through to normal cursor movement.
-		}
-	}
-
-	BTextView::KeyDown(bytes, numBytes);
-
-	Invalidate();
-}
-
-void InputView::FrameResized(float w, float h)
-{
-	BTextView::FrameResized(w, h);
-	SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-}
-
-// ===========================================================================
-// InputContainer — Genio TerminalTab-style host (see TerminalTab.cpp). A
-// plain B_FOLLOW_ALL BView with no size overrides claims layout space (its
-// default unlimited max lets the layout stretch it); the real content is an
-// AddChild'd scroll view that the container resizes to fill itself on every
-// frame change.
-// ===========================================================================
-
-InputContainer::InputContainer(const char* name)
-	: BView(name, B_FRAME_EVENTS | B_WILL_DRAW)
-{
-	SetResizingMode(B_FOLLOW_ALL);
-	// Use the dark chat background (not panel gray) so any sub-pixel gap
-	// between the scroll view and the container edges blends with the input
-	// instead of showing a gray strip.
-	SetViewColor(kColorChatBg);
-	SetLowColor(kColorChatBg);
-}
-
-void InputContainer::SetContent(BView* content, float minHeight)
-{
-	fContent   = content;
-	fMinHeight = minHeight;
-	if (fContent == nullptr)
-		return;
-	// The content is positioned/sized manually (not by a layout), exactly
-	// like TerminalTab's terminal view.
-	fContent->SetResizingMode(B_FOLLOW_NONE);
-	fContent->SetExplicitMinSize(BSize(48.0f, minHeight));
-	fContent->SetExplicitPreferredSize(BSize(48.0f, minHeight));
-	fContent->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-	AddChild(fContent);
-	// Pin the container's own height so the bottom bar is exactly the input
-	// row height. Min and preferred sit at minHeight; max is unlimited in
-	// height so the host absorbs any leftover row height (from the button
-	// column's spacing/insets) and the dark input reaches the window's
-	// bottom edge with no gray dead strip.
-	SetExplicitMinSize(BSize(48.0f, minHeight));
-	SetExplicitPreferredSize(BSize(B_SIZE_UNLIMITED, minHeight));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-}
-
-void InputContainer::AttachedToWindow()
-{
-	BView::AttachedToWindow();
-	if (fContent != nullptr) {
-		BRect b = Bounds();
-		fContent->MoveTo(0, 0);
-		fContent->ResizeTo(b.Width(), b.Height());
-	}
-}
-
-void InputContainer::FrameResized(float w, float h)
-{
-	if (fContent != nullptr)
-		fContent->ResizeTo(w, h);
-	BView::FrameResized(w, h);
-	// A divider drag resizes this container but does NOT fire the window's
-	// FrameResized, so the sibling button column can be left un-repainted and
-	// appear to vanish. Invalidate the parent (the input bar) so every sibling
-	// — including the Send/Stop/Clear buttons — is redrawn on each drag tick.
-	if (BView* parent = Parent())
-		parent->Invalidate();
-}
-
-void InputView::SetEnabled(bool enabled)
-{
-	fEnabled = enabled;
-	MakeEditable(enabled);
-	// Stay on the dark chat-matching background; dim it slightly while
-	// disabled (during a turn) so the state is still legible. Do NOT
-	// fall back to the light B_DOCUMENT_BACKGROUND_COLOR — that would
-	// undo the dark unified look after the first turn.
-	const rgb_color bg = enabled
-		? kColorChatBg
-		: tint_color(kColorChatBg, B_LIGHTEN_1_TINT);
-	SetViewColor(bg);
-	SetLowColor(bg);
-	Invalidate();
-}
-
-void InputView::PushHistory(const std::string& text)
-{
-	if (text.empty()) return;
-	// Avoid duplicating the most-recent entry.
-	if (!fHistory.empty() && fHistory.back() == text) return;
-	fHistory.push_back(text);
-	fHistIdx = -1;
-}
-
-void InputView::LoadHistory(const std::string& path)
-{
-	std::ifstream f(path);
-	if (!f.is_open()) return;
-	std::string line;
-	while (std::getline(f, line))
-		if (!line.empty()) fHistory.push_back(line);
-}
-
-void InputView::SaveHistory(const std::string& path) const
-{
-	std::ofstream f(path, std::ios::trunc);
-	if (!f.is_open()) return;
-	// Write at most the last 200 entries.
-	const size_t start = fHistory.size() > 200 ? fHistory.size() - 200 : 0;
-	for (size_t i = start; i < fHistory.size(); ++i)
-		f << fHistory[i] << '\n';
-}
-
-void InputView::ClearHistory()
-{
-	fHistory.clear();
-	fHistIdx = -1;
-	fDraft.clear();
-}
-
-void InputView::_HistoryUp()
-{
-	if (fHistory.empty()) return;
-	if (fHistIdx == -1) {
-		// Save current draft.
-		fDraft   = std::string(Text(), static_cast<size_t>(TextLength()));
-		fHistIdx = static_cast<int>(fHistory.size()) - 1;
-	} else if (fHistIdx > 0) {
-		--fHistIdx;
-	}
-	SetText(fHistory[static_cast<size_t>(fHistIdx)].c_str());
-	Select(TextLength(), TextLength());
-}
-
-void InputView::_HistoryDown()
-{
-	if (fHistIdx == -1) return;
-	++fHistIdx;
-	if (fHistIdx >= static_cast<int>(fHistory.size())) {
-		fHistIdx = -1;
-		SetText(fDraft.c_str());
-	} else {
-		SetText(fHistory[static_cast<size_t>(fHistIdx)].c_str());
-	}
-	Select(TextLength(), TextLength());
-}
 
 
 // ===========================================================================
-// TokenBar
-// ===========================================================================
-
-TokenBar::TokenBar()
-	: BView("tokenbar", B_WILL_DRAW)
-{
-	// Height = one line of plain-font text plus a small fixed padding. The
-	// bar only draws a single row of text (usage label + stats), so it does
-	// not need the full control-look item spacing that made it look like it
-	// had an unused extra row.
-	font_height fh;
-	be_plain_font->GetHeight(&fh);
-	float height = std::ceil(fh.ascent + fh.descent + fh.leading) + ScalePx(6.0f);
-	// Pin a small explicit min WIDTH (not B_SIZE_UNSET): a custom BView with an
-	// unset min width reports its current frame width as the minimum, which at
-	// the initial window size latches the whole chat column — and thus the
-	// window — to a huge minimum width, letting the bottom input bar overflow
-	// and clip its buttons. A small min lets the bar and window shrink freely.
-	SetExplicitMinSize(BSize(ScalePx(40), height));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, height));
-	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
-}
-
-void TokenBar::Draw(BRect updateRect)
-{
-	BRect r = Bounds();
-	const float filled = (fMax > 0)
-		? std::min(1.0f, static_cast<float>(fUsed) / static_cast<float>(fMax))
-		: 0.0f;
-
-	// Background track.
-	SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_DARKEN_2_TINT));
-	FillRect(r);
-
-	// Filled bar — colour transitions green → amber → red.
-	rgb_color barColor;
-	if (filled < 0.6f)      barColor = {  80, 200, 120, 255 }; // green
-	else if (filled < 0.85f) barColor = { 230, 170,  50, 255 }; // amber
-	else                     barColor = { 220,  60,  60, 255 }; // red
-
-	BRect fill = r;
-	fill.right = r.left + r.Width() * filled;
-	SetHighColor(barColor);
-	FillRect(fill);
-
-	// Top border drawn the Genio/GlobalStatusView way: a control-look border
-	// on the top edge instead of a hand-stroked divider line, so it matches
-	// the system look and the toolbar/menu separators.
-	be_control_look->DrawBorder(this, r, updateRect,
-		ui_color(B_PANEL_BACKGROUND_COLOR),
-		B_PLAIN_BORDER, 0, BControlLook::B_TOP_BORDER);
-
-	// Label "42,100 / 200k  (21%)".
-	auto commaNum = [](int v) -> std::string {
-		std::string s   = std::to_string(v);
-		const int  len  = static_cast<int>(s.size());
-		int        ins  = len - 3;
-		while (ins > 0) { s.insert(static_cast<size_t>(ins), ","); ins -= 3; }
-		return s;
-	};
-	auto shortK = [](int v) -> std::string {
-		if (v >= 1000) return std::to_string(v / 1000) + "k";
-		return std::to_string(v);
-	};
-
-	const std::string pct  = std::to_string(static_cast<int>(filled * 100.0f + 0.5f)) + "%";
-	const std::string lbl  = commaNum(fUsed) + " / " + shortK(fMax) + "  (" + pct + ")";
-
-	// Track the system font but render the label two points smaller: the
-	// token bar is a compact status strip, so a slightly smaller size than
-	// be_plain_font reads better while still scaling with the system font
-	// on HiDPI displays.
-	BFont f(be_plain_font);
-	f.SetSize(f.Size() - 2.0f);
-	SetFont(&f);
-	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-
-	// Vertically centre the text in the bar: place the baseline so that the
-	// ascent/descent block is centred within the view's height.
-	font_height fh;
-	f.GetHeight(&fh);
-	const float textH    = fh.ascent + fh.descent;
-	const float baseline = std::floor((r.Height() - textH) / 2.0f + fh.ascent);
-
-	const float lblW    = f.StringWidth(lbl.c_str());
-	const float lblLeft = std::floor(r.right - lblW - ScalePx(8.0f));
-	// The context-window label is the priority indicator, so draw it first
-	// and reserve its space; the left-aligned stats yield to it.
-	MovePenTo(lblLeft, baseline);
-	DrawString(lbl.c_str());
-
-	// Left-aligned per-session stats, mirroring the CLI status row:
-	// "turn N · ↑ 1.2k · ↓ 420 · $0.0123".
-	std::string stats =
-		"turn " + std::to_string(fTurn)
-		+ "  \xC2\xB7  \xE2\x86\x91 " + models::CompactTokens(fInput)
-		+ "  \xC2\xB7  \xE2\x86\x93 " + models::CompactTokens(fOutput);
-	if (fPriceIn > 0.0 || fPriceOut > 0.0) {
-		const double cost = (fInput  / 1'000'000.0) * fPriceIn
-		                  + (fOutput / 1'000'000.0) * fPriceOut;
-		char costBuf[32];
-		std::snprintf(costBuf, sizeof(costBuf), "  \xC2\xB7  $%.4f", cost);
-		stats += costBuf;
-	}
-
-	// When ludicrous mode is on, draw a yellow "⚡ LUDICROUS" badge at the
-	// far left so the auto-approve state is always visible, mirroring the
-	// CLI status bar. The session stats start after the badge(s).
-	float statsLeft = r.left + ScalePx(4.0f);
-	const std::string sep = "  \xC2\xB7  ";
-	if (fLudicrous) {
-		const std::string badge = "\xE2\x9A\xA1 LUDICROUS";
-		SetHighColor(230, 170, 50, 255); // amber, matches the bar's warning tone
-		MovePenTo(statsLeft, baseline);
-		DrawString(badge.c_str());
-		statsLeft += f.StringWidth(badge.c_str()) + f.StringWidth(sep.c_str());
-		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-	}
-	if (fRemote) {
-		const std::string badge = "\xF0\x9F\x93\xA1 REMOTE"; // 📡
-		SetHighColor(80, 200, 80, 255); // green, matching the CLI's "Remote Control active"
-		MovePenTo(statsLeft, baseline);
-		DrawString(badge.c_str());
-		statsLeft += f.StringWidth(badge.c_str()) + f.StringWidth(sep.c_str());
-		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-	}
-
-	// Only draw the stats if they fit to the left of the context-window label
-	// without overlapping it (leave an 8px gutter between the two). When the
-	// window is narrow the stats are dropped rather than overdrawing the
-	// always-important "x / 200k (n%)" indicator.
-	const float statsWidth = f.StringWidth(stats.c_str());
-	if (statsLeft + statsWidth + ScalePx(8.0f) <= lblLeft) {
-		MovePenTo(statsLeft, baseline);
-		DrawString(stats.c_str());
-	}
-}
-
-void TokenBar::SetPrice(double inputPerM, double outputPerM)
-{
-	fPriceIn  = inputPerM;
-	fPriceOut = outputPerM;
-	Invalidate();
-}
-
-void TokenBar::SetStats(int turn, int sessionInput, int sessionOutput)
-{
-	fTurn   = turn;
-	fInput  = sessionInput;
-	fOutput = sessionOutput;
-	Invalidate();
-}
-
-void TokenBar::SetTokens(int used, int maxCtx)
-{
-	fUsed = used;
-	if (maxCtx > 0) fMax = maxCtx;
-	Invalidate();
-}
-
-void TokenBar::SetLudicrous(bool on)
-{
-	if (fLudicrous == on) return;
-	fLudicrous = on;
-	Invalidate();
-}
-
-void TokenBar::SetRemote(bool on)
-{
-	if (fRemote == on) return;
-	fRemote = on;
-	Invalidate();
-}
-
-
-// ===========================================================================
-// SettingsDialog
-// ===========================================================================
-
-SettingsDialog::SettingsDialog(BWindow* parent, const std::string& systemPrompt,
-                               int maxTokens, int notifyMinSec,
-                               const std::string& workingDir,
-                               BMenuField* modelField)
-	: BWindow(BRect(0, 0, ScalePx(640), ScalePx(480)), "Settings",
-	          B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
-	          B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
-	  fParent(parent)
-{
-	_BuildLayout(systemPrompt, maxTokens, notifyMinSec, workingDir, modelField);
-	// Give the window a sensible default size: wide enough to read a full
-	// working-directory path, then center it. AUTO_UPDATE_SIZE_LIMITS only
-	// sets the minimum, so resize explicitly to the preferred width.
-	// Scaled so the dialog grows with the system font on HiDPI displays.
-	ResizeTo(ScalePx(640), ScalePx(480));
-	CenterOnScreen();
-	// Start the looper running but keep the window off-screen: Hide() before
-	// Show() leaves a net-hidden window whose looper is alive, so Toggle()
-	// can reveal it instantly and the parent can lock it to read values.
-	Hide();
-	Show();
-}
-
-void SettingsDialog::_BuildLayout(const std::string& systemPrompt, int maxTokens,
-                                  int notifyMinSec, const std::string& workingDir,
-                                  BMenuField* modelField)
-{
-	// System-prompt label + editor.
-	BStringView* sysLabel = new BStringView("syslbl", "System Prompt:");
-	fSysPromptView        = new BTextView("sysprompt", B_WILL_DRAW | B_FRAME_EVENTS);
-	fSysPromptView->SetWordWrap(true);
-	fSysPromptView->SetText(systemPrompt.c_str());
-	fSysPromptView->SetExplicitMinSize(BSize(ScalePx(80), ScalePx(80)));
-	BScrollView* sysScroll = new BScrollView("sysscroll", fSysPromptView,
-	                                          0, false, true, B_FANCY_BORDER);
-	sysScroll->SetExplicitMinSize(BSize(ScalePx(100), ScalePx(80)));
-	sysScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-
-	// Max tokens field.
-	fMaxTokensCtl = new BTextControl("maxtokens", "Max tokens:",
-	                                  std::to_string(maxTokens).c_str(), nullptr);
-
-	// Notification delay slider: how long a turn must run before it
-	// fires a desktop notification. 0 = notifications disabled. A
-	// left-aligned label mirrors the value in plain English.
-	BStringView* notifyLabel = new BStringView("notifylbl", "");
-	notifyLabel->SetAlignment(B_ALIGN_LEFT);
-	NotifySlider* notifySlider = new NotifySlider("notifydelay", nullptr,
-	                                              nullptr, 0, 300);
-	fNotifyDelay = notifySlider;
-	fNotifyDelay->SetHashMarks(B_HASH_MARKS_BOTTOM);
-	fNotifyDelay->SetHashMarkCount(7);
-	fNotifyDelay->SetKeyIncrementValue(10);
-	if (notifyMinSec < 0)   notifyMinSec = 0;
-	if (notifyMinSec > 300) notifyMinSec = 300;
-	fNotifyDelay->SetValue(notifyMinSec);
-	notifySlider->SetValueLabel(notifyLabel);
-
-	// Working directory field + Browse button.
-	// The text control holds the path; the Browse button opens a
-	// BFilePanel so the user can pick a directory without typing.
-	fWorkingDirCtl = new BTextControl("workingdir", "Working directory:",
-	                                   workingDir.c_str(), nullptr);
-	fWorkingDirCtl->SetToolTip("Directory Claude uses as the root for "
-	                            "relative file paths and tool calls.");
-	// Make the path field roomy enough to read a full path without scrolling.
-	fWorkingDirCtl->SetExplicitMinSize(BSize(ScalePx(360), B_SIZE_UNSET));
-	BButton* browseBtn = new BButton("browseworkdir", "Browse" B_UTF8_ELLIPSIS,
-	                                  new BMessage(gui::MSG_BROWSE_WORKDIR));
-	BButton* closeBtn = new BButton("closesettings", "Close",
-	                                 new BMessage(gui::MSG_SETTINGS));
-	closeBtn->MakeDefault(true);
-
-	// Browse and Close are handled by the parent ChatWindow (the working-dir
-	// BFilePanel and the value read-back logic both live there).
-	if (fParent) {
-		browseBtn->SetTarget(fParent);
-		closeBtn->SetTarget(fParent);
-	}
-
-	// Group the controls into labelled BBoxes, mirroring Genio's ConfigWindow
-	// idiom (MakeViewFor wraps each settings group in a BBox with a label).
-	BBox* modelBox = new BBox("modelbox");
-	modelBox->SetLabel("Model");
-	BGroupView* modelGroup = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
-	modelGroup->GroupLayout()->SetInsets(B_USE_ITEM_INSETS);
-	BLayoutBuilder::Group<>(modelGroup)
-		.Add(modelField)
-		.Add(fMaxTokensCtl)
-		.Add(sysLabel)
-		.Add(sysScroll, 1.0f)
-	.End();
-	modelBox->AddChild(modelGroup);
-
-	BBox* behaviorBox = new BBox("behaviorbox");
-	behaviorBox->SetLabel("Behavior");
-	BGroupView* behaviorGroup = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
-	behaviorGroup->GroupLayout()->SetInsets(B_USE_ITEM_INSETS);
-	BLayoutBuilder::Group<>(behaviorGroup)
-		.Add(notifyLabel)
-		.Add(fNotifyDelay)
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(fWorkingDirCtl, 1.0f)
-			.Add(browseBtn, 0.0f)
-		.End()
-	.End();
-	behaviorBox->AddChild(behaviorGroup);
-
-	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_WINDOW_SPACING)
-		.Add(modelBox, 1.0f)
-		.Add(behaviorBox, 0.0f)
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.AddGlue()
-			.Add(closeBtn)
-		.End()
-	.End();
-}
-
-void SettingsDialog::SetValues(const std::string& systemPrompt, int maxTokens,
-                               int notifyMinSec, const std::string& workingDir)
-{
-	if (fSysPromptView)
-		fSysPromptView->SetText(systemPrompt.c_str());
-	if (fMaxTokensCtl)
-		fMaxTokensCtl->SetText(std::to_string(maxTokens).c_str());
-	if (fNotifyDelay) {
-		if (notifyMinSec < 0)   notifyMinSec = 0;
-		if (notifyMinSec > 300) notifyMinSec = 300;
-		fNotifyDelay->SetValue(notifyMinSec);
-	}
-	if (fWorkingDirCtl)
-		fWorkingDirCtl->SetText(workingDir.c_str());
-}
-
-std::string SettingsDialog::SystemPrompt() const
-{
-	if (!fSysPromptView) return {};
-	const char* t = fSysPromptView->Text();
-	return t ? std::string(t) : std::string();
-}
-
-int SettingsDialog::MaxTokens() const
-{
-	if (!fMaxTokensCtl) return 8192;
-	const char* t = fMaxTokensCtl->Text();
-	if (!t || t[0] == '\0') return 8192;
-	int v = std::atoi(t);
-	return (v > 0) ? v : 8192;
-}
-
-bool SettingsDialog::NotificationsEnabled() const
-{
-	// A delay of 0 means notifications are turned off entirely.
-	if (!fNotifyDelay) return true;
-	return fNotifyDelay->Value() > 0;
-}
-
-int SettingsDialog::NotifyMinSeconds() const
-{
-	if (!fNotifyDelay) return 5;
-	return static_cast<int>(fNotifyDelay->Value());
-}
-
-std::string SettingsDialog::WorkingDir() const
-{
-	if (!fWorkingDirCtl) return {};
-	const char* t = fWorkingDirCtl->Text();
-	return t ? std::string(t) : std::string();
-}
-
-void SettingsDialog::Toggle()
-{
-	fOpen = !fOpen;
-	if (fOpen) {
-		if (IsHidden())
-			Show();
-		Activate(true);
-	} else {
-		if (!IsHidden())
-			Hide();
-	}
-}
-
-bool SettingsDialog::QuitRequested()
-{
-	// The window is created once and kept alive (hidden) for the life of
-	// the app, so a close request from the title-bar X must not actually
-	// quit it. Defer to the parent's MSG_SETTINGS handler (which reads the
-	// edited values back, then calls Toggle() to hide us).
-	if (fOpen && fParent)
-		fParent->PostMessage(gui::MSG_SETTINGS);
-	return false;
-}
+// SettingsDialog moved to settings_dialog.{h,cpp} — a standalone dialog
+// window coupled to its owner only via gui::MSG_* codes and a BWindow*
+// parent. Included through chat_window.h.
 
 
 // ===========================================================================
@@ -1195,97 +230,13 @@ constexpr int kGuiVerbCount = sizeof(kGuiSpinnerVerbs) / sizeof(kGuiSpinnerVerbs
 
 
 // ===========================================================================
-// WelcomeView — startup splash with the app icon + greeting text.
-// ===========================================================================
-
-WelcomeView::WelcomeView()
-	: BView("welcome", B_WILL_DRAW)
-{
-	SetViewColor(kColorChatBg);
-	SetLowColor(kColorChatBg);
-
-	// Pull the HVIF icon stamped onto the binary at link time — the same
-	// source the About box uses. 64x64 keeps it crisp on HiDPI displays.
-	// We read the raw vector data and rasterise it ourselves: the
-	// BAppFileInfo::GetIcon(BBitmap*, icon_size) overload requires the
-	// bitmap bounds to match the enum (16 or 32 px) exactly, so it cannot
-	// produce a 64x64 icon and silently fails with B_BAD_VALUE.
-	app_info info;
-	if (be_roster->GetRunningAppInfo(be_app->Team(), &info) == B_OK) {
-		BFile appFile(&info.ref, B_READ_ONLY);
-		BAppFileInfo fileInfo(&appFile);
-		uint8* data = nullptr;
-		size_t size = 0;
-		if (fileInfo.GetIcon(&data, &size) == B_OK && data != nullptr) {
-			// Render the vector HVIF into a scaled bitmap so the icon stays
-			// crisp (not upscaled) on HiDPI displays.
-			const int32 px = static_cast<int32>(ScalePx(64.0f)) - 1;
-			BBitmap* icon = new BBitmap(BRect(0, 0, px, px), B_RGBA32);
-			if (BIconUtils::GetVectorIcon(data, size, icon) == B_OK)
-				fIcon = icon;
-			else
-				delete icon;
-			free(data);
-		}
-	}
-
-	// Reserve enough height for the icon plus two text lines. Pin a small
-	// minimum WIDTH too: a plain BView with an unset min width reports its
-	// current frame width as the minimum, which (at the initial window size)
-	// latches the whole chat column — and thus the window — to a huge minimum
-	// width, letting the bottom input bar overflow and clip its buttons. A
-	// small explicit min lets the column and window shrink freely.
-	SetExplicitMinSize(BSize(ScalePx(40), ScalePx(96)));
-	SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, ScalePx(96)));
-}
-
-WelcomeView::~WelcomeView()
-{
-	delete fIcon;
-}
-
-void WelcomeView::Draw(BRect /*updateRect*/)
-{
-	const BRect b = Bounds();
-
-	// Icon on the left, vertically centred. fIcon is already rendered at the
-	// scaled size, so use its real dimensions and scale the margins.
-	const float margin = ScalePx(16.0f);
-	float textLeft = margin;
-	if (fIcon != nullptr) {
-		const float iconH = fIcon->Bounds().Height() + 1.0f;
-		const float iconW = fIcon->Bounds().Width() + 1.0f;
-		const float iconY = (b.Height() - iconH) / 2.0f;
-		SetDrawingMode(B_OP_ALPHA);
-		DrawBitmap(fIcon, BPoint(margin, iconY));
-		SetDrawingMode(B_OP_COPY);
-		textLeft = margin + iconW + margin;
-	}
-
-	// Title line: bold "Claude" in the model accent colour.
-	BFont titleFont(be_bold_font);
-	titleFont.SetSize(titleFont.Size() * 1.6f);
-	SetFont(&titleFont);
-	SetHighColor(kColorModelLabel);
-	const float titleY = b.Height() / 2.0f - ScalePx(6.0f);
-	DrawString("Claude", BPoint(textLeft, titleY));
-
-	// Subtitle: dim hint, regular font.
-	BFont subFont(be_plain_font);
-	SetFont(&subFont);
-	SetHighColor(kColorToolLine);
-	DrawString("Join the AI revolution, resistance is futile!",
-	           BPoint(textLeft, titleY + ScalePx(22.0f)));
-}
-
-
-// ===========================================================================
 // ChatWindow
 // ===========================================================================
 
 ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int maxTokens, const std::string& systemPrompt,
-                        int notifyMinSec, const std::string& workingDir)
+                        int notifyMinSec, const std::string& workingDir,
+                        const std::string& initialPrompt, bool autoSend)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
 	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
@@ -1341,6 +292,21 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
 	// Register this window as a live remote-control session so the phone
 	// can /sessions list it and /session N route prompts here.
 	_RegisterSession();
+
+	// Seed an initial prompt supplied at launch (e.g. Genio's "Ask Claude
+	// to fix this" via --prompt or the 'ASKP' message). Prefill the input
+	// box so the user can review/edit it; auto-send only if explicitly
+	// requested. Posted (not called inline) so it runs after the window is
+	// shown and the layout has settled.
+	if (!initialPrompt.empty()) {
+		fInput->SetText(initialPrompt.c_str());
+		if (autoSend) {
+			BMessage send(gui::MSG_SEND);
+			PostMessage(&send);
+		} else {
+			fInput->MakeFocus(true);
+		}
+	}
 }
 
 ChatWindow::~ChatWindow()
@@ -1454,6 +420,8 @@ void ChatWindow::_BuildMenuBar()
 	helpMenu->AddItem(new BMenuItem("Show Markdown Demo",
 		new BMessage(gui::MSG_DEMO_MARKDOWN)));
 	helpMenu->AddSeparatorItem();
+	helpMenu->AddItem(new BMenuItem("Diagnostics\xE2\x80\xA6", // …
+		new BMessage(gui::MSG_DIAGNOSTICS)));
 	helpMenu->AddItem(new BMenuItem("About Claude\xE2\x80\xA6", // …
 		new BMessage(gui::MSG_ABOUT)));
 	fMenuBar->AddItem(helpMenu);
@@ -2663,6 +1631,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 	}
 
+	case gui::MSG_DIAGNOSTICS:
+		_ShowDiagnostics();
+		break;
+
 	case gui::MSG_HELP_DOCS: {
 		// Open the project README on GitHub in the default browser.
 		const std::string url = "https://github.com/microgeni/haiku-claude-cli";
@@ -3646,81 +2618,13 @@ void ChatWindow::_SaveSession()
 		fSessionPath = saved;
 }
 
-// Serialize the conversation to a Markdown file. Handles plain-string
-// content, array content (text + image placeholders), and the
-// tool_use / tool_result blocks that live in the history after a
-// tool-using turn. Best-effort: unknown block shapes are skipped.
+// Serialize the conversation to a Markdown file. The serialization itself
+// lives in transcript::ToMarkdown (pure, unit-tested); this method keeps
+// only the BFile write and the Tracker MIME stamp.
 void ChatWindow::_ExportTranscript(const std::string& path)
 {
-	std::string out;
-	out += "# Claude transcript\n\n";
-	if (!fConvTopic.empty()) out += "**Topic:** " + fConvTopic + "\n\n";
-	out += "**Model:** " + fModel + "  \n";
-	out += "**Turns:** " + std::to_string(fTurnCount) + "\n\n---\n\n";
-
-	// Render one content value (string or block array) to Markdown.
-	auto renderContent = [](const nlohmann::json& content) -> std::string {
-		std::string s;
-		if (content.is_string()) {
-			s = content.get<std::string>();
-		} else if (content.is_array()) {
-			for (const auto& block : content) {
-				const std::string type = block.value("type", "");
-				if (type == "text") {
-					s += block.value("text", "");
-				} else if (type == "image") {
-					const std::string mt =
-						block.contains("source")
-							? block["source"].value("media_type", "image")
-							: "image";
-					s += "_[image attachment: " + mt + "]_";
-				} else if (type == "tool_use") {
-					s += "\n> 🔧 **tool call:** `" + block.value("name", "?")
-					   + "`\n";
-				} else if (type == "tool_result") {
-					std::string rc;
-					const auto& c = block.contains("content")
-						? block["content"] : nlohmann::json();
-					if (c.is_string()) rc = c.get<std::string>();
-					else if (c.is_array()) {
-						for (const auto& cb : c)
-							if (cb.value("type", "") == "text")
-								rc += cb.value("text", "");
-					}
-					if (rc.size() > 1000) { rc.resize(1000); rc += "\n…[truncated]"; }
-					s += "\n> 🔧 **tool result:**\n```\n" + rc + "\n```\n";
-				}
-			}
-		}
-		return s;
-	};
-
-	for (const auto& turn : fMessages) {
-		const std::string role = turn.value("role", "");
-		if (!turn.contains("content")) continue;
-		const nlohmann::json& content = turn["content"];
-
-		// A user turn whose content is purely tool_result blocks is the
-		// automated half of a tool round-trip, not something the human
-		// typed — label it as such so the transcript reads correctly.
-		bool toolResultOnly = false;
-		if (role == "user" && content.is_array() && !content.empty()) {
-			toolResultOnly = true;
-			for (const auto& b : content)
-				if (b.value("type", "") != "tool_result") { toolResultOnly = false; break; }
-		}
-
-		const std::string body = renderContent(content);
-		if (body.empty()) continue;
-		if (toolResultOnly)
-			out += "## Tool result\n\n" + body + "\n\n";
-		else if (role == "user")
-			out += "## You\n\n" + body + "\n\n";
-		else if (role == "assistant")
-			out += "## Claude\n\n" + body + "\n\n";
-		else
-			out += "## " + role + "\n\n" + body + "\n\n";
-	}
+	const std::string out = transcript::ToMarkdown(
+		fConvTopic, fModel, fTurnCount, fMessages);
 
 	BFile file(path.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
 	if (file.InitCheck() != B_OK) {
@@ -3739,106 +2643,8 @@ void ChatWindow::_ExportTranscript(const std::string& path)
 	_AppendToolLine("\xE2\x9C\x93 transcript exported to " + path + "\n");
 }
 
-// ---------------------------------------------------------------------------
-// Find in conversation (Cmd-F)
-// ---------------------------------------------------------------------------
-
-void ChatWindow::_ToggleFindBar()
-{
-	if (!fFindBar) return;
-	if (fFindBar->IsHidden()) {
-		// The find bar lives inside the input pane; if that pane is collapsed
-		// (View > Input), revealing the find bar alone would draw nothing.
-		// Show the pane first so the find bar is actually visible.
-		if (fInputPane && fInputPane->IsHidden()) {
-			fInputPane->Show();
-			if (fInputItem) fInputItem->SetMarked(true);
-			if (fVSplit) {
-				fVSplit->InvalidateLayout(true);
-				fVSplit->Relayout();
-			}
-		}
-		fFindBar->Show();
-		if (fFindField) {
-			// Pre-fill with the current selection, if any, then focus.
-			int32 selStart = 0, selEnd = 0;
-			fOutput->GetSelection(&selStart, &selEnd);
-			if (selEnd > selStart && (selEnd - selStart) < 128) {
-				std::string sel(fOutput->Text() + selStart, selEnd - selStart);
-				fFindField->SetText(sel.c_str());
-			}
-			fFindField->MakeFocus(true);
-			if (BTextView* tv = fFindField->TextView())
-				tv->SelectAll();
-		}
-		fFindMatchStart = -1;
-	} else {
-		fFindBar->Hide();
-		fInput->MakeFocus(true);
-	}
-}
-
-// Select and scroll to the next (forward) or previous match of the find
-// field's text, searching case-insensitively over the chat output. Wraps
-// around the ends. Updates the "n / total" counter.
-void ChatWindow::_FindNext(bool forward)
-{
-	if (!fFindField || !fOutput) return;
-	const char* raw = fFindField->Text();
-	const std::string needle = raw ? raw : "";
-	if (needle.empty()) {
-		if (fFindStatus) fFindStatus->SetText("");
-		return;
-	}
-
-	// Case-insensitive haystack/needle copies.
-	auto lower = [](std::string s) {
-		for (char& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
-		return s;
-	};
-	const std::string hay = lower(fOutput->Text());
-	const std::string ndl = lower(needle);
-
-	// Count all matches and find the current/next one in the chosen
-	// direction relative to fFindMatchStart.
-	std::vector<size_t> matches;
-	for (size_t p = hay.find(ndl); p != std::string::npos;
-	     p = hay.find(ndl, p + 1))
-		matches.push_back(p);
-
-	if (matches.empty()) {
-		if (fFindStatus) fFindStatus->SetText("not found");
-		fFindMatchStart = -1;
-		return;
-	}
-
-	// Pick the target index relative to the current match (wraps).
-	int target = 0;
-	if (fFindMatchStart < 0) {
-		target = forward ? 0 : static_cast<int>(matches.size()) - 1;
-	} else {
-		// Locate the current match's index.
-		int cur = 0;
-		for (size_t i = 0; i < matches.size(); ++i)
-			if (static_cast<int32>(matches[i]) == fFindMatchStart) { cur = static_cast<int>(i); break; }
-		const int n = static_cast<int>(matches.size());
-		target = forward ? (cur + 1) % n : (cur - 1 + n) % n;
-	}
-
-	const size_t start = matches[target];
-	const int32  s = static_cast<int32>(start);
-	const int32  e = static_cast<int32>(start + ndl.size());
-	fFindMatchStart = s;
-
-	fOutput->Select(s, e);
-	fOutput->ScrollToSelection();
-
-	if (fFindStatus) {
-		const std::string label = std::to_string(target + 1) + " / "
-		                        + std::to_string(matches.size());
-		fFindStatus->SetText(label.c_str());
-	}
-}
+// Find in conversation (_ToggleFindBar / _FindNext) moved to
+// chat_window_find.cpp.
 
 // ---------------------------------------------------------------------------
 // Font zoom (Cmd +/-/0)
@@ -3895,225 +2701,11 @@ void ChatWindow::_ApplyZoom()
 	fOutput->Invalidate();
 }
 
-// ---------------------------------------------------------------------------
-// Session sidebar
-// ---------------------------------------------------------------------------
-
-void ChatWindow::_ToggleSessionList()
-{
-	if (!fSessionPanel) return;
-	if (fSessionPanel->IsHidden()) {
-		_RefreshSessionList();
-		fSessionPanel->Show();
-	} else {
-		fSessionPanel->Hide();
-	}
-}
-
-// Repopulate the list from the BFS session store, newest first. Marks the
-// row matching the currently-open session (fSessionPath) as selected.
-void ChatWindow::_RefreshSessionList()
-{
-	if (!fSessionList) return;
-
-	// Clear existing items.
-	for (int32 i = fSessionList->CountItems() - 1; i >= 0; --i)
-		delete fSessionList->RemoveItem(i);
-
-	const std::vector<session::SessionInfo> sessions = session::List();
-	int32 selectIdx = -1;
-	for (size_t i = 0; i < sessions.size(); ++i) {
-		const session::SessionInfo& s = sessions[i];
-		std::string label = s.title.empty() ? "(untitled)" : s.title;
-		if (s.turns > 0) label += "  (" + std::to_string(s.turns) + ")";
-		fSessionList->AddItem(new SessionItem(label, s.path,
-			s.title.empty() ? "" : s.title));
-		if (!fSessionPath.empty() && s.path == fSessionPath)
-			selectIdx = static_cast<int32>(i);
-	}
-	if (selectIdx >= 0) fSessionList->Select(selectIdx);
-}
-
-void ChatWindow::_LoadSelectedSession()
-{
-	if (!fSessionList) return;
-	// Loading is a single-session action. If several rows are selected
-	// (multi-select for bulk delete), don't guess — require exactly one.
-	if (fSessionList->CountItems() == 0) return;
-	int32 selCount = 0;
-	int32 only     = -1;
-	for (int32 i = 0; i < fSessionList->CountItems(); ++i) {
-		if (fSessionList->IsItemSelected(i)) { ++selCount; only = i; }
-	}
-	if (selCount != 1) return;
-	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(only));
-	if (!item) return;
-	// _LoadSession replays the conversation and sets fSessionPath.
-	_LoadSession(item->Path());
-}
-
-void ChatWindow::_DeleteSelectedSession()
-{
-	if (!fSessionList) return;
-
-	// Collect the paths of every selected row (multi-select).
-	std::vector<std::string> paths;
-	for (int32 i = 0; i < fSessionList->CountItems(); ++i) {
-		if (!fSessionList->IsItemSelected(i)) continue;
-		SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(i));
-		if (item) paths.push_back(item->Path());
-	}
-	if (paths.empty()) return;
-
-	// Confirm, with the count when more than one is selected.
-	std::string msg = (paths.size() == 1)
-		? "Delete this saved session? This cannot be undone."
-		: "Delete " + std::to_string(paths.size())
-		  + " saved sessions? This cannot be undone.";
-	BAlert* confirm = new BAlert("Delete sessions", msg.c_str(),
-	    "Cancel", "Delete", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-	confirm->SetShortcut(0, B_ESCAPE);
-	if (confirm->Go() != 1) return;   // 0 = Cancel
-
-	for (const std::string& path : paths) {
-		if (session::Delete(path)) {
-			// If we deleted the open session, detach so the next save
-			// makes a fresh file rather than recreating the deleted one.
-			if (fSessionPath == path) fSessionPath.clear();
-		}
-	}
-	_RefreshSessionList();
-}
-
-void ChatWindow::_RenameSelectedSession()
-{
-	if (!fSessionList) return;
-	// Rename is a single-row action — require exactly one selection.
-	int32 selCount = 0, only = -1;
-	for (int32 i = 0; i < fSessionList->CountItems(); ++i)
-		if (fSessionList->IsItemSelected(i)) { ++selCount; only = i; }
-	if (selCount != 1) return;
-
-	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(only));
-	if (!item) return;
-
-	const std::string current = item->Title();
-	RenameModal* modal = new RenameModal(current);
-	const std::string entered = modal->Go();   // self-quits
-
-	// Trim whitespace; empty / unchanged → no-op.
-	std::string name = entered;
-	while (!name.empty() && (name.front() == ' ' || name.front() == '\t'))
-		name.erase(name.begin());
-	while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
-		name.pop_back();
-	if (name.empty() || name == current) return;
-
-	if (session::Rename(item->Path(), name)) {
-		// If we renamed the currently-open session, keep fConvTopic in
-		// sync so the next auto-save doesn't overwrite the new title.
-		if (item->Path() == fSessionPath) fConvTopic = name;
-		_RefreshSessionList();
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Global GUI preferences — a flattened BMessage at paths::GuiPrefsPath().
-// ---------------------------------------------------------------------------
-
-void ChatWindow::_LoadGuiPrefs()
-{
-	BFile file(paths::GuiPrefsPath().c_str(), B_READ_ONLY);
-	if (file.InitCheck() != B_OK) return;
-	BMessage prefs;
-	if (prefs.Unflatten(&file) != B_OK) return;
-
-	// Window frame — clamp into the current screen so a prefs file from
-	// a larger display doesn't park the window off-screen.
-	BRect frame;
-	if (prefs.FindRect("frame", &frame) == B_OK && frame.IsValid()
-			&& frame.Width() > 200 && frame.Height() > 150) {
-		MoveTo(frame.LeftTop());
-		// Clamp to the window minimum so a small saved frame can't start
-		// the window below the floor that keeps the input bar visible.
-		float rw = frame.Width();
-		float rh = frame.Height();
-		if (rw < fWindowMinW) rw = fWindowMinW;
-		if (rh < fWindowMinH) rh = fWindowMinH;
-		ResizeTo(rw, rh);
-	}
-
-	float zoom = 1.0f;
-	if (prefs.FindFloat("zoom", &zoom) == B_OK
-			&& zoom >= 0.6f && zoom <= 2.5f) {
-		fZoomFactor  = zoom;
-		fAppliedZoom = zoom;   // empty buffer; new text arrives pre-scaled
-		if (fMdRenderer) fMdRenderer->SetZoom(zoom);
-	}
-
-	// Restore the splitter weight of the sidebar relative to the chat.
-	if (fSplit) {
-		float sidebarWeight = 0.0f;
-		if (prefs.FindFloat("sidebar_weight", &sidebarWeight) == B_OK
-				&& sidebarWeight > 0.0f && sidebarWeight < 5.0f)
-			fSplit->SetItemWeight((int32)0, sidebarWeight, false);
-		fSplit->SetItemWeight((int32)1, 1.0f, true);
-	}
-
-	// Restore the splitter weight of the chat relative to the input pane.
-	if (fVSplit) {
-		float inputWeight = 0.0f;
-		if (prefs.FindFloat("input_weight", &inputWeight) == B_OK
-				&& inputWeight > 0.0f && inputWeight < 5.0f)
-			fVSplit->SetItemWeight((int32)1, inputWeight, false);
-		fVSplit->SetItemWeight((int32)0, 1.0f, true);
-	}
-
-	// Last-used model — only adopt the auto-saved GUI model when the user
-	// hasn't explicitly pinned one in config.json / via a CLI flag. If the
-	// constructor model differs from the built-in default, that value was
-	// deliberately chosen and must win over the saved last-used model.
-	// A loaded session still overrides this later.
-	const bool userPinnedModel =
-		!fConfigModel.empty() && fConfigModel != config::kDefaultModel;
-	const char* model = nullptr;
-	if (!userPinnedModel
-			&& prefs.FindString("model", &model) == B_OK && model && model[0]) {
-		fModel = model;
-		_UpdateTitle();
-		if (fModelMenu) {
-			// Menu lives in the settings dialog looper — lock it.
-			const bool dlgLocked = fSettings && fSettings->Lock();
-			for (int32 i = 0; i < fModelMenu->CountItems(); ++i) {
-				BMenuItem* it = fModelMenu->ItemAt(i);
-				if (it) it->SetMarked(it->Label() && fModel == it->Label());
-			}
-			if (dlgLocked) fSettings->Unlock();
-		}
-	}
-}
-
-void ChatWindow::_SaveGuiPrefs()
-{
-	paths::MkdirP(paths::ConfigDir());
-	BMessage prefs('GPRF');
-	prefs.AddRect("frame", Frame());
-	prefs.AddFloat("zoom", fZoomFactor);
-	prefs.AddString("model", fModel.c_str());
-	// Splitter weight (relative width of the sidebar).
-	if (fSplit) {
-		prefs.AddFloat("sidebar_weight",  fSplit->ItemWeight((int32)0));
-	}
-	// Splitter weight (relative height of the input pane).
-	if (fVSplit) {
-		prefs.AddFloat("input_weight",  fVSplit->ItemWeight((int32)1));
-	}
-
-	BFile file(paths::GuiPrefsPath().c_str(),
-	           B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-	if (file.InitCheck() == B_OK)
-		prefs.Flatten(&file);
-}
+// Session sidebar methods (_ToggleSessionList / _RefreshSessionList /
+// _LoadSelectedSession / _DeleteSelectedSession / _RenameSelectedSession)
+// moved to chat_window_sessions.cpp.
+// GUI preferences (_LoadGuiPrefs / _SaveGuiPrefs) moved to
+// chat_window_prefs.cpp.
 
 void ChatWindow::_LoadSession(const std::string& path)
 {
@@ -4252,6 +2844,39 @@ void ChatWindow::_RefsReceived(BMessage* msg)
 		if (entry.GetPath(&path) == B_OK)
 			_InsertFileContent(path.Path());
 	}
+}
+
+void ChatWindow::_ShowDiagnostics()
+{
+	const std::string report = diagnostics::BuildReport(
+		fModel, fWorkingDir, config::kVersion);
+
+	// A simple read-only text window. Created detached (its own looper)
+	// like the About box, so it doesn't block the chat window.
+	BRect frame(0, 0, gui::ScalePx(520), gui::ScalePx(420));
+	BWindow* win = new BWindow(frame, "Diagnostics",
+		B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+		B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE);
+
+	BTextView* text = new BTextView("diagtext", B_WILL_DRAW);
+	text->MakeEditable(false);
+	text->SetStylable(false);
+	text->SetWordWrap(false);
+	text->SetInsets(gui::ScalePx(8), gui::ScalePx(8),
+	                gui::ScalePx(8), gui::ScalePx(8));
+	text->SetFontAndColor(be_fixed_font);
+	text->SetText(report.c_str());
+
+	BScrollView* scroll = new BScrollView("diagscroll", text,
+		0, true, true, B_FANCY_BORDER);
+
+	BLayoutBuilder::Group<>(win, B_VERTICAL, 0)
+		.Add(scroll)
+	.End();
+
+	win->ResizeTo(gui::ScalePx(520), gui::ScalePx(420));
+	win->CenterOnScreen();
+	win->Show();
 }
 
 void ChatWindow::_ShowMarkdownDemo()

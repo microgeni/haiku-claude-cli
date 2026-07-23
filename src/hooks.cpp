@@ -149,4 +149,13 @@ Outcome Fire(Event event, const json& payload, const std::string& tool_name) {
 	return blocked ? Outcome::Block : Outcome::Proceed;
 }
 
+std::vector<EventSummary> ActiveSummary() {
+	std::vector<EventSummary> out;
+	for (const auto& kv : g_hooks) {
+		if (kv.second.empty()) continue;
+		out.push_back({ event_name(kv.first), static_cast<int>(kv.second.size()) });
+	}
+	return out;
+}
+
 } // namespace hooks

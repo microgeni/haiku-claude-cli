@@ -16,10 +16,17 @@
 #include "paths.h"
 #include "skills.h"
 #include "agents.h"
+#include "history_util.h"
 
 namespace config {
 
-const char* const kVersion      = "1.10.0";
+// The marketing version is injected at build time from the top-level VERSION
+// file via -DCCH_VERSION (see Makefile), so it always matches the shipped
+// package. The fallback only applies to ad-hoc builds without the define.
+#ifndef CCH_VERSION
+#define CCH_VERSION "0.0.0-dev"
+#endif
+const char* const kVersion      = CCH_VERSION;
 const char* const kDefaultModel = "claude-sonnet-4-6";
 const char* const kApiVersion   = "2023-06-01";
 const char* const kOAuthBeta    = "oauth-2025-04-20";
@@ -236,9 +243,11 @@ bool HasClaudeSummary(const std::string& path) {
 // follow the conversation on --resume.
 constexpr size_t kHistoryToolResultCap = 4096;
 
-// Maximum number of messages kept when loading a saved session.
+// Maximum number of messages kept when saving/loading a session.
 // 200 messages ≈ 100 turns — enough context for any real session.
-constexpr size_t kHistoryMessageCap = 200;
+// Mutable so SetHistoryMessageCap() can override it from config.json;
+// starts at the historical default.
+size_t g_history_message_cap = 200;
 
 // Trim tool_result content blocks inside a messages array so each
 // individual result is at most kHistoryToolResultCap bytes. Returns
@@ -287,6 +296,8 @@ Config Load() {
 		const json j = json::parse(f);
 		if (j.contains("model"))      cfg.model      = j["model"].get<std::string>();
 		if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
+		if (j.contains("history_max_messages") && j["history_max_messages"].is_number_integer())
+			cfg.history_max_messages = j["history_max_messages"].get<int>();
 		if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
 		if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
 		if (j.contains("prices"))       cfg.prices      = j["prices"];
@@ -444,6 +455,9 @@ std::string SanitizeUtf8(const std::string& s) {
 	return out;
 }
 
+// CapHistoryMessages moved to history_util.{h,cpp} (pure JSON logic,
+// unit-tested). Declared via history_util.h, included below.
+
 std::optional<json> LoadHistory(const std::string& name) {
 	const std::string path = name.empty()
 		? paths::HistoryPath()
@@ -455,13 +469,7 @@ std::optional<json> LoadHistory(const std::string& name) {
 		if (!j.contains("messages") || !j["messages"].is_array())
 			return std::nullopt;
 		json msgs = j["messages"];
-		if (msgs.size() > kHistoryMessageCap) {
-			json capped = json::array();
-			const size_t start = msgs.size() - kHistoryMessageCap;
-			for (size_t i = start; i < msgs.size(); ++i)
-				capped.push_back(msgs[i]);
-			msgs = std::move(capped);
-		}
+		msgs = CapHistoryMessages(msgs, g_history_message_cap);
 		return msgs;
 	} catch (...) {
 	}
@@ -478,7 +486,7 @@ bool SaveHistory(const json& messages, const std::string& model,
 	if (!paths::MkdirP(path.substr(0, slash))) return false;
 
 	const json j = {
-		{"messages", TrimToolResults(messages)},
+		{"messages", CapHistoryMessages(TrimToolResults(messages), g_history_message_cap)},
 		{"model",    model},
 		{"saved_at", static_cast<long>(std::time(nullptr))},
 	};
@@ -511,6 +519,13 @@ bool SaveHistory(const json& messages, const std::string& model,
 		return false;
 	}
 	return true;
+}
+
+void SetHistoryMessageCap(int cap) {
+	// Ignore non-positive values so a mis-set config key can't silently
+	// truncate every save to nothing.
+	if (cap >= 1)
+		g_history_message_cap = static_cast<size_t>(cap);
 }
 
 void InitLogging(bool enabled) {

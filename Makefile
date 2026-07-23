@@ -66,7 +66,14 @@ GUI_ONLY_SRCS := \
     $(SRCDIR)/md_renderer.cpp       \
     $(SRCDIR)/syntax_highlight.cpp  \
     $(SRCDIR)/tool_bar.cpp          \
+    $(SRCDIR)/gui_scale.cpp         \
+    $(SRCDIR)/gui_widgets.cpp       \
+    $(SRCDIR)/gui_views.cpp         \
+    $(SRCDIR)/settings_dialog.cpp   \
     $(SRCDIR)/chat_window.cpp       \
+    $(SRCDIR)/chat_window_find.cpp  \
+    $(SRCDIR)/chat_window_sessions.cpp \
+    $(SRCDIR)/chat_window_prefs.cpp \
     $(SRCDIR)/app_main_gui.cpp
 
 _ALL_SRCS := $(wildcard $(SRCDIR)/*.cpp)
@@ -92,13 +99,22 @@ ICON_HVIF ?= assets/claude-icon.hvif
 APP_SIG   ?= application/x-vnd.Microgeni-claude-cli
 
 PKG_NAME    ?= claude_cli
-PKG_VERSION ?= 1.10.0
+# Single source of truth for the marketing version: the top-level VERSION
+# file. CI overrides PKG_VERSION with the git tag (leading "v" stripped);
+# locally it defaults to VERSION so the Makefile, the .hpkg, and the compiled
+# binary's config::kVersion can never drift apart.
+PKG_VERSION ?= $(strip $(shell cat VERSION 2>/dev/null))
 PKG_BUILD   ?= 1
 PKG_ARCH    ?= x86_64
 PKG_STAGE   := $(BUILDDIR)/pkg
+
+# Compile the marketing version into the binary from the same PKG_VERSION,
+# so config::kVersion always matches the package that shipped it.
+CXXFLAGS += -DCCH_VERSION='"$(PKG_VERSION)"'
+
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all gui clean install install-gui package release lint security check
+.PHONY: all gui clean install install-gui package release lint security check test test-unit version-check
 
 all: $(BIN)
 
@@ -120,15 +136,20 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/agents.cpp      \
     $(SRCDIR)/commands.cpp    \
     $(SRCDIR)/config.cpp      \
+    $(SRCDIR)/diagnostics.cpp \
     $(SRCDIR)/editor_integration.cpp \
     $(SRCDIR)/hooks.cpp       \
+    $(SRCDIR)/history_util.cpp \
     $(SRCDIR)/mcp.cpp         \
+    $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
     $(SRCDIR)/notify.cpp      \
     $(SRCDIR)/oauth.cpp       \
     $(SRCDIR)/paths.cpp       \
     $(SRCDIR)/skills.cpp      \
+    $(SRCDIR)/sse_parser.cpp  \
     $(SRCDIR)/stats.cpp       \
+    $(SRCDIR)/transcript_export.cpp \
     $(SRCDIR)/tools.cpp
 
 # GUI-specific front-end files.
@@ -139,10 +160,17 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/syntax_highlight.cpp  \
     $(SRCDIR)/gui_stubs.cpp         \
     $(SRCDIR)/gui_sink.cpp          \
+    $(SRCDIR)/gui_scale.cpp         \
+    $(SRCDIR)/gui_widgets.cpp       \
+    $(SRCDIR)/gui_views.cpp         \
+    $(SRCDIR)/settings_dialog.cpp   \
     $(SRCDIR)/session_store.cpp     \
     $(SRCDIR)/telegram.cpp          \
     $(SRCDIR)/tool_bar.cpp          \
     $(SRCDIR)/chat_window.cpp       \
+    $(SRCDIR)/chat_window_find.cpp  \
+    $(SRCDIR)/chat_window_sessions.cpp \
+    $(SRCDIR)/chat_window_prefs.cpp \
     $(SRCDIR)/app_main_gui.cpp
 
 GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
@@ -327,6 +355,62 @@ $(PKG_FILE): $(BIN) $(GUI_BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 #   useStlAlgorithm       — style preference, not a bug
 #   unmatchedSuppression  — fired when a suppression is never triggered
 #                           (happens on non-Haiku builds missing BFS code)
+# ── Tests ───────────────────────────────────────────────────────────────────
+# `make test-unit` compiles and runs the doctest-based unit tests in
+# tests/unit/. These cover the pure-logic modules (no BeAPI, no network) so
+# they build and run on every target, including the macOS/nix dev shell.
+#
+# `make test` runs the unit tests and then the functional suite in
+# ci_scripts/test.sh against the freshly built CLI binary. This is the target
+# CLAUDE.md and the release checklist refer to.
+UNIT_BUILDDIR := $(BUILDDIR)/unit
+UNIT_CXXFLAGS := $(CXXSTD) $(WARN) -O1 -Itests/unit
+
+$(UNIT_BUILDDIR):
+	mkdir -p $(UNIT_BUILDDIR)
+
+# md_text unit test — links only the pure md_text.cpp translation unit.
+$(UNIT_BUILDDIR)/md_text_test: tests/unit/md_text_test.cpp src/md_text.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) -o $@ tests/unit/md_text_test.cpp src/md_text.cpp
+
+# sse_parser unit test — links the pure sse_parser.cpp translation unit.
+# nlohmann/json headers come from pkg-config (JSON_CFLAGS).
+$(UNIT_BUILDDIR)/sse_parser_test: tests/unit/sse_parser_test.cpp src/sse_parser.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/sse_parser_test.cpp src/sse_parser.cpp
+
+# history_util unit test — links the pure history_util.cpp translation unit.
+$(UNIT_BUILDDIR)/history_util_test: tests/unit/history_util_test.cpp src/history_util.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/history_util_test.cpp src/history_util.cpp
+
+# transcript_export unit test — links the pure transcript_export.cpp TU.
+$(UNIT_BUILDDIR)/transcript_export_test: tests/unit/transcript_export_test.cpp \
+        src/transcript_export.cpp tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/transcript_export_test.cpp src/transcript_export.cpp
+
+UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test \
+             $(UNIT_BUILDDIR)/history_util_test \
+             $(UNIT_BUILDDIR)/transcript_export_test
+
+test-unit: $(UNIT_BINS)
+	@echo "=== unit tests ==="
+	@fail=0; for t in $(UNIT_BINS); do \
+	    echo "--- $$t ---"; \
+	    "$$t" || fail=1; \
+	done; \
+	if [ "$$fail" != "0" ]; then echo "unit tests FAILED"; exit 1; fi; \
+	echo "unit tests passed."
+
+test: test-unit $(BIN)
+	@echo "=== functional tests ==="
+	bash ci_scripts/test.sh
+	@echo "=== all tests passed ==="
+
 lint:
 	@echo "=== cppcheck: static analysis ==="
 	@command -v cppcheck >/dev/null 2>&1 || { \
@@ -364,7 +448,13 @@ security-full:
 	@echo "=== flawfinder: full security audit (level 2+) ==="
 	flawfinder --minlevel=2 --quiet $(SRCDIR)/
 
+# version-check — fail if VERSION has no matching CHANGELOG.md section.
+# Guards against shipping a binary whose version has no release notes. A
+# '-dev'/pre-release suffix in VERSION is exempt. Cheap; wired into check.
+version-check:
+	@bash ci_scripts/version_check.sh
+
 # check — run all analysis tools in sequence (useful for CI and pre-release).
-check: lint security
+check: version-check lint security
 	@echo "=== all checks passed ==="
 

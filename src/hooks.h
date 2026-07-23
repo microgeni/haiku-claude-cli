@@ -2,6 +2,7 @@
 #define HAIKU_CLAUDE_CLI_HOOKS_H
 
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -43,6 +44,15 @@ void Load(const json& config_hooks);
 // an "event" field (and "tool_name" when non-empty). `tool_name` is
 // used as the matcher filter for PreToolUse / PostToolUse entries.
 Outcome Fire(Event event, const json& payload, const std::string& tool_name = {});
+
+// Introspection for the GUI diagnostics panel: one entry per event that has
+// at least one registered hook, with the event name and how many hooks are
+// wired to it. Empty when no hooks are configured.
+struct EventSummary {
+	std::string event;   // "SessionStart", "PreToolUse", …
+	int         count = 0;
+};
+std::vector<EventSummary> ActiveSummary();
 
 } // namespace hooks
 

@@ -42,6 +42,16 @@ json ToolDefinitions();
 // True when `name` is an MCP tool (prefix `mcp__`).
 bool IsMcpTool(const std::string& name);
 
+// Introspection for the GUI diagnostics panel: one entry per initialized
+// MCP server with its name, live tool count, and whether the subprocess is
+// currently alive. Empty when no servers are configured.
+struct ServerInfo {
+	std::string name;
+	int         tool_count = 0;
+	bool        alive      = false;
+};
+std::vector<ServerInfo> ActiveServers();
+
 // Dispatch `name` (mcp__server__tool) to the owning client. Returns
 // std::nullopt if the name isn't an MCP tool or the server isn't
 // live; otherwise returns the tool's ToolResult.

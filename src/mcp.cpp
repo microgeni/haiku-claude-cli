@@ -310,6 +310,19 @@ bool IsMcpTool(const std::string& name) {
 		&& name.compare(0, std::strlen(kNamePrefix), kNamePrefix) == 0;
 }
 
+std::vector<ServerInfo> ActiveServers() {
+	std::vector<ServerInfo> out;
+	out.reserve(g_clients.size());
+	for (const auto& c : g_clients) {
+		ServerInfo info;
+		info.name       = c.name;
+		info.tool_count = static_cast<int>(c.tools.size());
+		info.alive      = c.alive;
+		out.push_back(std::move(info));
+	}
+	return out;
+}
+
 std::optional<tools::ToolResult> Run(const std::string& name, const json& input) {
 	if (!IsMcpTool(name)) return std::nullopt;
 	Client* c = find_by_tool_name(name);

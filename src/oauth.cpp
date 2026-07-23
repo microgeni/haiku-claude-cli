@@ -74,6 +74,20 @@ std::string url_encode(CURL* curl, const std::string& s) {
 	return result;
 }
 
+// Wrap a string in single quotes for safe use in a shell command line,
+// escaping any embedded single quotes ('\'' idiom). The auth URL we build
+// is our own construction, but routing it through here keeps the naked
+// interpolation from ever becoming a shell-injection foothold.
+std::string shell_single_quote(const std::string& s) {
+	std::string out = "'";
+	for (char c : s) {
+		if (c == '\'') out += "'\\''";
+		else           out += c;
+	}
+	out += "'";
+	return out;
+}
+
 size_t write_cb(char* data, size_t size, size_t nmemb, void* userp) {
 	auto* out = static_cast<std::string*>(userp);
 	out->append(data, size * nmemb);
@@ -313,9 +327,9 @@ int DoLogin() {
 			  << fAuthurl << "\n\n";
 
 #if defined(__APPLE__) || defined(__HAIKU__)
-	const std::string open_cmd = "open '" + fAuthurl + "' >/dev/null 2>&1";
+	const std::string open_cmd = "open " + shell_single_quote(fAuthurl) + " >/dev/null 2>&1";
 #else
-	const std::string open_cmd = "xdg-open '" + fAuthurl + "' >/dev/null 2>&1";
+	const std::string open_cmd = "xdg-open " + shell_single_quote(fAuthurl) + " >/dev/null 2>&1";
 #endif
 	(void)std::system(open_cmd.c_str());  // flawfinder: ignore
 

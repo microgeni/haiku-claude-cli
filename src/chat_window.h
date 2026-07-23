@@ -42,269 +42,21 @@ class BSplitView;
 
 namespace telegram { class RemoteControl; }
 
-// Additional MSG_ codes beyond those in gui_sink.h.
-namespace gui {
-constexpr uint32_t MSG_NEW_CHAT     = 'NCVT'; // clear conversation + display
-constexpr uint32_t MSG_CLEAR_OUTPUT = 'CLRO'; // clear display only (keep ctx)
-constexpr uint32_t MSG_CANCEL       = 'CNCL'; // cancel in-flight turn
-constexpr uint32_t MSG_MODEL_PICK   = 'MPCK'; // model menu item selected
-constexpr uint32_t MSG_SETTINGS     = 'STNG'; // toggle settings panel
-constexpr uint32_t MSG_TOKENS       = 'TOKN'; // int32 "input","output","max"
-constexpr uint32_t MSG_JUMP_BOTTOM  = 'JBOT'; // jump-to-bottom button
-constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
-// MSG_SESSIONS / MSG_SESSION_LOAD reserved for future project.
-constexpr uint32_t MSG_MODELS_READY = 'MDLS'; // background model fetch complete
-constexpr uint32_t MSG_ABOUT        = 'ABUT'; // Help > About Claude
-constexpr uint32_t MSG_HELP_DOCS    = 'HDOC'; // Help > Documentation
-constexpr uint32_t MSG_DEMO_MARKDOWN = 'DMMD'; // Help > Show Markdown Demo
-constexpr uint32_t MSG_LUDICROUS     = 'LUDC'; // Tools > Ludicrous Mode toggle
-constexpr uint32_t MSG_REMOTE_CONTROL = 'RMTC'; // Tools > Remote Control toggle
-constexpr uint32_t MSG_REMOTE_APPEND  = 'RMAP'; // remote turn finished: append to history
-constexpr uint32_t MSG_BROWSE_WORKDIR = 'BRWD'; // Settings: browse for working dir
-constexpr uint32_t MSG_EXPORT         = 'EXPT'; // File > Export Transcript…
-constexpr uint32_t MSG_EXPORT_SAVE    = 'EXPS'; // B_SAVE_REQUESTED from export panel
-constexpr uint32_t MSG_FIND           = 'FIND'; // Cmd-F: toggle the find bar
-constexpr uint32_t MSG_FIND_NEXT      = 'FNXT'; // find bar: next match / Enter
-constexpr uint32_t MSG_FIND_PREV      = 'FPRV'; // find bar: previous match
-constexpr uint32_t MSG_FIND_CLOSE     = 'FCLO'; // find bar: close / Esc
-constexpr uint32_t MSG_FIND_LIVE      = 'FLIV'; // find bar: query text changed
-constexpr uint32_t MSG_ZOOM_IN        = 'ZMIN'; // Cmd-+ : larger chat font
-constexpr uint32_t MSG_ZOOM_OUT       = 'ZMOT'; // Cmd-- : smaller chat font
-constexpr uint32_t MSG_ZOOM_RESET     = 'ZMRS'; // Cmd-0 : reset chat font
-constexpr uint32_t MSG_TOGGLE_SESSIONS = 'TSES'; // View: toggle session sidebar
-constexpr uint32_t MSG_TOGGLE_INPUT    = 'TINP'; // View: toggle the input bar
-constexpr uint32_t MSG_SESSION_SELECT  = 'SSEL'; // sidebar: load selected session
-constexpr uint32_t MSG_SESSION_DELETE  = 'SDEL'; // sidebar: delete selected session
-constexpr uint32_t MSG_SESSION_NEW     = 'SNEW'; // sidebar: start a new chat
-constexpr uint32_t MSG_SESSION_RENAME  = 'SRNM'; // sidebar: rename selected session
-constexpr uint32_t MSG_NEW_WINDOW      = 'NWIN'; // File > New Session: spawn a window
-constexpr uint32_t MSG_COMPACT         = 'CMPT'; // Edit: compact conversation context
-constexpr uint32_t MSG_CLEAR_HISTORY   = 'CLRH'; // Edit: clear saved prompt history
-} // namespace gui
+// Additional MSG_ codes beyond those in gui_sink.h live in gui_messages.h,
+// included here so existing users of "chat_window.h" still see them.
+#include "gui_messages.h"
+
+// The custom chat views (InputView, InputContainer, ChatTextView, TokenBar,
+// WelcomeView) are declared in gui_views.h (extracted). Included so
+// ChatWindow's members and construction sites keep compiling.
+#include "gui_views.h"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InputView — multi-line BTextView that sends on Enter (Shift+Enter inserts a
-// newline). Up/Down arrow keys navigate prompt history. Escape forwards
-// MSG_CANCEL to the window. It is sized by its enclosing InputContainer (see
-// below), the Genio TerminalTab way, so it carries no layout-size overrides.
-// ─────────────────────────────────────────────────────────────────────────────
-class InputView : public BTextView {
-public:
-	explicit InputView(const char* name);
+// SettingsDialog is declared in settings_dialog.h (extracted). Included here
+// so ChatWindow's fSettings member and construction site keep compiling.
+#include "settings_dialog.h"
 
-	void	AttachedToWindow() override;
-	void	Draw(BRect updateRect) override;
-	void	KeyDown(const char* bytes, int32 numBytes) override;
-	void	FrameResized(float w, float h) override;
-	void	MakeFocus(bool focused) override;
-	void	MouseMoved(BPoint where, uint32 transit,
-	                   const BMessage* drag) override;
-	// Drop is handled via the window's MessageReceived(B_SIMPLE_DATA).
-	// InputView::MessageDropped forwards the message there.
-
-	// Push an entry onto the history ring.
-	void	PushHistory(const std::string& text);
-
-	// Load / save history from a file (one entry per line).
-	void	LoadHistory(const std::string& path);
-	void	SaveHistory(const std::string& path) const;
-
-	// Clear the in-memory prompt history ring. Number of stored entries.
-	void	ClearHistory();
-	size_t	HistoryCount() const { return fHistory.size(); }
-
-	// Enable / disable editing (analogous to BControl::SetEnabled).
-	void	SetEnabled(bool enabled);
-	bool	IsEnabled() const { return fEnabled; }
-
-private:
-	void	_HistoryUp();
-	void	_HistoryDown();
-	void	_DrawPlaceholder();
-
-	std::vector<std::string> fHistory;       // ring of past prompts
-	int                      fHistIdx   = -1;
-	std::string              fDraft;
-	bool                     fEnabled    = true;
-	bool                     fFocused    = false;
-	bool                     fDropTarget = false;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// InputContainer — thin BView wrapper that claims layout space for the input
-// and manually resizes its child scroll view to fill it. This is exactly how
-// Genio's TerminalTab hosts its terminal/console view: a plain B_FOLLOW_ALL
-// BView (no size overrides, so the layout's default unlimited max lets it
-// stretch) that AddChild()s the real content and ResizeTo()s it on every
-// frame change. It frees the input from any content-driven size gymnastics.
-// ─────────────────────────────────────────────────────────────────────────────
-class InputContainer : public BView {
-public:
-	explicit InputContainer(const char* name);
-
-	// Adopt the scroll view (added as a plain child, not via a layout) and
-	// give it explicit min/preferred so it has a sensible starting size; the
-	// container's FrameResized then keeps it filling the container.
-	void	SetContent(BView* content, float minHeight);
-
-	void	FrameResized(float w, float h) override;
-	void	AttachedToWindow() override;
-
-private:
-	BView*	fContent   = nullptr;  // the BScrollView (not owned beyond AddChild)
-	float	fMinHeight = 0.0f;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ChatTextView — the scrolling chat transcript. A bare BTextView reports
-// HasHeightForWidth() == true and feeds its current (frame-derived) text
-// width up the layout tree; the window's BGroupLayout latches that as its
-// minimum width, which freezes the window content at the current width while
-// the frame shrinks under it — clipping the bottom input bar's right-edge
-// buttons off-screen. Disabling height-for-width and pinning preferred width
-// to the (small) minimum keeps the window freely shrinkable; the enclosing
-// BScrollView handles overflow.
-// ─────────────────────────────────────────────────────────────────────────────
-class ChatTextView : public BTextView {
-public:
-	ChatTextView(BRect frame, const char* name, BRect textRect,
-			uint32 resizeMode, uint32 flags)
-		: BTextView(frame, name, textRect, resizeMode, flags) {}
-
-	// Never let text content drive the width axis of the layout.
-	bool HasHeightForWidth() override { return false; }
-
-	BSize MinSize() override
-	{
-		return BLayoutUtils::ComposeSize(ExplicitMinSize(), BSize(80, 40));
-	}
-
-	BSize MaxSize() override
-	{
-		// Unlimited max lets the view fill (and shrink with) the frame
-		// instead of being treated as a fixed-width preferred block.
-		return BLayoutUtils::ComposeSize(ExplicitMaxSize(),
-			BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-	}
-
-	// Do NOT return the content-derived text-rect width as preferred; that
-	// is the other path by which the current width gets latched as the
-	// window's minimum.
-	BSize PreferredSize() override { return MinSize(); }
-
-	void FrameResized(float w, float h) override
-	{
-		BTextView::FrameResized(w, h);
-		// Keep word-wrap tracking the (shrinking) frame width without
-		// reporting that width back to the layout.
-		SetTextRect(Bounds().InsetByCopy(4.0f, 4.0f));
-	}
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TokenBar — thin view below the output area showing token usage as a
-// coloured fill bar and a compact "used / max" label.
-// ─────────────────────────────────────────────────────────────────────────────
-class TokenBar : public BView {
-public:
-	static const int kBarHeight = 22;
-
-	TokenBar();
-
-	void	Draw(BRect updateRect) override;
-	void	SetTokens(int used, int maxCtx);
-
-	// Per-session counters mirrored from the CLI status row:
-	// turn number plus cumulative upstream (↑) / downstream (↓) tokens.
-	void	SetStats(int turn, int sessionInput, int sessionOutput);
-
-	// Per-million-token pricing for the active model, so the bar can
-	// show a running cost estimate (mirrors the CLI's /cost).
-	void	SetPrice(double inputPerM, double outputPerM);
-
-	// Ludicrous mode indicator: when on, the bar draws a yellow
-	// "⚡ LUDICROUS" badge so the auto-approve state is always visible.
-	void	SetLudicrous(bool on);
-
-	// Remote control indicator: when on, the bar draws a cyan
-	// "📡 REMOTE" badge so the active Telegram bridge is always visible.
-	void	SetRemote(bool on);
-
-private:
-	int    fUsed    = 0;
-	int    fMax     = 200000; // default until first real value arrives
-	int    fTurn    = 0;
-	int    fInput   = 0;
-	int    fOutput  = 0;
-	double fPriceIn  = 0.0;   // $ per 1M input tokens
-	double fPriceOut = 0.0;   // $ per 1M output tokens
-	bool   fLudicrous = false; // Tools > Ludicrous Mode state
-	bool   fRemote    = false; // Tools > Remote Control state
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SettingsDialog — a free-floating dialog window for system prompt / model
-// config. Contains the model picker, system-prompt editor, max-tokens field,
-// a notification-delay slider, the working-directory field, and a Close
-// button. Created once (hidden) and shown/hidden on demand; Browse and Close
-// actions are forwarded to the parent ChatWindow so the existing handlers
-// stay shared.
-// ─────────────────────────────────────────────────────────────────────────────
-class SettingsDialog : public BWindow {
-public:
-	SettingsDialog(BWindow* parent, const std::string& systemPrompt,
-	               int maxTokens, int notifyMinSec,
-	               const std::string& workingDir = {},
-	               BMenuField* modelField = nullptr);
-
-	// Populate fields from current config.
-	void	SetValues(const std::string& systemPrompt, int maxTokens,
-	                  int notifyMinSec, const std::string& workingDir = {});
-
-	// Read back edited values.
-	std::string	SystemPrompt() const;
-	int         MaxTokens() const;
-	bool        NotificationsEnabled() const;
-	int         NotifyMinSeconds() const;
-	std::string WorkingDir() const;
-
-	bool	IsOpen() const { return fOpen; }
-	void	Toggle();
-
-	// Closing the dialog (X button) defers to the parent's MSG_SETTINGS
-	// handler so edited values get read back, then hides instead of quitting.
-	bool	QuitRequested() override;
-
-private:
-	void	_BuildLayout(const std::string& systemPrompt, int maxTokens,
-	                     int notifyMinSec, const std::string& workingDir,
-	                     BMenuField* modelField);
-
-	BWindow*      fParent         = nullptr;
-	BTextView*    fSysPromptView  = nullptr;
-	BTextControl* fMaxTokensCtl   = nullptr;
-	BSlider*      fNotifyDelay    = nullptr;
-	BTextControl* fWorkingDirCtl  = nullptr;
-	bool          fOpen           = false;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// WelcomeView — a splash panel shown above the chat output on a fresh window.
-//
-// Draws the application's HVIF icon (loaded from the running binary via
-// BAppFileInfo, the same source as the About box) alongside a title and a
-// short hint line — the GUI counterpart to the CLI's ASCII-art banner.
-// Collapses itself once the first turn begins so it never crowds the chat.
-class WelcomeView : public BView {
-public:
-	WelcomeView();
-	~WelcomeView() override;
-
-	void Draw(BRect updateRect) override;
-
-private:
-	BBitmap* fIcon = nullptr;  // owned; 64x64 RGBA app icon, may be nullptr
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChatWindow — the main application window.
@@ -334,7 +86,9 @@ public:
 	ChatWindow(const config::Auth& auth, const std::string& model,
 	           int maxTokens, const std::string& systemPrompt,
 	           int notifyMinSec = 5,
-	           const std::string& workingDir = {});
+	           const std::string& workingDir = {},
+	           const std::string& initialPrompt = {},
+	           bool autoSend = false);
 	~ChatWindow() override;
 
 	void MessageReceived(BMessage* msg) override;
@@ -386,6 +140,7 @@ private:
 	void _LoadSession(const std::string& path); // restore a saved session
 	void _InsertFileContent(const std::string& path); // drag-drop helper
 	void _ShowMarkdownDemo();    // render a rich markdown example into the chat output
+	void _ShowDiagnostics();     // open the Help ▸ Diagnostics report window
 	void _DismissWelcome();      // hide the startup splash once a turn begins
 	void _ExportTranscript(const std::string& path); // write fMessages as Markdown
 

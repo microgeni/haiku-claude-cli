@@ -6,6 +6,100 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-07-23
+
+### Added
+
+- **GUI diagnostics panel (Help ▸ Diagnostics).** Surfaces the runtime
+  context that was previously invisible in the GUI: the active model and
+  working directory, which CLAUDE.md memory files are loaded (user +
+  project), the configured MCP servers with their tool counts and
+  alive/down status, and the registered lifecycle hooks (per-event counts).
+  Opens in a scrollable read-only window. Backed by two new introspection
+  accessors — `mcp::ActiveServers()` and `hooks::ActiveSummary()` — and a
+  self-contained `diagnostics::BuildReport()`.
+- **`history_max_messages` config key** — bounds the rolling history file
+  (`history.json` and named `--resume` sessions) to its last N messages
+  (default 200, ≈100 turns). Previously the cap was applied only when
+  *loading*, so the file itself could grow without bound on a very long
+  single session; the cap is now enforced on *save* too. The cut skips a
+  leading orphaned `tool_result` so a resumed conversation always starts on
+  a valid turn boundary (no Messages API 400). Extracted the cap into a pure
+  `config::CapHistoryMessages` (`history_util.{h,cpp}`) with 7 unit-test
+  cases.
+- **Unit-test layer (doctest).** A new `tests/unit/` suite built on the
+  single-header [doctest](https://github.com/doctest/doctest) framework
+  covers the pure-logic modules with no BeAPI or network dependency, so it
+  runs on every target including the macOS/nix dev shell. Four suites ship:
+  `md_text_test` (20 cases), `sse_parser_test` (14 cases) for the Anthropic
+  SSE state machine and tool-use turn-taking, `history_util_test` (7 cases),
+  and `transcript_export_test` (12 cases) — 53 cases total. `make test-unit`
+  builds and runs them; `make test` now runs the unit tests and then the
+  functional suite in `ci_scripts/test.sh` — the `make test` target
+  CLAUDE.md documented but the Makefile never actually defined.
+- **`make version-check`.** Fails if the version in `VERSION` has no matching
+  `## [x.y.z]` section in `CHANGELOG.md` (a `-dev`/pre-release suffix is
+  exempt). Wired into `make check` so CI and the release path catch a binary
+  that would advertise a version with no release notes.
+
+### Changed
+
+- **`chat_window.cpp` decomposition.** The 4507-line GUI window was broken
+  into cohesive translation units. Extracted as standalone units (fully
+  decoupled from `ChatWindow`): the transcript serializer
+  (`transcript::ToMarkdown`), the 35 shared `gui::MSG_*` codes
+  (`gui_messages.h`), the five helper widgets — `ChoiceModal`, `SessionItem`,
+  `RenameModal`, `SessionListView`, `NotifySlider` (`gui_widgets.{h,cpp}`) —
+  the HiDPI scale helpers (`gui_scale.{h,cpp}`), the `SettingsDialog`
+  (`settings_dialog.{h,cpp}`), the chat output palette (`gui_colors.h`), and
+  the five custom chat views — `InputView`, `InputContainer`, `ChatTextView`,
+  `TokenBar`, `WelcomeView` (`gui_views.{h,cpp}`). Three cohesive `ChatWindow`
+  feature groups also moved into companion translation units (still the same
+  class, split across files for navigability): find-in-conversation
+  (`chat_window_find.cpp`), the session sidebar (`chat_window_sessions.cpp`),
+  and persisted GUI preferences (`chat_window_prefs.cpp`). `chat_window.cpp`
+  is now **3116 lines, down from 4507 (−31%)**. No behavioural change; the
+  transcript extraction also gained 12 unit tests it never had.
+- **Refactor: pure logic split out for testability.** `IsTableRow`,
+  `IsSeparatorRow`, `SplitCells`, and `StripHtml` moved from the
+  BTextView-bound `md_renderer.cpp` into a new BeAPI-free `md_text.{h,cpp}`;
+  the SSE `StreamState` and `ProcessSseEvent` moved from `api.cpp`'s
+  anonymous namespace into a new `sse_parser.{h,cpp}`. Behaviour is
+  unchanged — the extractions exist so the code can be unit-tested in
+  isolation. Both the CLI and GUI link the new translation units.
+
+### Fixed
+
+- **Shell-out escaping.** Three `system()` call sites interpolated a variable
+  into a single-quoted shell string without escaping — the `/memory` file
+  path and the OAuth authorize URL (CLI and GUI). All now route through a
+  single-quote escaper. Defense-in-depth (the values are our own
+  constructions), but the pattern shouldn't exist next to a correct helper.
+
+## [1.11.0] - 2026-07-15
+
+### Added
+
+- **Documented `'ASKP'` IPC for external apps.** The desktop app's
+  "ask Claude" entry point — already used by Genio's **Tools ▸ Claude**
+  integration — is now a documented public contract any Haiku application
+  can use. Send an `'ASKP'` `BMessage` to
+  `application/x-vnd.Microgeni-claude-gui` (or launch `Claude` with
+  `--prompt` / `--working-dir` / `--file` / `--line` / `--send`) to open a
+  scoped chat window with the input box pre-filled and, optionally,
+  auto-submitted. The new [`docs/IPC.md`](docs/IPC.md) describes the message
+  `what`, every field (`prompt`, `context`, `working_dir`, `file`, `line`,
+  `send`), the command-line equivalents, the "launched externally" file
+  round-trip, and how to test with `make ipc-test`. The README and the
+  Genio contrib guide now link to it.
+
+### Fixed
+
+- **`tests/ipc_test_sender.cpp` comments** corrected to match the shipping
+  behaviour: `context` is appended below the prompt (not prepended), and the
+  canonical constant is `kMsgAskPrompt` in `app_main_gui.cpp` (there is no
+  `gui::MSG_ASK_PROMPT`).
+
 ## [1.10.0] - 2026-07-11
 
 ### Added

@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "history_util.h"  // config::CapHistoryMessages (pure).
+
 // Configuration, credentials, system-prompt composition, history
 // persistence, and logging. Everything that turns on-disk state
 // (config.json, CLAUDE.md, credentials.json, history.json, log files,
@@ -38,6 +40,11 @@ struct Config {
 	// context_window = 0 auto-detects from the model name.
 	double      compact_auto_threshold  = 0.8;
 	int         compact_context_window  = 0;
+	// Maximum number of messages retained in a saved history file. The
+	// oldest are dropped so history.json can't grow without bound on a
+	// long single session. 200 ≈ 100 turns. Applied on both save and
+	// load. Configurable via the "history_max_messages" config key.
+	int         history_max_messages    = 200;
 	json        prices;
 	json        hooks;
 	json        mcp_servers;
@@ -84,6 +91,14 @@ std::string SanitizeUtf8(const std::string& s);
 std::optional<json> LoadHistory(const std::string& name = "");
 bool SaveHistory(const json& messages, const std::string& model,
                  const std::string& name = "");
+
+// Set the cap (in messages) applied when saving and loading history.
+// Call once at startup from the loaded Config. Values < 1 are ignored
+// so a mis-set config key can't silently disable persistence.
+void SetHistoryMessageCap(int cap);
+
+// CapHistoryMessages (pure history-array cap) is declared in
+// history_util.h, included at the top of this header.
 
 // Logging. InitLogging is a no-op when `enabled` is false; LogLine
 // silently drops when the log file isn't open.

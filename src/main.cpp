@@ -143,6 +143,7 @@ int main(int argc, char* argv[]) {
 
 	const config::Config cfg = config::Load();
 	config::InitLogging(cfg.logging_enabled);
+	config::SetHistoryMessageCap(cfg.history_max_messages);
 	hooks::Load(cfg.hooks);
 	mcp::Init(cfg.mcp_servers);
 

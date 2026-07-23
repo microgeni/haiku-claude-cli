@@ -31,6 +31,11 @@ which Genio opens at the edited line.
 For a directly-launched GUI or the CLI, none of those flags are present, so
 the integration stays completely inert.
 
+The command-line flags Genio passes are one half of a general-purpose IPC:
+the Claude GUI accepts the same request as an `'ASKP'` `BMessage` from any
+application. If you are integrating another editor or tool, see
+[`docs/IPC.md`](../../docs/IPC.md) for the full protocol.
+
 ## Installation
 
 `Claude-C` is the Genio extension wrapper. The trailing `-C` makes Genio
