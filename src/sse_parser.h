@@ -44,6 +44,13 @@ struct StreamState {
 	std::string          current_tool_id;
 	std::string          current_tool_name;
 	std::string          current_tool_input_raw;
+	// Extended-thinking accumulation. A thinking block streams its
+	// reasoning via thinking_delta and a cryptographic signature via
+	// signature_delta; both must be preserved in content_blocks so the
+	// block round-trips on subsequent tool-use turns.
+	std::string          current_thinking;
+	std::string          current_thinking_signature;
+	std::string          current_redacted_thinking; // opaque, for redacted blocks
 	std::string          stop_reason;
 };
 

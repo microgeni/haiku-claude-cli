@@ -135,6 +135,7 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 			"  /agents            list subagents Claude can delegate to via Task\n"
 			"  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
 			"  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
+			"  /think [on|off|N]  extended thinking; N = token budget (>=1024)\n"
 			"  /remote-control    toggle Telegram remote control on/off\n"
 			"  /ludicrous         menu to enable/disable ludicrous mode (auto-approve all tool permissions)\n"
 			"  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
@@ -228,6 +229,47 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 			return SlashAction::Continue;
 		}
 		ctx.notify_min_duration = v;
+		std::cout << tui::Meta(state_line()) << "\n";
+		return SlashAction::Continue;
+	}
+	if (cmd == "/think") {
+		// Toggle / set the extended-thinking budget (session-scoped).
+		auto state_line = [&]() {
+			const int b = api::g_thinking_budget.load(std::memory_order_relaxed);
+			char buf[96];
+			if (b > 0)
+				std::snprintf(buf, sizeof(buf), "[thinking: on, budget %d tokens]", b);
+			else
+				std::snprintf(buf, sizeof(buf), "[thinking: off]");
+			return std::string(buf);
+		};
+		if (args.empty()) {
+			std::cout << tui::Meta(state_line()) << "\n";
+			std::cout << tui::Dim("  /think on | off | <budget-tokens>  (on = 8000)") << "\n";
+			return SlashAction::Continue;
+		}
+		if (args == "off") {
+			api::g_thinking_budget.store(0, std::memory_order_relaxed);
+			std::cout << tui::Meta(state_line()) << "\n";
+			return SlashAction::Continue;
+		}
+		if (args == "on") {
+			api::g_thinking_budget.store(8000, std::memory_order_relaxed);
+			std::cout << tui::Meta(state_line()) << "\n";
+			return SlashAction::Continue;
+		}
+		char* end = nullptr;
+		const long v = std::strtol(args.c_str(), &end, 10);
+		if (end == args.c_str() || *end != '\0') {
+			std::cout << tui::Meta("[/think: expected 'on', 'off', or a token budget]") << "\n";
+			return SlashAction::Continue;
+		}
+		// The API requires a minimum thinking budget of 1024 tokens.
+		if (v != 0 && v < 1024) {
+			std::cout << tui::Meta("[/think: budget must be 0 (off) or >= 1024 tokens]") << "\n";
+			return SlashAction::Continue;
+		}
+		api::g_thinking_budget.store(static_cast<int>(v), std::memory_order_relaxed);
 		std::cout << tui::Meta(state_line()) << "\n";
 		return SlashAction::Continue;
 	}

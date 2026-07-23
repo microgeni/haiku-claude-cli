@@ -29,9 +29,16 @@ void ProcessSseEvent(const std::string& event, StreamState* state) {
 			state->current_tool_id.clear();
 			state->current_tool_name.clear();
 			state->current_tool_input_raw.clear();
+			state->current_thinking.clear();
+			state->current_thinking_signature.clear();
+			state->current_redacted_thinking.clear();
 			if (state->current_type == "tool_use") {
 				state->current_tool_id   = cb.value("id",   std::string{});
 				state->current_tool_name = cb.value("name", std::string{});
+			} else if (state->current_type == "redacted_thinking") {
+				// Redacted thinking arrives whole in the start event as an
+				// opaque `data` string; there are no deltas to accumulate.
+				state->current_redacted_thinking = cb.value("data", std::string{});
 			}
 		} else if (type == "content_block_delta") {
 			const auto& delta = j.value("delta", json::object());
@@ -44,12 +51,33 @@ void ProcessSseEvent(const std::string& event, StreamState* state) {
 				state->saw_text = true;
 			} else if (dtype == "input_json_delta") {
 				state->current_tool_input_raw += delta.value("partial_json", "");
+			} else if (dtype == "thinking_delta") {
+				const std::string chunk = delta.value("thinking", "");
+				if (state->sink) state->sink->OnThinking(chunk);
+				state->current_thinking += chunk;
+			} else if (dtype == "signature_delta") {
+				state->current_thinking_signature += delta.value("signature", "");
 			}
 		} else if (type == "content_block_stop") {
 			if (state->current_type == "text") {
 				state->content_blocks.push_back({
 					{"type", "text"},
 					{"text", state->current_text},
+				});
+			} else if (state->current_type == "thinking") {
+				// Preserve the thinking block verbatim (with its signature)
+				// so it can be replayed on the next tool-use turn — the API
+				// rejects a continuation whose thinking block is missing or
+				// has a mismatched signature.
+				state->content_blocks.push_back({
+					{"type",      "thinking"},
+					{"thinking",  state->current_thinking},
+					{"signature", state->current_thinking_signature},
+				});
+			} else if (state->current_type == "redacted_thinking") {
+				state->content_blocks.push_back({
+					{"type", "redacted_thinking"},
+					{"data", state->current_redacted_thinking},
 				});
 			} else if (state->current_type == "tool_use") {
 				json parsed_input = json::object();

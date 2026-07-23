@@ -131,6 +131,77 @@ TEST_CASE("mixed turn: a text block then a tool_use block, in order") {
 	CHECK(st.content_blocks[1]["input"]["pattern"] == "*.cpp");
 }
 
+// ── extended thinking ───────────────────────────────────────────────────────
+
+// Sink that records OnThinking chunks separately from OnText.
+namespace {
+struct ThinkingSink : RecordingSink {
+	std::vector<std::string> thoughts;
+	void OnThinking(const std::string& c) override { thoughts.push_back(c); }
+};
+} // namespace
+
+TEST_CASE("thinking block: deltas stream to OnThinking and round-trip with signature") {
+	StreamState st;
+	ThinkingSink sink;
+	st.sink = &sink;
+
+	ProcessSseEvent(ev(R"({"type":"content_block_start","content_block":{"type":"thinking"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Let me "}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"reason."}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc123"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_stop"})"), &st);
+
+	// Reasoning streamed to OnThinking, not OnText.
+	REQUIRE(sink.thoughts.size() == 2);
+	CHECK(sink.thoughts[0] == "Let me ");
+	CHECK(sink.thoughts[1] == "reason.");
+	CHECK(sink.chunks.empty());
+	CHECK(st.text.empty());
+
+	// The thinking block is preserved with its signature so it round-trips.
+	REQUIRE(st.content_blocks.size() == 1);
+	CHECK(st.content_blocks[0]["type"]      == "thinking");
+	CHECK(st.content_blocks[0]["thinking"]  == "Let me reason.");
+	CHECK(st.content_blocks[0]["signature"] == "abc123");
+}
+
+TEST_CASE("redacted_thinking block preserves its opaque data") {
+	StreamState st;
+	ProcessSseEvent(ev(R"({"type":"content_block_start","content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_stop"})"), &st);
+
+	REQUIRE(st.content_blocks.size() == 1);
+	CHECK(st.content_blocks[0]["type"] == "redacted_thinking");
+	CHECK(st.content_blocks[0]["data"] == "ENCRYPTED");
+}
+
+TEST_CASE("thinking then text then tool_use keeps all three blocks in order") {
+	StreamState st;
+	ThinkingSink sink;
+	st.sink = &sink;
+	// thinking
+	ProcessSseEvent(ev(R"({"type":"content_block_start","content_block":{"type":"thinking"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"signature_delta","signature":"sig"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_stop"})"), &st);
+	// text
+	ProcessSseEvent(ev(R"({"type":"content_block_start","content_block":{"type":"text"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"text_delta","text":"Answer."}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_stop"})"), &st);
+	// tool_use
+	ProcessSseEvent(ev(R"({"type":"content_block_start","content_block":{"type":"tool_use","id":"t1","name":"Read"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}})"), &st);
+	ProcessSseEvent(ev(R"({"type":"content_block_stop"})"), &st);
+
+	REQUIRE(st.content_blocks.size() == 3);
+	CHECK(st.content_blocks[0]["type"] == "thinking");
+	CHECK(st.content_blocks[1]["type"] == "text");
+	CHECK(st.content_blocks[1]["text"] == "Answer.");
+	CHECK(st.content_blocks[2]["type"] == "tool_use");
+}
+
+
 // ── usage & stop_reason ─────────────────────────────────────────────────────
 
 TEST_CASE("message_start records prompt-cache and input token usage") {

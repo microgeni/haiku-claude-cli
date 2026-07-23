@@ -75,6 +75,12 @@ extern bool g_allow_destructive_tools;
 // destructive tool calls and skips permission prompts entirely.
 extern std::atomic<bool> g_ludicrous_mode;
 
+// Extended-thinking budget in tokens for the current session. 0 disables
+// extended thinking; > 0 adds `thinking: {type: "enabled", budget_tokens}`
+// to the request so the model reasons before answering. Set by the /think
+// slash command and the `thinking_budget` config key.
+extern std::atomic<int> g_thinking_budget;
+
 // Pointer to the currently active EscInterruptGuard, exposed so
 // TerminalSink::AskPermission can pause/resume it around SelectOption
 // calls. Null when no turn is in flight.

@@ -1261,6 +1261,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 			// First real output of the turn — erase the thinking spinner.
 			_SpinnerStop();
+			// If we streamed a thinking block, separate it from the reply.
+			if (fInThinking) {
+				_AppendText("\n");
+				fInThinking = false;
+			}
 			if (fInWebFetch) {
 				fWebFetchBuf += text;
 				// If clearly not HTML after 40 chars, emit directly.
@@ -1285,6 +1290,23 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				_ScrollToBottom();
 			else if (fJumpBtn && fJumpBtn->IsHidden())
 				fJumpBtn->Show();  // let the user jump back down when ready
+		}
+		break;
+	}
+
+	case gui::MSG_THINKING: {
+		const char* text = nullptr;
+		if (msg->FindString("text", &text) == B_OK && text) {
+			const bool stick = _IsNearBottom();
+			_SpinnerStop();
+			// Header once per turn, then stream the reasoning dim.
+			if (!fInThinking) {
+				AppendWithColor(fOutput, "\xF0\x9F\x92\xAD thinking\xE2\x80\xA6\n",
+				                kColorToolLine, fZoomFactor);
+				fInThinking = true;
+			}
+			AppendWithColor(fOutput, text, kColorToolLine, fZoomFactor);
+			if (stick) _ScrollToBottom();
 		}
 		break;
 	}

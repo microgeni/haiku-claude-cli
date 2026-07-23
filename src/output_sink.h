@@ -24,6 +24,12 @@ struct OutputSink {
 	// A chunk of streamed assistant text arrived (SSE text_delta).
 	virtual void OnText(const std::string& chunk) = 0;
 
+	// A chunk of streamed extended-thinking reasoning arrived (SSE
+	// thinking_delta). Front-ends render this dim / de-emphasized, or
+	// ignore it. Default is a no-op so sinks that don't care (Telegram)
+	// need no change.
+	virtual void OnThinking(const std::string& /*chunk*/) {}
+
 	// A meta/status notice should be displayed (tool notices,
 	// "[interrupted]", etc.).
 	virtual void OnMeta(const std::string& text) = 0;

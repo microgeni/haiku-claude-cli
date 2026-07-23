@@ -293,6 +293,7 @@ key is optional; CLI flags override the file.
   "model":      "claude-sonnet-4-6",
   "max_tokens": 8192,
   "history_max_messages": 200,
+  "thinking_budget": 0,
   "system":     "Extra system instructions appended after the preamble.",
   "show_usage": false,
 

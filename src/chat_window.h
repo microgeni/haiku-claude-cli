@@ -234,6 +234,9 @@ private:
 
 	// ── WebFetch HTML stripping ──────────────────────────────────────────────
 	bool           fInWebFetch    = false;
+	// True once a thinking chunk has arrived this turn, so the first real
+	// text chunk can insert a separator after the dim reasoning block.
+	bool           fInThinking    = false;
 	std::string    fWebFetchBuf;
 
 	// ── Styling ─────────────────────────────────────────────────────────────

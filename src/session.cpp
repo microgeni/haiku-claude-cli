@@ -254,7 +254,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	std::vector<std::string> all_slash = {
 		"/help", "/clear", "/model", "/compact", "/usage",
 		"/todos", "/memory", "/stats", "/skills", "/agents",
-		"/open", "/notify",
+		"/open", "/notify", "/think",
 		"/remote-control", "/ludicrous", "/exit", "/quit",
 	};
 	for (const auto& c : commands::Names()) all_slash.push_back("/" + c);

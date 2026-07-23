@@ -298,6 +298,8 @@ Config Load() {
 		if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
 		if (j.contains("history_max_messages") && j["history_max_messages"].is_number_integer())
 			cfg.history_max_messages = j["history_max_messages"].get<int>();
+		if (j.contains("thinking_budget") && j["thinking_budget"].is_number_integer())
+			cfg.thinking_budget = j["thinking_budget"].get<int>();
 		if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
 		if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
 		if (j.contains("prices"))       cfg.prices      = j["prices"];

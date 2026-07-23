@@ -276,6 +276,7 @@ public:
 		const config::Config cfg = config::Load();
 		config::InitLogging(cfg.logging_enabled);
 		config::SetHistoryMessageCap(cfg.history_max_messages);
+		api::g_thinking_budget.store(cfg.thinking_budget, std::memory_order_relaxed);
 		config::LogLine("gui ReadyToRun fromGenio="
 			+ std::string(fFromGenio ? "yes" : "no")
 			+ " argv=[" + fRawArgv + "]");
