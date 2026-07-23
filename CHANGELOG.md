@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.2] - 2026-07-23
+
+### Fixed
+
+- **flawfinder version skew — remaining false positive annotated.** v1.12.1
+  annotated the level-3+ hits flagged by flawfinder 2.0.20, but CI runs
+  2.0.19, whose `system` rule also matches the `cfg.system` member read in
+  `app_main_gui.cpp` (a struct field, not a shell call). Installed the exact
+  CI version locally to reproduce, confirmed a clean level-3+ scan, and
+  annotated the remaining line so `make security` / `ci_scripts/check.sh`
+  exit clean on the CI runner.
+
 ## [1.12.1] - 2026-07-23
 
 ### Fixed
