@@ -7,6 +7,8 @@
 
 #include <TextView.h>
 
+#include "md_text.h"  // md::StripHtml / table-parsing (pure logic).
+
 // MdRenderer — inline markdown renderer for BTextView.
 //
 // Parses a stream of text chunks (as they arrive from the model) and
@@ -130,9 +132,10 @@ private:
 	int fSeparatorRow = -1;
 };
 
-// Strip HTML tags and decode common entities from a string.
-// Used to make WebFetch output readable in plain BTextView.
-std::string StripHtml(const std::string& html);
+// Strip HTML tags and decode common entities from a string. The declaration
+// and definition now live in md_text.h / md_text.cpp (pure, unit-tested);
+// md_text.h is included at the top of this header so existing callers of
+// md::StripHtml via "md_renderer.h" keep compiling unchanged.
 
 } // namespace md
 
