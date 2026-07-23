@@ -25,6 +25,7 @@ constexpr uint32_t MSG_TICK         = 'TICK'; // 80-ms spinner tick
 // MSG_SESSIONS / MSG_SESSION_LOAD reserved for future project.
 constexpr uint32_t MSG_MODELS_READY = 'MDLS'; // background model fetch complete
 constexpr uint32_t MSG_ABOUT        = 'ABUT'; // Help > About Claude
+constexpr uint32_t MSG_DIAGNOSTICS  = 'DIAG'; // Help > Diagnostics…
 constexpr uint32_t MSG_HELP_DOCS    = 'HDOC'; // Help > Documentation
 constexpr uint32_t MSG_DEMO_MARKDOWN = 'DMMD'; // Help > Show Markdown Demo
 constexpr uint32_t MSG_LUDICROUS     = 'LUDC'; // Tools > Ludicrous Mode toggle

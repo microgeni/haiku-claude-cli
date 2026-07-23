@@ -311,6 +311,7 @@ private:
 	void _LoadSession(const std::string& path); // restore a saved session
 	void _InsertFileContent(const std::string& path); // drag-drop helper
 	void _ShowMarkdownDemo();    // render a rich markdown example into the chat output
+	void _ShowDiagnostics();     // open the Help ▸ Diagnostics report window
 	void _DismissWelcome();      // hide the startup splash once a turn begins
 	void _ExportTranscript(const std::string& path); // write fMessages as Markdown
 

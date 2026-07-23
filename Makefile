@@ -132,6 +132,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/agents.cpp      \
     $(SRCDIR)/commands.cpp    \
     $(SRCDIR)/config.cpp      \
+    $(SRCDIR)/diagnostics.cpp \
     $(SRCDIR)/editor_integration.cpp \
     $(SRCDIR)/hooks.cpp       \
     $(SRCDIR)/history_util.cpp \

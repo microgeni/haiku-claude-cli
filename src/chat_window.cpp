@@ -72,6 +72,7 @@
 #include "transcript_export.h"
 #include "gui_widgets.h"
 #include "gui_scale.h"
+#include "diagnostics.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -959,6 +960,8 @@ void ChatWindow::_BuildMenuBar()
 	helpMenu->AddItem(new BMenuItem("Show Markdown Demo",
 		new BMessage(gui::MSG_DEMO_MARKDOWN)));
 	helpMenu->AddSeparatorItem();
+	helpMenu->AddItem(new BMenuItem("Diagnostics\xE2\x80\xA6", // …
+		new BMessage(gui::MSG_DIAGNOSTICS)));
 	helpMenu->AddItem(new BMenuItem("About Claude\xE2\x80\xA6", // …
 		new BMessage(gui::MSG_ABOUT)));
 	fMenuBar->AddItem(helpMenu);
@@ -2167,6 +2170,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		about->Show();
 		break;
 	}
+
+	case gui::MSG_DIAGNOSTICS:
+		_ShowDiagnostics();
+		break;
 
 	case gui::MSG_HELP_DOCS: {
 		// Open the project README on GitHub in the default browser.
@@ -3689,6 +3696,39 @@ void ChatWindow::_RefsReceived(BMessage* msg)
 		if (entry.GetPath(&path) == B_OK)
 			_InsertFileContent(path.Path());
 	}
+}
+
+void ChatWindow::_ShowDiagnostics()
+{
+	const std::string report = diagnostics::BuildReport(
+		fModel, fWorkingDir, config::kVersion);
+
+	// A simple read-only text window. Created detached (its own looper)
+	// like the About box, so it doesn't block the chat window.
+	BRect frame(0, 0, gui::ScalePx(520), gui::ScalePx(420));
+	BWindow* win = new BWindow(frame, "Diagnostics",
+		B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+		B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE);
+
+	BTextView* text = new BTextView("diagtext", B_WILL_DRAW);
+	text->MakeEditable(false);
+	text->SetStylable(false);
+	text->SetWordWrap(false);
+	text->SetInsets(gui::ScalePx(8), gui::ScalePx(8),
+	                gui::ScalePx(8), gui::ScalePx(8));
+	text->SetFontAndColor(be_fixed_font);
+	text->SetText(report.c_str());
+
+	BScrollView* scroll = new BScrollView("diagscroll", text,
+		0, true, true, B_FANCY_BORDER);
+
+	BLayoutBuilder::Group<>(win, B_VERTICAL, 0)
+		.Add(scroll)
+	.End();
+
+	win->ResizeTo(gui::ScalePx(520), gui::ScalePx(420));
+	win->CenterOnScreen();
+	win->Show();
 }
 
 void ChatWindow::_ShowMarkdownDemo()
