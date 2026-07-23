@@ -313,7 +313,7 @@ public:
 
 		// If no -w flag was given, fall back to the environment variable.
 		if (fWorkingDir.empty()) {
-			const char* env = std::getenv("CLAUDE_WORKING_DIR");
+			const char* env = std::getenv("CLAUDE_WORKING_DIR");  // flawfinder: ignore (null-checked; used only as a path)
 			if (env != nullptr)
 				fWorkingDir = env;
 		}

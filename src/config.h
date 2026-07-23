@@ -29,7 +29,7 @@ extern const int         kMaxTokens;
 struct Config {
 	std::string model;
 	int         max_tokens = 0;
-	std::string system;
+	std::string system;  // flawfinder: ignore (member name, not the system() call)
 	bool        show_usage              = false;
 	bool        logging_enabled         = false;
 	bool        fAllowDestructiveTools = false;
