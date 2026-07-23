@@ -66,7 +66,9 @@ GUI_ONLY_SRCS := \
     $(SRCDIR)/md_renderer.cpp       \
     $(SRCDIR)/syntax_highlight.cpp  \
     $(SRCDIR)/tool_bar.cpp          \
+    $(SRCDIR)/gui_scale.cpp         \
     $(SRCDIR)/gui_widgets.cpp       \
+    $(SRCDIR)/settings_dialog.cpp   \
     $(SRCDIR)/chat_window.cpp       \
     $(SRCDIR)/app_main_gui.cpp
 
@@ -153,7 +155,9 @@ GUI_FRONT_SRCS := \
     $(SRCDIR)/syntax_highlight.cpp  \
     $(SRCDIR)/gui_stubs.cpp         \
     $(SRCDIR)/gui_sink.cpp          \
+    $(SRCDIR)/gui_scale.cpp         \
     $(SRCDIR)/gui_widgets.cpp       \
+    $(SRCDIR)/settings_dialog.cpp   \
     $(SRCDIR)/session_store.cpp     \
     $(SRCDIR)/telegram.cpp          \
     $(SRCDIR)/tool_bar.cpp          \
