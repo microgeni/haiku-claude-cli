@@ -136,6 +136,8 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 			"  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
 			"  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
 			"  /think [on|off|N]  extended thinking; N = token budget (>=1024)\n"
+			"  /plan              read-only research mode; propose a plan first\n"
+			"  /execute           leave plan mode; restore full tools\n"
 			"  /remote-control    toggle Telegram remote control on/off\n"
 			"  /ludicrous         menu to enable/disable ludicrous mode (auto-approve all tool permissions)\n"
 			"  /exit, /quit       leave the REPL (Ctrl+D also works)\n")
@@ -271,6 +273,18 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 		}
 		api::g_thinking_budget.store(static_cast<int>(v), std::memory_order_relaxed);
 		std::cout << tui::Meta(state_line()) << "\n";
+		return SlashAction::Continue;
+	}
+	if (cmd == "/plan" || cmd == "/execute") {
+		const bool want_on = (cmd == "/plan") && (args != "off");
+		api::g_plan_mode.store(want_on, std::memory_order_relaxed);
+		if (want_on) {
+			std::cout << tui::Meta("[plan mode: ON — read-only tools; "
+				"Claude will propose a plan, not act]") << "\n";
+			std::cout << tui::Dim("  /execute (or /plan off) to leave plan mode") << "\n";
+		} else {
+			std::cout << tui::Meta("[plan mode: OFF — full tools restored]") << "\n";
+		}
 		return SlashAction::Continue;
 	}
 	if (cmd == "/open") {

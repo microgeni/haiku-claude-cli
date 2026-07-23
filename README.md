@@ -414,6 +414,9 @@ Bot commands available from Telegram:
 | `/cost`              | Same as `/usage`.                                                 |
 | `/todos`             | Print the current in-session todo list.                           |
 | `/stats`             | Lifetime token usage and tool stats.                              |
+| `/think [on\|off\|N]` | Extended thinking: give the model a reasoning budget (N tokens, ≥1024) before it answers. |
+| `/plan`              | Read-only research mode — Claude investigates and proposes a numbered plan without touching anything. |
+| `/execute`           | Leave plan mode; restore the full tool set.                       |
 | `/ludicrous`         | Toggle ludicrous mode (auto-approve all tool permissions).        |
 | `/help` or `/start`  | Show the full command list.                                       |
 

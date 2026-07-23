@@ -166,6 +166,7 @@ private:
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
+	BMenuItem*     fPlanItem      = nullptr;  // Tools > Plan Mode (checkmark)
 	BMenuItem*     fRemoteItem    = nullptr;  // Tools > Remote Control (checkmark)
 	BMenuItem*     fInputItem     = nullptr;  // View > Input (checkmark)
 	BTextView*     fOutput        = nullptr;

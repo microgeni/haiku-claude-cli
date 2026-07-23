@@ -29,6 +29,7 @@ constexpr uint32_t MSG_DIAGNOSTICS  = 'DIAG'; // Help > Diagnostics…
 constexpr uint32_t MSG_HELP_DOCS    = 'HDOC'; // Help > Documentation
 constexpr uint32_t MSG_DEMO_MARKDOWN = 'DMMD'; // Help > Show Markdown Demo
 constexpr uint32_t MSG_LUDICROUS     = 'LUDC'; // Tools > Ludicrous Mode toggle
+constexpr uint32_t MSG_PLAN_MODE     = 'PLAN'; // Tools > Plan Mode toggle
 constexpr uint32_t MSG_REMOTE_CONTROL = 'RMTC'; // Tools > Remote Control toggle
 constexpr uint32_t MSG_REMOTE_APPEND  = 'RMAP'; // remote turn finished: append to history
 constexpr uint32_t MSG_BROWSE_WORKDIR = 'BRWD'; // Settings: browse for working dir

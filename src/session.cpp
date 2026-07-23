@@ -256,7 +256,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	std::vector<std::string> all_slash = {
 		"/help", "/clear", "/model", "/compact", "/usage",
 		"/todos", "/memory", "/stats", "/skills", "/agents",
-		"/open", "/notify", "/think",
+		"/open", "/notify", "/think", "/plan", "/execute",
 		"/remote-control", "/ludicrous", "/exit", "/quit",
 	};
 	for (const auto& c : commands::Names()) all_slash.push_back("/" + c);
@@ -297,8 +297,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// Mute state gets an appended "· muted" marker.
 	auto compose_status = [&]() {
 		std::string right;
+		if (api::g_plan_mode.load()) {
+			right = tui::Green("\xF0\x9F\x93\x8B PLAN"); // 📋 PLAN
+		}
 		if (api::g_ludicrous_mode.load()) {
-			right = tui::Yellow("\xE2\x9A\xA1 LUDICROUS");
+			if (!right.empty()) right += tui::Dim("  \xC2\xB7  ");
+			right += tui::Yellow("\xE2\x9A\xA1 LUDICROUS");
 		}
 		if (remote && remote->Running()) {
 			if (!right.empty()) right += tui::Dim("  \xC2\xB7  ");

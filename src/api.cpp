@@ -51,6 +51,7 @@ StreamProgress* g_stream_progress        = nullptr; // local-mirror only
 bool g_allow_destructive_tools           = false;
 std::atomic<bool> g_ludicrous_mode       { false };
 std::atomic<int>  g_thinking_budget      { 0 };
+std::atomic<bool> g_plan_mode            { false };
 std::map<std::string, std::string> g_last_rate_headers;
 
 std::unordered_set<std::string>& AlwaysAllowed() {

@@ -22,6 +22,7 @@ extern volatile sig_atomic_t g_interrupted;
 
 #include <curl/curl.h>
 
+#include "api.h"
 #include "mcp.h"
 #include "paths.h"
 #include "tui.h"
@@ -1431,6 +1432,16 @@ json Definitions() {
 	for (const auto& t : haiku_definitions()) out.push_back(t);
 #endif
 	for (const auto& t : mcp::ToolDefinitions()) out.push_back(t);
+
+	// Plan mode: strip every tool that could mutate state so the model can
+	// research and propose a plan but physically cannot act.
+	if (api::g_plan_mode.load(std::memory_order_relaxed)) {
+		json filtered = json::array();
+		for (const auto& t : out)
+			if (IsReadOnly(t.value("name", std::string{})))
+				filtered.push_back(t);
+		return filtered;
+	}
 	return out;
 }
 
@@ -1493,6 +1504,22 @@ bool RequiresPermission(const std::string& name) {
 	if (name == "IndexAttr") return true;
 #endif
 	if (mcp::IsMcpTool(name)) return true;
+	return false;
+}
+
+bool IsReadOnly(const std::string& name) {
+	// Positive allowlist: only tools we can guarantee never touch the
+	// filesystem, shell, or external state. TodoWrite mutates only an
+	// in-process list, so it's plan-safe.
+	if (name == "Read" || name == "Glob" || name == "Grep"
+	    || name == "WebFetch" || name == "WebSearch"
+	    || name == "Task" || name == "TodoRead" || name == "TodoWrite")
+		return true;
+#ifdef __HAIKU__
+	if (name == "Query" || name == "ReadAttr") return true;
+#endif
+	// Bash, Write, Edit, WriteAttr, IndexAttr, and every MCP tool can
+	// mutate — not plan-safe.
 	return false;
 }
 

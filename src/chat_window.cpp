@@ -358,6 +358,15 @@ void ChatWindow::_BuildMenuBar()
 	fLudicrousItem->SetMarked(api::g_ludicrous_mode.load());
 	toolsMenu->AddItem(fLudicrousItem);
 
+	// Plan mode: read-only research. Claude gets only non-mutating tools
+	// and is asked to propose a plan instead of acting. Checkmark mirrors
+	// api::g_plan_mode.
+	fPlanItem = new BMenuItem(
+		"\xF0\x9F\x93\x8B Plan Mode  \xE2\x80\x94  read-only; propose a plan first",
+		new BMessage(gui::MSG_PLAN_MODE));
+	fPlanItem->SetMarked(api::g_plan_mode.load());
+	toolsMenu->AddItem(fPlanItem);
+
 	// Remote control: starts a background Telegram poller so allowed users can
 	// drive turns on this machine. The checkmark mirrors fRemote's running
 	// state, kept in sync by _ToggleRemote(). The item is disabled (grayed
@@ -1639,6 +1648,19 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		const std::string notice = nowOn
 			? "\xE2\x9A\xA1 Ludicrous mode ON \xE2\x80\x94 all tool permissions auto-approved\n"
 			: "\xE2\x9A\xA1 Ludicrous mode OFF \xE2\x80\x94 permission prompts restored\n";
+		_AppendToolLine(notice);
+		break;
+	}
+
+	case gui::MSG_PLAN_MODE: {
+		// Toggle plan mode; update the checkmark and badge to match.
+		const bool nowOn = !api::g_plan_mode.load();
+		api::g_plan_mode.store(nowOn);
+		if (fPlanItem)  fPlanItem->SetMarked(nowOn);
+		if (fTokenBar)  fTokenBar->SetPlan(nowOn);
+		const std::string notice = nowOn
+			? "\xF0\x9F\x93\x8B Plan mode ON \xE2\x80\x94 read-only tools; Claude will propose a plan, not act\n"
+			: "\xF0\x9F\x93\x8B Plan mode OFF \xE2\x80\x94 full tools restored\n";
 		_AppendToolLine(notice);
 		break;
 	}
