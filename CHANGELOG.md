@@ -25,10 +25,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`gui_messages.h`), the five self-contained helper widgets —
   `ChoiceModal`, `SessionItem`, `RenameModal`, `SessionListView`,
   `NotifySlider` (`gui_widgets.{h,cpp}`) — the HiDPI scale helpers
-  (`gui_scale.{h,cpp}`), and the `SettingsDialog` (`settings_dialog.{h,cpp}`)
-  now live outside `chat_window.cpp` (4507 → 3928 lines, −13%). No
-  behavioural change; the transcript extraction also gained 12 unit tests it
-  never had.
+  (`gui_scale.{h,cpp}`), the `SettingsDialog` (`settings_dialog.{h,cpp}`),
+  the chat output palette (`gui_colors.h`), and the five custom chat views —
+  `InputView`, `InputContainer`, `ChatTextView`, `TokenBar`, `WelcomeView`
+  (`gui_views.{h,cpp}`) — now live outside `chat_window.cpp` (4507 → 3428
+  lines, −24%). No behavioural change; the transcript extraction also gained
+  12 unit tests it never had.
 
 ### Added
 
