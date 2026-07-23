@@ -19,18 +19,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`chat_window.cpp` decomposition (part 1).** The 4507-line GUI window is
-  being broken into cohesive translation units. So far: the transcript
-  serializer (`transcript::ToMarkdown`), the 35 shared `gui::MSG_*` codes
-  (`gui_messages.h`), the five self-contained helper widgets —
-  `ChoiceModal`, `SessionItem`, `RenameModal`, `SessionListView`,
-  `NotifySlider` (`gui_widgets.{h,cpp}`) — the HiDPI scale helpers
-  (`gui_scale.{h,cpp}`), the `SettingsDialog` (`settings_dialog.{h,cpp}`),
-  the chat output palette (`gui_colors.h`), and the five custom chat views —
-  `InputView`, `InputContainer`, `ChatTextView`, `TokenBar`, `WelcomeView`
-  (`gui_views.{h,cpp}`) — now live outside `chat_window.cpp` (4507 → 3428
-  lines, −24%). No behavioural change; the transcript extraction also gained
-  12 unit tests it never had.
+- **`chat_window.cpp` decomposition.** The 4507-line GUI window was broken
+  into cohesive translation units. Extracted as standalone units (fully
+  decoupled from `ChatWindow`): the transcript serializer
+  (`transcript::ToMarkdown`), the 35 shared `gui::MSG_*` codes
+  (`gui_messages.h`), the five helper widgets — `ChoiceModal`, `SessionItem`,
+  `RenameModal`, `SessionListView`, `NotifySlider` (`gui_widgets.{h,cpp}`) —
+  the HiDPI scale helpers (`gui_scale.{h,cpp}`), the `SettingsDialog`
+  (`settings_dialog.{h,cpp}`), the chat output palette (`gui_colors.h`), and
+  the five custom chat views — `InputView`, `InputContainer`, `ChatTextView`,
+  `TokenBar`, `WelcomeView` (`gui_views.{h,cpp}`). Three cohesive `ChatWindow`
+  feature groups also moved into companion translation units (still the same
+  class, split across files for navigability): find-in-conversation
+  (`chat_window_find.cpp`), the session sidebar (`chat_window_sessions.cpp`),
+  and persisted GUI preferences (`chat_window_prefs.cpp`). `chat_window.cpp`
+  is now **3116 lines, down from 4507 (−31%)**. No behavioural change; the
+  transcript extraction also gained 12 unit tests it never had.
 
 ### Added
 
