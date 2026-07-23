@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-07-23
+
+### Fixed
+
+- **flawfinder false positives annotated.** The CI security audit (now
+  available in the build environment) flagged five pre-existing level-3+
+  hits, none of them security defects: a `std::string system` struct member
+  (name collision with the `system()` call), two `readlink("/proc/self/exe")`
+  calls that read the binary's own path (buffer zero-initialized, return
+  checked), and two null-checked `getenv("CLAUDE_WORKING_DIR")` reads used
+  only as a path. Each is annotated with `// flawfinder: ignore` per the
+  project convention so `make security` and `ci_scripts/check.sh` exit clean.
+
 ## [1.12.0] - 2026-07-23
 
 ### Added
