@@ -15,6 +15,7 @@
 // Defined here so both gui_sink.cpp and chat_window.cpp share them.
 namespace gui {
 constexpr uint32_t MSG_CHUNK       = 'CHNK'; // B_STRING_TYPE "text"
+constexpr uint32_t MSG_THINKING    = 'THNK'; // B_STRING_TYPE "text" (dim reasoning)
 constexpr uint32_t MSG_DONE        = 'DONE'; // turn complete
 constexpr uint32_t MSG_TOOL_START  = 'TSTR'; // B_STRING_TYPE "name", "summary"
 constexpr uint32_t MSG_TOOL_DONE   = 'TDNE'; // B_STRING_TYPE "name", B_BOOL_TYPE "ok"
@@ -66,6 +67,7 @@ public:
 	// ── OutputSink (adapter layer, removed when SendWithTools takes
 	//    StructuredSink* directly in a future step) ─────────────────────
 	void OnText(const std::string& chunk) override;
+	void OnThinking(const std::string& chunk) override;
 	void OnMeta(const std::string&)       override {} // suppressed in GUI
 	void OnDiag(const std::string&)       override {} // suppressed in GUI
 	void OnToolStatus(const std::string& phase) override;

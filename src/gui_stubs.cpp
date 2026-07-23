@@ -20,6 +20,7 @@ TerminalSink::TerminalSink()  { /* no-op in GUI */ }
 TerminalSink::~TerminalSink() { if (fSpinner) { delete fSpinner; fSpinner = nullptr; } }
 void TerminalSink::SetLiveInputTokens(std::atomic<int>*) {}
 void TerminalSink::OnText(const std::string&) {}
+void TerminalSink::OnThinking(const std::string&) {}
 void TerminalSink::OnMeta(const std::string&) {}
 void TerminalSink::OnDiag(const std::string&) {}
 void TerminalSink::OnError(const std::string&) {}

@@ -39,7 +39,9 @@ project size.
 - **Drag and drop**: drop any file from Tracker onto the Terminal window.
   The CLI detects the pasted path, attaches the file's content to the
   next message, and shows a confirmation line — no copy-paste of file
-  paths required.
+  paths required. **Dropped images** (jpeg / png / gif / webp, up to 5 MB)
+  are sent as vision content blocks so you can ask Claude about a
+  screenshot or diagram, not just text files.
 - **Desktop notifications**: when a long-running response finishes,
   `claude-cli` fires a native `BNotification` via Haiku's
   `notification_server`. The alert shows the first sentence of the
@@ -293,6 +295,7 @@ key is optional; CLI flags override the file.
   "model":      "claude-sonnet-4-6",
   "max_tokens": 8192,
   "history_max_messages": 200,
+  "thinking_budget": 0,
   "system":     "Extra system instructions appended after the preamble.",
   "show_usage": false,
 
@@ -411,6 +414,9 @@ Bot commands available from Telegram:
 | `/cost`              | Same as `/usage`.                                                 |
 | `/todos`             | Print the current in-session todo list.                           |
 | `/stats`             | Lifetime token usage and tool stats.                              |
+| `/think [on\|off\|N]` | Extended thinking: give the model a reasoning budget (N tokens, ≥1024) before it answers. |
+| `/plan`              | Read-only research mode — Claude investigates and proposes a numbered plan without touching anything. |
+| `/execute`           | Leave plan mode; restore the full tool set.                       |
 | `/ludicrous`         | Toggle ludicrous mode (auto-approve all tool permissions).        |
 | `/help` or `/start`  | Show the full command list.                                       |
 

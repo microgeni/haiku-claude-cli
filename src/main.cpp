@@ -144,6 +144,7 @@ int main(int argc, char* argv[]) {
 	const config::Config cfg = config::Load();
 	config::InitLogging(cfg.logging_enabled);
 	config::SetHistoryMessageCap(cfg.history_max_messages);
+	api::g_thinking_budget.store(cfg.thinking_budget, std::memory_order_relaxed);
 	hooks::Load(cfg.hooks);
 	mcp::Init(cfg.mcp_servers);
 

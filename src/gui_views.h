@@ -158,6 +158,10 @@ public:
 	// "⚡ LUDICROUS" badge so the auto-approve state is always visible.
 	void	SetLudicrous(bool on);
 
+	// Plan mode indicator: when on, the bar draws a green "📋 PLAN"
+	// badge so the read-only research state is always visible.
+	void	SetPlan(bool on);
+
 	// Remote control indicator: when on, the bar draws a cyan
 	// "📡 REMOTE" badge so the active Telegram bridge is always visible.
 	void	SetRemote(bool on);
@@ -172,6 +176,7 @@ private:
 	double fPriceOut = 0.0;   // $ per 1M output tokens
 	bool   fLudicrous = false; // Tools > Ludicrous Mode state
 	bool   fRemote    = false; // Tools > Remote Control state
+	bool   fPlan      = false; // Tools > Plan Mode state
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

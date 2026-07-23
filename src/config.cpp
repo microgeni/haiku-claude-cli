@@ -16,6 +16,7 @@
 #include "paths.h"
 #include "skills.h"
 #include "agents.h"
+#include "api.h"       // api::g_plan_mode (plan-mode directive)
 #include "history_util.h"
 
 namespace config {
@@ -298,6 +299,8 @@ Config Load() {
 		if (j.contains("max_tokens")) cfg.max_tokens = j["max_tokens"].get<int>();
 		if (j.contains("history_max_messages") && j["history_max_messages"].is_number_integer())
 			cfg.history_max_messages = j["history_max_messages"].get<int>();
+		if (j.contains("thinking_budget") && j["thinking_budget"].is_number_integer())
+			cfg.thinking_budget = j["thinking_budget"].get<int>();
 		if (j.contains("system"))     cfg.system     = j["system"].get<std::string>();
 		if (j.contains("show_usage")) cfg.show_usage = j["show_usage"].get<bool>();
 		if (j.contains("prices"))       cfg.prices      = j["prices"];
@@ -407,6 +410,19 @@ std::string ComposeSystem(const std::string& flag_system,
 	append(BehaviorSystemBlock());
 	append(skills::SystemBlock());
 	append(agents::SystemBlock());
+	// Plan mode: ask the model to research and present a plan instead of
+	// acting. The read-only tool filter (tools::Definitions) is the hard
+	// guarantee; this directive shapes the behaviour.
+	if (api::g_plan_mode.load(std::memory_order_relaxed)) {
+		append(
+			"PLAN MODE IS ACTIVE. Do not modify anything. You have only "
+			"read-only tools (no Bash, Write, Edit, or other state-changing "
+			"tools). Investigate the request using the available read tools, "
+			"then present a concise, numbered plan of the changes you would "
+			"make — files to touch, commands to run, and the order — and stop. "
+			"Do not begin implementing until the user leaves plan mode "
+			"(they will run /execute).");
+	}
 	append(flag_system);
 
 	// Append the working directory so Claude always knows where relative

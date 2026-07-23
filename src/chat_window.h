@@ -166,6 +166,7 @@ private:
 	// ── Widgets ─────────────────────────────────────────────────────────────
 	BMenuBar*      fMenuBar       = nullptr;  // native top menu bar
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
+	BMenuItem*     fPlanItem      = nullptr;  // Tools > Plan Mode (checkmark)
 	BMenuItem*     fRemoteItem    = nullptr;  // Tools > Remote Control (checkmark)
 	BMenuItem*     fInputItem     = nullptr;  // View > Input (checkmark)
 	BTextView*     fOutput        = nullptr;
@@ -234,6 +235,9 @@ private:
 
 	// ── WebFetch HTML stripping ──────────────────────────────────────────────
 	bool           fInWebFetch    = false;
+	// True once a thinking chunk has arrived this turn, so the first real
+	// text chunk can insert a separator after the dim reasoning block.
+	bool           fInThinking    = false;
 	std::string    fWebFetchBuf;
 
 	// ── Styling ─────────────────────────────────────────────────────────────

@@ -50,6 +50,8 @@ static thread_local std::vector<std::string> tl_written_summary_paths;
 StreamProgress* g_stream_progress        = nullptr; // local-mirror only
 bool g_allow_destructive_tools           = false;
 std::atomic<bool> g_ludicrous_mode       { false };
+std::atomic<int>  g_thinking_budget      { 0 };
+std::atomic<bool> g_plan_mode            { false };
 std::map<std::string, std::string> g_last_rate_headers;
 
 std::unordered_set<std::string>& AlwaysAllowed() {
@@ -397,6 +399,24 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	};
 	if (include_tools) {
 		body["tools"] = tools::Definitions();
+	}
+
+	// Extended thinking: when a budget is set, the model reasons in a
+	// visible "thinking" block before answering. The API requires
+	// max_tokens > budget_tokens (the budget is drawn from the same
+	// output allowance), so bump max_tokens to leave room for a real
+	// reply if the caller's cap is too tight. Thinking also forces
+	// temperature=1, so we simply never send temperature.
+	const int think_budget = g_thinking_budget.load(std::memory_order_relaxed);
+	if (think_budget > 0) {
+		int effective_max = max_tokens;
+		if (effective_max <= think_budget)
+			effective_max = think_budget + 4096;
+		body["max_tokens"] = effective_max;
+		body["thinking"] = {
+			{"type",          "enabled"},
+			{"budget_tokens", think_budget},
+		};
 	}
 
 	// When OAuth is active, Anthropic gates the request unless the

@@ -415,6 +415,14 @@ void TokenBar::Draw(BRect updateRect)
 	// CLI status bar. The session stats start after the badge(s).
 	float statsLeft = r.left + ScalePx(4.0f);
 	const std::string sep = "  \xC2\xB7  ";
+	if (fPlan) {
+		const std::string badge = "\xF0\x9F\x93\x8B PLAN"; // 📋
+		SetHighColor(80, 200, 80, 255); // green — read-only research
+		MovePenTo(statsLeft, baseline);
+		DrawString(badge.c_str());
+		statsLeft += f.StringWidth(badge.c_str()) + f.StringWidth(sep.c_str());
+		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+	}
 	if (fLudicrous) {
 		const std::string badge = "\xE2\x9A\xA1 LUDICROUS";
 		SetHighColor(230, 170, 50, 255); // amber, matches the bar's warning tone
@@ -469,6 +477,13 @@ void TokenBar::SetLudicrous(bool on)
 {
 	if (fLudicrous == on) return;
 	fLudicrous = on;
+	Invalidate();
+}
+
+void TokenBar::SetPlan(bool on)
+{
+	if (fPlan == on) return;
+	fPlan = on;
 	Invalidate();
 }
 

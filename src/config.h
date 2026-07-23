@@ -45,6 +45,9 @@ struct Config {
 	// long single session. 200 ≈ 100 turns. Applied on both save and
 	// load. Configurable via the "history_max_messages" config key.
 	int         history_max_messages    = 200;
+	// Extended-thinking token budget. 0 disables; > 0 enables a visible
+	// reasoning block before each reply (see api::g_thinking_budget).
+	int         thinking_budget         = 0;
 	json        prices;
 	json        hooks;
 	json        mcp_servers;

@@ -29,6 +29,13 @@ ToolResult Run(const std::string& name, const json& input);
 // first execution in a session. Currently Bash and Write.
 bool RequiresPermission(const std::string& name);
 
+// True when a tool cannot mutate the filesystem, shell, or any external
+// state — safe to expose in Plan Mode. Read/Glob/Grep/WebFetch/WebSearch/
+// Task/TodoRead/TodoWrite plus the Haiku read-only BFS tools (Query,
+// ReadAttr). Bash, Write, Edit, WriteAttr, IndexAttr, and every MCP tool
+// are treated as potentially mutating and excluded.
+bool IsReadOnly(const std::string& name);
+
 // Optional multi-line description of what the tool would do if the
 // caller approves it. Shown between the `[tool: Name ...]` notice and
 // the permission prompt. Empty for tools where the input dump is

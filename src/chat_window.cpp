@@ -74,6 +74,7 @@
 #include "gui_scale.h"
 #include "gui_colors.h"
 #include "diagnostics.h"
+#include "image_util.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -88,51 +89,11 @@ namespace {
 float gui_scale() { return gui::Scale(); }
 float ScalePx(float px) { return gui::ScalePx(px); }
 
-// Standard RFC 4648 base64 encoder (not URL-safe — the Anthropic image
-// API wants '+' / '/' with '=' padding). Used to embed dropped image
-// files as base64 `image` content blocks in the outgoing message.
-std::string Base64Encode(const std::string& in)
-{
-	static const char* kTable =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	std::string out;
-	out.reserve(((in.size() + 2) / 3) * 4);
-	size_t i = 0;
-	for (; i + 2 < in.size(); i += 3) {
-		const unsigned n = (static_cast<unsigned char>(in[i]) << 16)
-		                 | (static_cast<unsigned char>(in[i + 1]) << 8)
-		                 |  static_cast<unsigned char>(in[i + 2]);
-		out += kTable[(n >> 18) & 63];
-		out += kTable[(n >> 12) & 63];
-		out += kTable[(n >> 6) & 63];
-		out += kTable[n & 63];
-	}
-	if (i < in.size()) {
-		unsigned n = static_cast<unsigned char>(in[i]) << 16;
-		if (i + 1 < in.size())
-			n |= static_cast<unsigned char>(in[i + 1]) << 8;
-		out += kTable[(n >> 18) & 63];
-		out += kTable[(n >> 12) & 63];
-		out += (i + 1 < in.size()) ? kTable[(n >> 6) & 63] : '=';
-		out += '=';
-	}
-	return out;
-}
-
-// Map a file extension to an Anthropic-supported image media type, or
-// return an empty string if the extension is not a supported image.
-std::string ImageMediaType(const std::string& path)
-{
-	const auto dot = path.rfind('.');
-	if (dot == std::string::npos) return {};
-	std::string ext = path.substr(dot + 1);
-	for (char& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
-	if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
-	if (ext == "png")                  return "image/png";
-	if (ext == "gif")                  return "image/gif";
-	if (ext == "webp")                 return "image/webp";
-	return {};
-}
+// Base64Encode and ImageMediaType moved to image_util.{h,cpp} (pure, shared
+// with the CLI's image attachments). Thin aliases keep the existing call
+// sites in this file unchanged.
+std::string Base64Encode(const std::string& in) { return image::Base64Encode(in); }
+std::string ImageMediaType(const std::string& path) { return image::MediaTypeForPath(path); }
 
 // ChoiceModal, SessionItem, RenameModal, SessionListView, and NotifySlider
 // moved to gui_widgets.{h,cpp} — self-contained helper widgets that talk to
@@ -396,6 +357,15 @@ void ChatWindow::_BuildMenuBar()
 		new BMessage(gui::MSG_LUDICROUS));
 	fLudicrousItem->SetMarked(api::g_ludicrous_mode.load());
 	toolsMenu->AddItem(fLudicrousItem);
+
+	// Plan mode: read-only research. Claude gets only non-mutating tools
+	// and is asked to propose a plan instead of acting. Checkmark mirrors
+	// api::g_plan_mode.
+	fPlanItem = new BMenuItem(
+		"\xF0\x9F\x93\x8B Plan Mode  \xE2\x80\x94  read-only; propose a plan first",
+		new BMessage(gui::MSG_PLAN_MODE));
+	fPlanItem->SetMarked(api::g_plan_mode.load());
+	toolsMenu->AddItem(fPlanItem);
 
 	// Remote control: starts a background Telegram poller so allowed users can
 	// drive turns on this machine. The checkmark mirrors fRemote's running
@@ -1261,6 +1231,11 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 			// First real output of the turn — erase the thinking spinner.
 			_SpinnerStop();
+			// If we streamed a thinking block, separate it from the reply.
+			if (fInThinking) {
+				_AppendText("\n");
+				fInThinking = false;
+			}
 			if (fInWebFetch) {
 				fWebFetchBuf += text;
 				// If clearly not HTML after 40 chars, emit directly.
@@ -1285,6 +1260,23 @@ void ChatWindow::MessageReceived(BMessage* msg)
 				_ScrollToBottom();
 			else if (fJumpBtn && fJumpBtn->IsHidden())
 				fJumpBtn->Show();  // let the user jump back down when ready
+		}
+		break;
+	}
+
+	case gui::MSG_THINKING: {
+		const char* text = nullptr;
+		if (msg->FindString("text", &text) == B_OK && text) {
+			const bool stick = _IsNearBottom();
+			_SpinnerStop();
+			// Header once per turn, then stream the reasoning dim.
+			if (!fInThinking) {
+				AppendWithColor(fOutput, "\xF0\x9F\x92\xAD thinking\xE2\x80\xA6\n",
+				                kColorToolLine, fZoomFactor);
+				fInThinking = true;
+			}
+			AppendWithColor(fOutput, text, kColorToolLine, fZoomFactor);
+			if (stick) _ScrollToBottom();
 		}
 		break;
 	}
@@ -1656,6 +1648,19 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		const std::string notice = nowOn
 			? "\xE2\x9A\xA1 Ludicrous mode ON \xE2\x80\x94 all tool permissions auto-approved\n"
 			: "\xE2\x9A\xA1 Ludicrous mode OFF \xE2\x80\x94 permission prompts restored\n";
+		_AppendToolLine(notice);
+		break;
+	}
+
+	case gui::MSG_PLAN_MODE: {
+		// Toggle plan mode; update the checkmark and badge to match.
+		const bool nowOn = !api::g_plan_mode.load();
+		api::g_plan_mode.store(nowOn);
+		if (fPlanItem)  fPlanItem->SetMarked(nowOn);
+		if (fTokenBar)  fTokenBar->SetPlan(nowOn);
+		const std::string notice = nowOn
+			? "\xF0\x9F\x93\x8B Plan mode ON \xE2\x80\x94 read-only tools; Claude will propose a plan, not act\n"
+			: "\xF0\x9F\x93\x8B Plan mode OFF \xE2\x80\x94 full tools restored\n";
 		_AppendToolLine(notice);
 		break;
 	}

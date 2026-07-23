@@ -54,7 +54,26 @@ void TerminalSink::SetLiveInputTokens(std::atomic<int>* counter)
 
 void TerminalSink::OnText(const std::string& chunk)
 {
+	// If we streamed thinking, close the dim region and add a blank line
+	// before the real reply so the two are visually separated.
+	if (fInThinking) {
+		std::cout << "\x1b[0m\n" << std::flush;
+		fInThinking = false;
+	}
 	fRenderer.Write(chunk);
+}
+
+void TerminalSink::OnThinking(const std::string& chunk)
+{
+	// First thinking chunk: stop the spinner and open a dim, labelled
+	// region. Subsequent chunks stream straight into it.
+	if (!fInThinking) {
+		if (fSpinner) fSpinner->Stop();
+		std::cout << "\n" << tui::Dim("\xF0\x9F\x92\xADthinking\xE2\x80\xA6") // 💭thinking…
+		          << "\n\x1b[2m" << std::flush;
+		fInThinking = true;
+	}
+	std::cout << chunk << std::flush;
 }
 
 void TerminalSink::OnMeta(const std::string& text)
@@ -74,6 +93,11 @@ void TerminalSink::OnError(const std::string& text)
 
 void TerminalSink::OnToolStatus(const std::string& phase)
 {
+	// Close any open thinking region before a tool line lands.
+	if (fInThinking) {
+		std::cout << "\x1b[0m\n" << std::flush;
+		fInThinking = false;
+	}
 	// For the terminal, the thinking spinner stops when a tool starts.
 	// The "[tool: X ...]" meta line already announces the tool.
 	// A new per-tool spinner is created by SendWithTools directly for now.
@@ -87,6 +111,12 @@ void TerminalSink::OnToolStatus(const std::string& phase)
 
 void TerminalSink::Flush()
 {
+	// Close any open thinking region (e.g. a thinking-then-tool_use turn
+	// that never emitted assistant text).
+	if (fInThinking) {
+		std::cout << "\x1b[0m\n" << std::flush;
+		fInThinking = false;
+	}
 	if (fSpinner) { fSpinner->Stop(); }
 	fRenderer.Flush();
 }

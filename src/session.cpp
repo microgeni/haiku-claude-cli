@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -19,6 +20,7 @@
 #include "agents.h"
 #include "commands.h"
 #include "hooks.h"
+#include "image_util.h"
 #include "models.h"
 #include "notify.h"
 #include "paths.h"
@@ -136,7 +138,7 @@ static TurnResult RunTurn(const config::Auth& auth,
                           const std::string& model, int maxTokens,
                           const std::string& systemPrompt,
                           const std::string& userText,
-                          std::string apiContent,
+                          json apiContent,
                           const json& snapshot,
                           json& messages,
                           const std::vector<std::string>& sessionUrls,
@@ -254,7 +256,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	std::vector<std::string> all_slash = {
 		"/help", "/clear", "/model", "/compact", "/usage",
 		"/todos", "/memory", "/stats", "/skills", "/agents",
-		"/open", "/notify",
+		"/open", "/notify", "/think", "/plan", "/execute",
 		"/remote-control", "/ludicrous", "/exit", "/quit",
 	};
 	for (const auto& c : commands::Names()) all_slash.push_back("/" + c);
@@ -295,8 +297,12 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// Mute state gets an appended "· muted" marker.
 	auto compose_status = [&]() {
 		std::string right;
+		if (api::g_plan_mode.load()) {
+			right = tui::Green("\xF0\x9F\x93\x8B PLAN"); // 📋 PLAN
+		}
 		if (api::g_ludicrous_mode.load()) {
-			right = tui::Yellow("\xE2\x9A\xA1 LUDICROUS");
+			if (!right.empty()) right += tui::Dim("  \xC2\xB7  ");
+			right += tui::Yellow("\xE2\x9A\xA1 LUDICROUS");
 		}
 		if (remote && remote->Running()) {
 			if (!right.empty()) right += tui::Dim("  \xC2\xB7  ");
@@ -375,6 +381,11 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// Paths announced to Claude on the next outgoing user turn.
 	std::vector<std::string> pending_paths = std::move(initial_attachments);
 
+	// Base64 `image` content blocks for dropped/attached image files,
+	// sent as a content array on the next outgoing turn. Kept separate
+	// from pending_paths (which are text-file references in a preamble).
+	std::vector<json> pending_images;
+
 	// URLs seen in assistant replies so far this session. Populated
 	// after each turn by notify::ExtractUrls; consumed by `/open`.
 	std::vector<std::string> session_urls;
@@ -384,7 +395,7 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 	// type while it runs. Returns false if the session should exit
 	// (currently always true — turns never request exit).
 	auto run_turn = [&](const std::string& line,
-	                    std::string api_content,
+	                    json api_content,
 	                    json snapshot,
 	                    std::string system_for_turn) -> bool {
 		// Status hint while the turn is in flight (Ctrl+X to amend).
@@ -525,8 +536,33 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 		{
 			std::vector<std::string> dropped;
 			if (line_is_path_drop(line, dropped)) {
-				for (auto& p : dropped) pending_paths.push_back(std::move(p));
-				std::cout << tui::Meta(FormatAttachedLine(pending_paths)) << "\n";
+				std::vector<std::string> announced;
+				for (auto& p : dropped) {
+					const std::string mt = image::MediaTypeForPath(p);
+					if (!mt.empty()) {
+						// Image file → base64 `image` content block. Cap at
+						// 5 MB (Anthropic's per-image limit) to avoid sending
+						// something the API will reject.
+						std::ifstream f(p, std::ios::binary);
+						std::string raw((std::istreambuf_iterator<char>(f)),
+						                 std::istreambuf_iterator<char>());
+						if (!raw.empty() && raw.size() <= 5 * 1024 * 1024) {
+							pending_images.push_back(image::ImageBlock(mt, raw));
+							announced.push_back(p + " (image)");
+						} else if (raw.size() > 5 * 1024 * 1024) {
+							std::cout << tui::Meta("[skipped " + p
+								+ ": image exceeds 5 MB]") << "\n";
+						} else {
+							std::cout << tui::Meta("[skipped " + p
+								+ ": could not read]") << "\n";
+						}
+					} else {
+						pending_paths.push_back(p);
+						announced.push_back(p);
+					}
+				}
+				if (!announced.empty())
+					std::cout << tui::Meta(FormatAttachedLine(announced)) << "\n";
 				continue;
 			}
 		}
@@ -651,13 +687,24 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			continue;
 		}
 
-		// Prepend the accumulated attachment preamble silently to
-		// the outgoing API content. The replay and hooks payload
-		// keep only the user's actual typed text.
-		std::string api_content = line;
+		// Compose the outgoing API content. Text-file attachments become a
+		// preamble prepended to the typed text. Image attachments make the
+		// content a block array: [ {text}, {image}, {image}, … ]. The replay
+		// and hooks payload keep only the user's actual typed text.
+		std::string text_content = line;
 		if (!pending_paths.empty()) {
-			api_content = ComposeAttachmentPreamble(pending_paths) + api_content;
+			text_content = ComposeAttachmentPreamble(pending_paths) + text_content;
 			pending_paths.clear();
+		}
+		json api_content;
+		if (pending_images.empty()) {
+			api_content = text_content;
+		} else {
+			api_content = json::array();
+			api_content.push_back({{"type", "text"}, {"text", text_content}});
+			for (auto& blk : pending_images)
+				api_content.push_back(std::move(blk));
+			pending_images.clear();
 		}
 		const json snapshot = messages;
 

@@ -27,6 +27,7 @@ public:
 	TerminalSink& operator=(const TerminalSink&) = delete;
 
 	void OnText(const std::string& chunk)      override;
+	void OnThinking(const std::string& chunk)  override;
 	void OnMeta(const std::string& text)       override;
 	void OnDiag(const std::string& text)       override;
 	void OnError(const std::string& text)      override;
@@ -47,6 +48,9 @@ public:
 private:
 	tui::MarkdownRenderer fRenderer;
 	tui::Spinner*         fSpinner    = nullptr;
+	// True once a thinking chunk has been emitted this turn, so OnText can
+	// close the dim "thinking" region before the real reply begins.
+	bool                  fInThinking = false;
 };
 
 #endif // HAIKU_CLAUDE_CLI_TERMINAL_SINK_H

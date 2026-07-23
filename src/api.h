@@ -75,6 +75,20 @@ extern bool g_allow_destructive_tools;
 // destructive tool calls and skips permission prompts entirely.
 extern std::atomic<bool> g_ludicrous_mode;
 
+// Extended-thinking budget in tokens for the current session. 0 disables
+// extended thinking; > 0 adds `thinking: {type: "enabled", budget_tokens}`
+// to the request so the model reasons before answering. Set by the /think
+// slash command and the `thinking_budget` config key.
+extern std::atomic<int> g_thinking_budget;
+
+// Plan mode: session-scoped toggle. When on, only read-only tools are
+// advertised to the model (no Bash/Write/Edit/WriteAttr/IndexAttr/MCP) and
+// the system prompt asks it to research and present a plan rather than act.
+// Toggled by /plan (on) and /execute or /plan off. Lets Claude investigate
+// safely and get approval before it touches anything — valuable on Haiku,
+// which has no filesystem sandbox.
+extern std::atomic<bool> g_plan_mode;
+
 // Pointer to the currently active EscInterruptGuard, exposed so
 // TerminalSink::AskPermission can pause/resume it around SelectOption
 // calls. Null when no turn is in flight.

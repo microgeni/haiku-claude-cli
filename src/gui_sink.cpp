@@ -128,6 +128,13 @@ void GuiSink::OnText(const std::string& chunk)
 	AppendText(chunk);
 }
 
+void GuiSink::OnThinking(const std::string& chunk)
+{
+	BMessage msg(MSG_THINKING);
+	msg.AddString("text", chunk.c_str());
+	fWindow.SendMessage(&msg);
+}
+
 void GuiSink::OnToolStatus(const std::string& phase)
 {
 	if (phase.empty()) {
