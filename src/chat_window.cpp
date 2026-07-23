@@ -74,6 +74,7 @@
 #include "gui_scale.h"
 #include "gui_colors.h"
 #include "diagnostics.h"
+#include "image_util.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -88,51 +89,11 @@ namespace {
 float gui_scale() { return gui::Scale(); }
 float ScalePx(float px) { return gui::ScalePx(px); }
 
-// Standard RFC 4648 base64 encoder (not URL-safe — the Anthropic image
-// API wants '+' / '/' with '=' padding). Used to embed dropped image
-// files as base64 `image` content blocks in the outgoing message.
-std::string Base64Encode(const std::string& in)
-{
-	static const char* kTable =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	std::string out;
-	out.reserve(((in.size() + 2) / 3) * 4);
-	size_t i = 0;
-	for (; i + 2 < in.size(); i += 3) {
-		const unsigned n = (static_cast<unsigned char>(in[i]) << 16)
-		                 | (static_cast<unsigned char>(in[i + 1]) << 8)
-		                 |  static_cast<unsigned char>(in[i + 2]);
-		out += kTable[(n >> 18) & 63];
-		out += kTable[(n >> 12) & 63];
-		out += kTable[(n >> 6) & 63];
-		out += kTable[n & 63];
-	}
-	if (i < in.size()) {
-		unsigned n = static_cast<unsigned char>(in[i]) << 16;
-		if (i + 1 < in.size())
-			n |= static_cast<unsigned char>(in[i + 1]) << 8;
-		out += kTable[(n >> 18) & 63];
-		out += kTable[(n >> 12) & 63];
-		out += (i + 1 < in.size()) ? kTable[(n >> 6) & 63] : '=';
-		out += '=';
-	}
-	return out;
-}
-
-// Map a file extension to an Anthropic-supported image media type, or
-// return an empty string if the extension is not a supported image.
-std::string ImageMediaType(const std::string& path)
-{
-	const auto dot = path.rfind('.');
-	if (dot == std::string::npos) return {};
-	std::string ext = path.substr(dot + 1);
-	for (char& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
-	if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
-	if (ext == "png")                  return "image/png";
-	if (ext == "gif")                  return "image/gif";
-	if (ext == "webp")                 return "image/webp";
-	return {};
-}
+// Base64Encode and ImageMediaType moved to image_util.{h,cpp} (pure, shared
+// with the CLI's image attachments). Thin aliases keep the existing call
+// sites in this file unchanged.
+std::string Base64Encode(const std::string& in) { return image::Base64Encode(in); }
+std::string ImageMediaType(const std::string& path) { return image::MediaTypeForPath(path); }
 
 // ChoiceModal, SessionItem, RenameModal, SessionListView, and NotifySlider
 // moved to gui_widgets.{h,cpp} — self-contained helper widgets that talk to

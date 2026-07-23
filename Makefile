@@ -140,6 +140,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/editor_integration.cpp \
     $(SRCDIR)/hooks.cpp       \
     $(SRCDIR)/history_util.cpp \
+    $(SRCDIR)/image_util.cpp  \
     $(SRCDIR)/mcp.cpp         \
     $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
@@ -393,9 +394,16 @@ $(UNIT_BUILDDIR)/transcript_export_test: tests/unit/transcript_export_test.cpp \
 	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
 	    tests/unit/transcript_export_test.cpp src/transcript_export.cpp
 
+# image_util unit test — links the pure image_util.cpp TU.
+$(UNIT_BUILDDIR)/image_util_test: tests/unit/image_util_test.cpp \
+        src/image_util.cpp tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/image_util_test.cpp src/image_util.cpp
+
 UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test \
              $(UNIT_BUILDDIR)/history_util_test \
-             $(UNIT_BUILDDIR)/transcript_export_test
+             $(UNIT_BUILDDIR)/transcript_export_test \
+             $(UNIT_BUILDDIR)/image_util_test
 
 test-unit: $(UNIT_BINS)
 	@echo "=== unit tests ==="

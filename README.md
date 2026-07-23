@@ -39,7 +39,9 @@ project size.
 - **Drag and drop**: drop any file from Tracker onto the Terminal window.
   The CLI detects the pasted path, attaches the file's content to the
   next message, and shows a confirmation line — no copy-paste of file
-  paths required.
+  paths required. **Dropped images** (jpeg / png / gif / webp, up to 5 MB)
+  are sent as vision content blocks so you can ask Claude about a
+  screenshot or diagram, not just text files.
 - **Desktop notifications**: when a long-running response finishes,
   `claude-cli` fires a native `BNotification` via Haiku's
   `notification_server`. The alert shows the first sentence of the
