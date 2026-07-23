@@ -69,6 +69,7 @@
 #include "paths.h"
 #include "session_store.h"
 #include "telegram.h"
+#include "transcript_export.h"
 
 // ---------------------------------------------------------------------------
 // Colour helpers — prefer ui_color() for theme-aware values.
@@ -3662,81 +3663,13 @@ void ChatWindow::_SaveSession()
 		fSessionPath = saved;
 }
 
-// Serialize the conversation to a Markdown file. Handles plain-string
-// content, array content (text + image placeholders), and the
-// tool_use / tool_result blocks that live in the history after a
-// tool-using turn. Best-effort: unknown block shapes are skipped.
+// Serialize the conversation to a Markdown file. The serialization itself
+// lives in transcript::ToMarkdown (pure, unit-tested); this method keeps
+// only the BFile write and the Tracker MIME stamp.
 void ChatWindow::_ExportTranscript(const std::string& path)
 {
-	std::string out;
-	out += "# Claude transcript\n\n";
-	if (!fConvTopic.empty()) out += "**Topic:** " + fConvTopic + "\n\n";
-	out += "**Model:** " + fModel + "  \n";
-	out += "**Turns:** " + std::to_string(fTurnCount) + "\n\n---\n\n";
-
-	// Render one content value (string or block array) to Markdown.
-	auto renderContent = [](const nlohmann::json& content) -> std::string {
-		std::string s;
-		if (content.is_string()) {
-			s = content.get<std::string>();
-		} else if (content.is_array()) {
-			for (const auto& block : content) {
-				const std::string type = block.value("type", "");
-				if (type == "text") {
-					s += block.value("text", "");
-				} else if (type == "image") {
-					const std::string mt =
-						block.contains("source")
-							? block["source"].value("media_type", "image")
-							: "image";
-					s += "_[image attachment: " + mt + "]_";
-				} else if (type == "tool_use") {
-					s += "\n> 🔧 **tool call:** `" + block.value("name", "?")
-					   + "`\n";
-				} else if (type == "tool_result") {
-					std::string rc;
-					const auto& c = block.contains("content")
-						? block["content"] : nlohmann::json();
-					if (c.is_string()) rc = c.get<std::string>();
-					else if (c.is_array()) {
-						for (const auto& cb : c)
-							if (cb.value("type", "") == "text")
-								rc += cb.value("text", "");
-					}
-					if (rc.size() > 1000) { rc.resize(1000); rc += "\n…[truncated]"; }
-					s += "\n> 🔧 **tool result:**\n```\n" + rc + "\n```\n";
-				}
-			}
-		}
-		return s;
-	};
-
-	for (const auto& turn : fMessages) {
-		const std::string role = turn.value("role", "");
-		if (!turn.contains("content")) continue;
-		const nlohmann::json& content = turn["content"];
-
-		// A user turn whose content is purely tool_result blocks is the
-		// automated half of a tool round-trip, not something the human
-		// typed — label it as such so the transcript reads correctly.
-		bool toolResultOnly = false;
-		if (role == "user" && content.is_array() && !content.empty()) {
-			toolResultOnly = true;
-			for (const auto& b : content)
-				if (b.value("type", "") != "tool_result") { toolResultOnly = false; break; }
-		}
-
-		const std::string body = renderContent(content);
-		if (body.empty()) continue;
-		if (toolResultOnly)
-			out += "## Tool result\n\n" + body + "\n\n";
-		else if (role == "user")
-			out += "## You\n\n" + body + "\n\n";
-		else if (role == "assistant")
-			out += "## Claude\n\n" + body + "\n\n";
-		else
-			out += "## " + role + "\n\n" + body + "\n\n";
-	}
+	const std::string out = transcript::ToMarkdown(
+		fConvTopic, fModel, fTurnCount, fMessages);
 
 	BFile file(path.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
 	if (file.InitCheck() != B_OK) {

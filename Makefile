@@ -141,6 +141,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/skills.cpp      \
     $(SRCDIR)/sse_parser.cpp  \
     $(SRCDIR)/stats.cpp       \
+    $(SRCDIR)/transcript_export.cpp \
     $(SRCDIR)/tools.cpp
 
 # GUI-specific front-end files.
@@ -371,8 +372,15 @@ $(UNIT_BUILDDIR)/history_util_test: tests/unit/history_util_test.cpp src/history
 	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
 	    tests/unit/history_util_test.cpp src/history_util.cpp
 
+# transcript_export unit test — links the pure transcript_export.cpp TU.
+$(UNIT_BUILDDIR)/transcript_export_test: tests/unit/transcript_export_test.cpp \
+        src/transcript_export.cpp tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/transcript_export_test.cpp src/transcript_export.cpp
+
 UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test \
-             $(UNIT_BUILDDIR)/history_util_test
+             $(UNIT_BUILDDIR)/history_util_test \
+             $(UNIT_BUILDDIR)/transcript_export_test
 
 test-unit: $(UNIT_BINS)
 	@echo "=== unit tests ==="
