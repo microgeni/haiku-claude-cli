@@ -66,12 +66,8 @@ EOF
 # Delete any existing release for this tag so re-running the job is idempotent.
 existing=$(curl -s -H "Authorization: token $RELEASE_TOKEN" \
     "$API/repos/$REPO/releases/tags/$TAG" || true)
-existing_id=$(python3 -c 'import sys,json
-try:
-    d=json.loads(sys.stdin.read())
-    print(d.get("id","") if isinstance(d,dict) else "")
-except Exception:
-    pass' <<<"$existing" 2>/dev/null || true)
+existing_id=$(jq -r 'if type == "object" then (.id // "") else "" end' \
+    <<<"$existing" 2>/dev/null || true)
 
 if [ -n "$existing_id" ]; then
     echo "deleting previous release id=$existing_id"
@@ -80,16 +76,11 @@ if [ -n "$existing_id" ]; then
     sleep 1
 fi
 
-payload=$(TAG="$TAG" VERSION_NUM="$version_num" BODY="$body" python3 -c '
-import json, os
-name = "haiku-claude-cli " + os.environ["VERSION_NUM"]
-print(json.dumps({
-    "tag_name":   os.environ["TAG"],
-    "name":       name,
-    "body":       os.environ["BODY"],
-    "draft":      False,
-    "prerelease": False,
-}))')
+payload=$(jq -n \
+    --arg tag  "$TAG" \
+    --arg name "haiku-claude-cli $version_num" \
+    --arg body "$body" \
+    '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}')
 
 resp=$(curl -s -X POST \
     -H "Authorization: token $RELEASE_TOKEN" \
@@ -97,11 +88,7 @@ resp=$(curl -s -X POST \
     -d "$payload" \
     "$API/repos/$REPO/releases")
 
-rel_id=$(python3 -c 'import sys,json
-try:
-    print(json.loads(sys.stdin.read()).get("id",""))
-except Exception:
-    pass' <<<"$resp" 2>/dev/null || true)
+rel_id=$(jq -r '.id // ""' <<<"$resp" 2>/dev/null || true)
 
 if [ -z "$rel_id" ]; then
     echo "error: could not create release"
