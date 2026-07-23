@@ -107,7 +107,7 @@ CXXFLAGS += -DCCH_VERSION='"$(PKG_VERSION)"'
 
 PKG_FILE    := $(BUILDDIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_BUILD)-$(PKG_ARCH).hpkg
 
-.PHONY: all gui clean install install-gui package release lint security check
+.PHONY: all gui clean install install-gui package release lint security check test test-unit
 
 all: $(BIN)
 
@@ -132,6 +132,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/editor_integration.cpp \
     $(SRCDIR)/hooks.cpp       \
     $(SRCDIR)/mcp.cpp         \
+    $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
     $(SRCDIR)/notify.cpp      \
     $(SRCDIR)/oauth.cpp       \
@@ -336,6 +337,41 @@ $(PKG_FILE): $(BIN) $(GUI_BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 #   useStlAlgorithm       — style preference, not a bug
 #   unmatchedSuppression  — fired when a suppression is never triggered
 #                           (happens on non-Haiku builds missing BFS code)
+# ── Tests ───────────────────────────────────────────────────────────────────
+# `make test-unit` compiles and runs the doctest-based unit tests in
+# tests/unit/. These cover the pure-logic modules (no BeAPI, no network) so
+# they build and run on every target, including the macOS/nix dev shell.
+#
+# `make test` runs the unit tests and then the functional suite in
+# ci_scripts/test.sh against the freshly built CLI binary. This is the target
+# CLAUDE.md and the release checklist refer to.
+UNIT_BUILDDIR := $(BUILDDIR)/unit
+UNIT_CXXFLAGS := $(CXXSTD) $(WARN) -O1 -Itests/unit
+
+$(UNIT_BUILDDIR):
+	mkdir -p $(UNIT_BUILDDIR)
+
+# md_text unit test — links only the pure md_text.cpp translation unit.
+$(UNIT_BUILDDIR)/md_text_test: tests/unit/md_text_test.cpp src/md_text.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) -o $@ tests/unit/md_text_test.cpp src/md_text.cpp
+
+UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test
+
+test-unit: $(UNIT_BINS)
+	@echo "=== unit tests ==="
+	@fail=0; for t in $(UNIT_BINS); do \
+	    echo "--- $$t ---"; \
+	    "$$t" || fail=1; \
+	done; \
+	if [ "$$fail" != "0" ]; then echo "unit tests FAILED"; exit 1; fi; \
+	echo "unit tests passed."
+
+test: test-unit $(BIN)
+	@echo "=== functional tests ==="
+	bash ci_scripts/test.sh
+	@echo "=== all tests passed ==="
+
 lint:
 	@echo "=== cppcheck: static analysis ==="
 	@command -v cppcheck >/dev/null 2>&1 || { \
