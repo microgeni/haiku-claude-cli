@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-07-23
+
 ### Added
 
 - **GUI diagnostics panel (Help ▸ Diagnostics).** Surfaces the runtime
@@ -16,6 +18,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Opens in a scrollable read-only window. Backed by two new introspection
   accessors — `mcp::ActiveServers()` and `hooks::ActiveSummary()` — and a
   self-contained `diagnostics::BuildReport()`.
+- **`history_max_messages` config key** — bounds the rolling history file
+  (`history.json` and named `--resume` sessions) to its last N messages
+  (default 200, ≈100 turns). Previously the cap was applied only when
+  *loading*, so the file itself could grow without bound on a very long
+  single session; the cap is now enforced on *save* too. The cut skips a
+  leading orphaned `tool_result` so a resumed conversation always starts on
+  a valid turn boundary (no Messages API 400). Extracted the cap into a pure
+  `config::CapHistoryMessages` (`history_util.{h,cpp}`) with 7 unit-test
+  cases.
+- **Unit-test layer (doctest).** A new `tests/unit/` suite built on the
+  single-header [doctest](https://github.com/doctest/doctest) framework
+  covers the pure-logic modules with no BeAPI or network dependency, so it
+  runs on every target including the macOS/nix dev shell. Four suites ship:
+  `md_text_test` (20 cases), `sse_parser_test` (14 cases) for the Anthropic
+  SSE state machine and tool-use turn-taking, `history_util_test` (7 cases),
+  and `transcript_export_test` (12 cases) — 53 cases total. `make test-unit`
+  builds and runs them; `make test` now runs the unit tests and then the
+  functional suite in `ci_scripts/test.sh` — the `make test` target
+  CLAUDE.md documented but the Makefile never actually defined.
+- **`make version-check`.** Fails if the version in `VERSION` has no matching
+  `## [x.y.z]` section in `CHANGELOG.md` (a `-dev`/pre-release suffix is
+  exempt). Wired into `make check` so CI and the release path catch a binary
+  that would advertise a version with no release notes.
 
 ### Changed
 
@@ -35,40 +60,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and persisted GUI preferences (`chat_window_prefs.cpp`). `chat_window.cpp`
   is now **3116 lines, down from 4507 (−31%)**. No behavioural change; the
   transcript extraction also gained 12 unit tests it never had.
-
-### Added
-
-- **`history_max_messages` config key** — bounds the rolling history file
-  (`history.json` and named `--resume` sessions) to its last N messages
-  (default 200, ≈100 turns). Previously the cap was applied only when
-  *loading*, so the file itself could grow without bound on a very long
-  single session; the cap is now enforced on *save* too. The cut skips a
-  leading orphaned `tool_result` so a resumed conversation always starts on
-  a valid turn boundary (no Messages API 400). Extracted the cap into a pure
-  `config::CapHistoryMessages` (`history_util.{h,cpp}`) with 7 unit-test
-  cases.
-
-## [1.11.1] - 2026-07-15
-
-### Added
-
-- **Unit-test layer (doctest).** A new `tests/unit/` suite built on the
-  single-header [doctest](https://github.com/doctest/doctest) framework
-  covers the pure-logic modules with no BeAPI or network dependency, so it
-  runs on every target including the macOS/nix dev shell. Two suites ship:
-  `md_text_test` (20 cases) for the markdown table/HTML helpers and
-  `sse_parser_test` (14 cases) for the Anthropic SSE state machine and
-  tool-use turn-taking. `make test-unit` builds and runs them; `make test`
-  now runs the unit tests and then the functional suite in
-  `ci_scripts/test.sh` — the `make test` target CLAUDE.md documented but the
-  Makefile never actually defined.
-- **`make version-check`.** Fails if the version in `VERSION` has no matching
-  `## [x.y.z]` section in `CHANGELOG.md` (a `-dev`/pre-release suffix is
-  exempt). Wired into `make check` so CI and the release path catch a binary
-  that would advertise a version with no release notes.
-
-### Changed
-
 - **Refactor: pure logic split out for testability.** `IsTableRow`,
   `IsSeparatorRow`, `SplitCells`, and `StripHtml` moved from the
   BTextView-bound `md_renderer.cpp` into a new BeAPI-free `md_text.{h,cpp}`;
@@ -76,6 +67,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anonymous namespace into a new `sse_parser.{h,cpp}`. Behaviour is
   unchanged — the extractions exist so the code can be unit-tested in
   isolation. Both the CLI and GUI link the new translation units.
+
+### Fixed
+
+- **Shell-out escaping.** Three `system()` call sites interpolated a variable
+  into a single-quoted shell string without escaping — the `/memory` file
+  path and the OAuth authorize URL (CLI and GUI). All now route through a
+  single-quote escaper. Defense-in-depth (the values are our own
+  constructions), but the pattern shouldn't exist next to a correct helper.
 
 ## [1.11.0] - 2026-07-15
 
