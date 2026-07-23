@@ -138,6 +138,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/oauth.cpp       \
     $(SRCDIR)/paths.cpp       \
     $(SRCDIR)/skills.cpp      \
+    $(SRCDIR)/sse_parser.cpp  \
     $(SRCDIR)/stats.cpp       \
     $(SRCDIR)/tools.cpp
 
@@ -356,7 +357,14 @@ $(UNIT_BUILDDIR)/md_text_test: tests/unit/md_text_test.cpp src/md_text.cpp \
         tests/unit/doctest.h | $(UNIT_BUILDDIR)
 	$(CXX) $(UNIT_CXXFLAGS) -o $@ tests/unit/md_text_test.cpp src/md_text.cpp
 
-UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test
+# sse_parser unit test — links the pure sse_parser.cpp translation unit.
+# nlohmann/json headers come from pkg-config (JSON_CFLAGS).
+$(UNIT_BUILDDIR)/sse_parser_test: tests/unit/sse_parser_test.cpp src/sse_parser.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/sse_parser_test.cpp src/sse_parser.cpp
+
+UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test
 
 test-unit: $(UNIT_BINS)
 	@echo "=== unit tests ==="
