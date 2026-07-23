@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.3] - 2026-07-23
+
+### Fixed
+
+- **CI test failure: `session_state_test.sh` no longer requires python3.**
+  The session-persistence suite (S2–S12) used `python3` to parse and
+  manipulate `history.json`, but the CI runner has no python3 — the suite
+  failed with exit 127 (`python3: command not found`). Rewrote all 13
+  invocations to use `jq` (present on the runner at `/bin/jq`), preserving
+  the exact assertions: required-key checks, message-order/round-trip reads,
+  the tool_result >4 KB truncation simulation, and the 200-message cap
+  simulation. This was the actual cause of the red CI pipeline (the earlier
+  flawfinder work was a red herring in the logs — flawfinder passed).
+
 ## [1.12.2] - 2026-07-23
 
 ### Fixed

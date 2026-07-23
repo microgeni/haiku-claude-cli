@@ -69,15 +69,8 @@ step "S2: history.json has messages, model, saved_at"
 home=$(make_home)
 write_history "$home" '{"messages":[],"model":"claude-opus-4-5","saved_at":1700000000}'
 HIST="$(history_path "$home")"
-python3 -c "
-import json, sys
-with open('$(history_path "$home")') as f:
-    d = json.load(f)
-assert 'messages' in d, 'missing messages'
-assert 'model'    in d, 'missing model'
-assert 'saved_at' in d, 'missing saved_at'
-assert isinstance(d['messages'], list), 'messages not a list'
-" || { fail "history.json structure invalid"; rm -rf "$home"; }
+jq -e '(.messages | type == "array") and has("model") and has("saved_at")' \
+    "$HIST" >/dev/null 2>&1 || { fail "history.json structure invalid"; rm -rf "$home"; }
 rm -rf "$home"
 pass
 
@@ -92,15 +85,11 @@ write_history "$home" '{
   "model": "claude-haiku-4-5",
   "saved_at": 1700000000
 }'
-python3 -c "
-import json
-with open('$(history_path "$home")') as f:
-    d = json.load(f)
-msgs = d['messages']
-assert len(msgs) == 2, f'expected 2 messages, got {len(msgs)}'
-assert msgs[0]['role'] == 'user'
-assert msgs[1]['role'] == 'assistant'
-" || { fail "messages not loaded correctly"; rm -rf "$home"; }
+jq -e '(.messages | length == 2)
+       and (.messages[0].role == "user")
+       and (.messages[1].role == "assistant")' \
+    "$(history_path "$home")" >/dev/null 2>&1 \
+    || { fail "messages not loaded correctly"; rm -rf "$home"; }
 rm -rf "$home"
 pass
 
@@ -109,11 +98,7 @@ step "S4: model field is preserved round-trip"
 home=$(make_home)
 MODEL="claude-sonnet-4-6"
 write_history "$home" "{\"messages\":[],\"model\":\"$MODEL\",\"saved_at\":1}"
-got=$(python3 -c "
-import json
-with open('$(history_path "$home")') as f:
-    print(json.load(f)['model'])
-")
+got=$(jq -r '.model' "$(history_path "$home")")
 [ "$got" = "$MODEL" ] || { fail "model mismatch: got '$got', want '$MODEL'"; rm -rf "$home"; }
 rm -rf "$home"
 pass
@@ -135,16 +120,8 @@ write_history "$home" '{"messages":[{"role":"user","content":"default"}],"model"
 NAMED="$(named_history_path "$home" "proj")"
 mkdir -p "$(dirname "$NAMED")"
 printf '{"messages":[{"role":"user","content":"named"}],"model":"B","saved_at":2}\n' > "$NAMED"
-default_msg=$(python3 -c "
-import json
-with open('$(history_path "$home")') as f:
-    print(json.load(f)['messages'][0]['content'])
-")
-named_msg=$(python3 -c "
-import json
-with open('$(named_history_path "$home" "proj")') as f:
-    print(json.load(f)['messages'][0]['content'])
-")
+default_msg=$(jq -r '.messages[0].content' "$(history_path "$home")")
+named_msg=$(jq -r '.messages[0].content' "$(named_history_path "$home" "proj")")
 [ "$default_msg" = "default" ] || fail "default session content wrong"
 [ "$named_msg"   = "named"   ] || fail "named session content wrong"
 rm -rf "$home"
@@ -190,12 +167,8 @@ write_history "$home" '{
   "model":    "claude-sonnet-4-6",
   "saved_at": 1700000001
 }'
-python3 -c "
-import json
-with open('$(history_path "$home")') as f:
-    d = json.load(f)
-assert d is not None
-" || { fail "history.json is not valid JSON"; rm -rf "$home"; }
+jq -e '.' "$(history_path "$home")" >/dev/null 2>&1 \
+    || { fail "history.json is not valid JSON"; rm -rf "$home"; }
 rm -rf "$home"
 pass
 
@@ -205,51 +178,34 @@ home=$(make_home)
 hist=$(history_path "$home")
 mkdir -p "$(dirname "$hist")"
 # Build a history.json where a tool_result block has > 4096 bytes.
-python3 - "$hist" <<'PYEOF'
-import json, sys
-hist = sys.argv[1]
-msgs = [
-  {'role': 'user', 'content': [
-    {'type': 'tool_result', 'tool_use_id': 'tu1', 'content': 'x' * 8000}
-  ]},
-  {'role': 'assistant', 'content': 'ok'}
-]
-d = {'messages': msgs, 'model': 'claude-sonnet-4-6', 'saved_at': 1}
-with open(hist, 'w') as f:
-    json.dump(d, f)
-PYEOF
+big=$(jq -rn '"x" * 8000')
+jq -n --arg big "$big" '{
+  messages: [
+    { role: "user", content: [
+        { type: "tool_result", tool_use_id: "tu1", content: $big }
+    ] },
+    { role: "assistant", content: "ok" }
+  ],
+  model: "claude-sonnet-4-6",
+  saved_at: 1
+}' > "$hist"
 # Verify the fixture itself has the long content before capping.
-python3 - "$hist" <<'PYEOF'
-import json, sys
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-content = d['messages'][0]['content'][0]['content']
-assert len(content) == 8000, f'fixture should be 8000 chars, got {len(content)}'
-PYEOF
+jq -e '(.messages[0].content[0].content | length) == 8000' "$hist" >/dev/null 2>&1 \
+    || { fail "fixture should be 8000 chars"; rm -rf "$home"; }
 # Simulate what TrimToolResults does and verify capping behaviour.
-python3 - "$hist" <<'PYEOF' || { fail "tool_result truncation logic failed"; }
-import json, sys
-kCap = 4096
-hist = sys.argv[1]
-with open(hist) as f:
-    d = json.load(f)
-msgs = d['messages']
-for msg in msgs:
-    if msg.get('role') == 'user' and isinstance(msg.get('content'), list):
-        for blk in msg['content']:
-            if blk.get('type') == 'tool_result':
-                c = blk.get('content', '')
-                if len(c) > kCap:
-                    blk['content'] = c[:kCap] + '\n[... truncated for history storage ...]'
-d['messages'] = msgs
-with open(hist, 'w') as f:
-    json.dump(d, f)
-with open(hist) as f:
-    d2 = json.load(f)
-stored = d2['messages'][0]['content'][0]['content']
-assert len(stored) <= kCap + 100, f'stored content too long: {len(stored)}'
-assert '[... truncated' in stored, 'missing truncation marker'
-PYEOF
+jq '
+  .messages |= map(
+    if (.role == "user" and (.content | type == "array"))
+    then .content |= map(
+      if .type == "tool_result" and (.content | length) > 4096
+      then .content = (.content[0:4096] + "\n[... truncated for history storage ...]")
+      else . end)
+    else . end)
+' "$hist" > "$hist.tmp" && mv "$hist.tmp" "$hist"
+jq -e '
+  (.messages[0].content[0].content) as $s
+  | ($s | length) <= 4196 and ($s | contains("[... truncated"))
+' "$hist" >/dev/null 2>&1 || { fail "tool_result truncation logic failed"; rm -rf "$home"; }
 rm -rf "$home"
 pass
 
@@ -259,27 +215,18 @@ home=$(make_home)
 hist=$(history_path "$home")
 mkdir -p "$(dirname "$hist")"
 # Build a history file with 250 messages.
-python3 - "$hist" <<'PYEOF'
-import json, sys
-msgs = [{'role': 'user' if i%2==0 else 'assistant', 'content': f'msg {i}'}
-        for i in range(250)]
-d = {'messages': msgs, 'model': 'claude-sonnet-4-6', 'saved_at': 1}
-with open(sys.argv[1], 'w') as f:
-    json.dump(d, f)
-PYEOF
-# The cap logic keeps the last 200.
-python3 - "$hist" <<'PYEOF'
-import json, sys
-kCap = 200
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-msgs = d['messages']
-if len(msgs) > kCap:
-    msgs = msgs[len(msgs)-kCap:]
-assert len(msgs) == kCap, f'expected {kCap} messages after cap, got {len(msgs)}'
-# Last message should be msg 249
-assert msgs[-1]['content'] == 'msg 249', f'wrong tail: {msgs[-1]["content"]}'
-PYEOF
+jq -n '{
+  messages: [ range(0;250) | { role: (if . % 2 == 0 then "user" else "assistant" end),
+                               content: ("msg " + (. | tostring)) } ],
+  model: "claude-sonnet-4-6",
+  saved_at: 1
+}' > "$hist"
+# The cap logic keeps the last 200; verify count and tail.
+jq -e '
+  (.messages | if length > 200 then .[length-200:] else . end) as $capped
+  | ($capped | length) == 200
+    and ($capped[-1].content == "msg 249")
+' "$hist" >/dev/null 2>&1 || { fail "message cap logic failed"; rm -rf "$home"; }
 rm -rf "$home"
 pass
 
@@ -290,15 +237,13 @@ hist=$(history_path "$home")
 mkdir -p "$(dirname "$hist")"
 TS=$(date +%s)
 printf '{"messages":[],"model":"claude-sonnet-4-6","saved_at":%s}\n' "$TS" > "$hist"
-python3 - "$hist" <<'PYEOF'
-import json, sys, time
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-ts = d['saved_at']
-assert isinstance(ts, int), f'saved_at is not int: {type(ts)}'
-assert ts > 1_000_000_000, f'saved_at looks wrong: {ts}'
-assert ts < time.time() + 86400, f'saved_at is in the future: {ts}'
-PYEOF
+now=$(date +%s)
+jq -e --argjson now "$now" '
+  (.saved_at | type == "number")
+  and ((.saved_at | floor) == .saved_at)
+  and (.saved_at > 1000000000)
+  and (.saved_at < ($now + 86400))
+' "$hist" >/dev/null 2>&1 || { fail "saved_at is not a valid Unix timestamp"; rm -rf "$home"; }
 rm -rf "$home"
 pass
 
