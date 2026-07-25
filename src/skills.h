@@ -42,6 +42,13 @@ struct Skill {
 	std::string dir;                  // skill directory (for supporting files)
 	std::string allowedTools;         // raw allowed-tools string, if any
 	bool        disableModelInvocation = false;
+
+	// Usage telemetry, read from BFS attributes on SKILL.md (Haiku
+	// only; zero/default elsewhere). See the Usage section below.
+	int32_t     uses     = 0;         // claude:skill_uses
+	time_t      lastUsed = 0;         // claude:skill_lastused (0 = never)
+	std::string state;                // claude:skill_state ("" = active)
+	bool        pinned   = false;     // claude:skill_pinned
 };
 
 // (Re)scan the user and project skill directories. Safe to call
@@ -57,16 +64,77 @@ std::vector<std::string> Names();
 // Look up a skill by name. Returns nullptr when absent.
 const Skill* Find(const std::string& name);
 
+// True when the named skill's body contains at least one !`cmd`
+// dynamic-context marker — i.e. expanding it will execute shell.
+//
+// Typing /skill-name is explicit user consent to run that skill, but the
+// model invoking it via the Skill tool is not, so the tool layer uses
+// this to decide whether the call needs a permission prompt. Returns
+// false for unknown skills.
+bool BodyRunsShell(const std::string& name);
+
 // Expand a skill body into a ready-to-send user message: substitutes
 // {{args}} and runs any !`cmd` dynamic-context lines, replacing each
 // with the command's stdout. Returns the expanded text. `found` is set
 // to false (and the empty string returned) when no such skill exists.
-std::string Expand(const std::string& name, const std::string& args, bool& found);
+//
+// When `runShell` is false the !`cmd` markers are replaced with a
+// placeholder instead of being executed. Plan mode uses this so the
+// model can read a procedure without the act of reading it running
+// commands — the read-only guarantee has to hold here too.
+std::string Expand(const std::string& name, const std::string& args, bool& found,
+                   bool runShell = true);
 
-// A block describing model-invocable skills for the system prompt, so
-// the model knows what skills exist and when to invoke them. Returns an
-// empty string when no model-invocable skills are loaded.
+// A block for the system prompt describing model-invocable skills and
+// how to create new ones.
+//
+// The index of existing skills is omitted when none are invocable, but
+// the "creating skills" guidance is always present — a fresh install
+// with no skills is precisely when the model needs to know the
+// capability exists. Returns a non-empty string in all cases.
 std::string SystemBlock();
+
+// ── Usage telemetry and lifecycle ───────────────────────────────────
+//
+// Every invocation of a skill bumps two BFS attributes on its
+// SKILL.md: a counter and a timestamp. Storing this in attributes
+// rather than a sidecar JSON file means the data is queryable
+// (`Query claude:skill_lastused < ...`), visible in Tracker, and
+// survives the file being moved or copied — and it costs no parsing
+// on load.
+//
+// Attributes written (all Haiku-only; no-ops elsewhere):
+//   claude:skill_uses     int32   total invocations
+//   claude:skill_lastused int64   unix seconds of the last invocation
+//   claude:skill_state    string  "active" | "stale" | "archived"
+//   claude:skill_pinned   bool    true = exempt from auto-transitions
+//
+// Lifecycle mirrors the states above: a skill unused for longer than
+// the stale threshold becomes "stale"; one unused past the archive
+// threshold becomes "archived". Nothing is ever auto-deleted, and
+// pinned skills never transition. Archived skills stay on disk and
+// stay invocable by name — they are only dropped from the system
+// prompt, which is the thing that costs tokens on every request.
+
+// Record one invocation of `name`: bump the counter, stamp the
+// timestamp, and clear any stale/archived state (using a skill
+// revives it). No-op when the skill doesn't exist or on non-Haiku.
+void RecordUse(const std::string& name);
+
+// Recompute lifecycle states from the last-used timestamps and write
+// back any that changed. Skills that have never been used age from
+// their SKILL.md modification time, so a freshly written skill is not
+// immediately marked stale. Pinned skills are skipped. Returns the
+// number of skills whose state changed.
+int ApplyLifecycle(int staleAfterDays = 30, int archiveAfterDays = 90);
+
+// Pin / unpin a skill (exempt it from automatic transitions).
+// Returns false when no such skill exists.
+bool SetPinned(const std::string& name, bool pinned);
+
+// Ensure BFS indexes exist for the usage attributes so lifecycle
+// queries are O(1). Safe to call on every launch.
+void EnsureUsageIndexes();
 
 } // namespace skills
 
