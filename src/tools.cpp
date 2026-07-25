@@ -25,11 +25,86 @@ extern volatile sig_atomic_t g_interrupted;
 #include "api.h"
 #include "mcp.h"
 #include "paths.h"
+#include "skills.h"
 #include "tui.h"
 
 namespace tools {
 
 namespace {
+
+// ── Large tool output: spill to disk instead of discarding ──────────
+//
+// Hard truncation loses data the model may need and gives it no way to
+// recover: if the answer sits past the cap, it is simply gone and the
+// model cannot tell what it missed. Instead, write the full output to a
+// file and hand back a head+tail preview plus the path, so the model can
+// Read the remainder (with start_line/end_line) when the preview isn't
+// enough.
+//
+// Keeping both ends matters: the head carries the command's first output
+// and the tail usually carries the summary line or error that says how it
+// finished. A middle-only cut would drop whichever the model needed.
+constexpr size_t kMaxInlineBytes  = 32 * 1024;
+constexpr size_t kPreviewHeadBytes = 12 * 1024;
+constexpr size_t kPreviewTailBytes = 4 * 1024;
+
+// Directory for spilled results. Under /tmp on Haiku (and everywhere
+// else), so results are cleaned up on reboot and never pollute the
+// user's project tree.
+std::string SpillDir() {
+	return "/tmp/claude-results";
+}
+
+// Write `output` to a uniquely-named file and return its path, or an
+// empty string if the spill failed for any reason (read-only /tmp, disk
+// full). Callers fall back to plain truncation when this returns empty:
+// a failed spill must never fail the tool call itself.
+std::string SpillToFile(const std::string& tool, const std::string& output) {
+	const std::string dir = SpillDir();
+	if (mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return {};
+
+	// Name by tool + pid + a monotonic counter so concurrent tool calls
+	// in the same process cannot collide.
+	static int counter = 0;
+	const std::string path = dir + "/" + tool + "-"
+		+ std::to_string(static_cast<long>(getpid())) + "-"
+		+ std::to_string(++counter) + ".txt";
+
+	std::ofstream f(path, std::ios::binary | std::ios::trunc);
+	if (!f.is_open()) return {};
+	f.write(output.data(), static_cast<std::streamsize>(output.size()));
+	if (!f.good()) return {};
+	f.close();
+	return path;
+}
+
+// Cap a tool's output for inclusion in the conversation. Outputs at or
+// under the inline limit pass through untouched. Larger ones are spilled
+// to disk and replaced by a head+tail preview annotated with the full
+// byte count and the path to the complete output.
+std::string CapOutput(const std::string& tool, std::string output) {
+	if (output.size() <= kMaxInlineBytes) return output;
+
+	const size_t total = output.size();
+	const std::string path = SpillToFile(tool, output);
+
+	std::string preview = output.substr(0, kPreviewHeadBytes);
+	preview += "\n\n[... ";
+	preview += std::to_string(total - kPreviewHeadBytes - kPreviewTailBytes);
+	preview += " bytes omitted ...]\n\n";
+	preview += output.substr(total - kPreviewTailBytes);
+
+	if (path.empty()) {
+		// Spill failed — degrade to the old behaviour rather than error.
+		preview += "\n[output truncated: " + std::to_string(total)
+				 + " bytes total, could not be saved to disk]";
+	} else {
+		preview += "\n[full output (" + std::to_string(total) + " bytes) saved to "
+				 + path + " — use Read on that path, with start_line/end_line "
+				 "or Grep, to see the omitted portion]";
+	}
+	return preview;
+}
 
 ToolResult run_read(const json& input) {
 	const std::string path = input.value("path", std::string{});
@@ -205,6 +280,28 @@ static std::string make_preview_block(
 	}
 	body << rule;
 	return body.str();
+}
+
+// Preview for the Skill tool: show which shell commands the skill body
+// will execute, since that is the only reason this tool ever prompts.
+std::string preview_skill(const json& input) {
+	const std::string name = input.value("name", std::string{});
+	const skills::Skill* s = skills::Find(name);
+	if (!s) return {};
+
+	std::string out = "skill: " + name + "\n";
+	if (!s->description.empty()) out += s->description + "\n";
+	out += "\nExpanding this skill runs the following shell command(s):\n";
+	// Same scan as skills::inject_dynamic_context.
+	const std::string& b = s->body;
+	for (size_t i = 0; i + 1 < b.size(); ++i) {
+		if (b[i] != '!' || b[i + 1] != '`') continue;
+		const size_t close = b.find('`', i + 2);
+		if (close == std::string::npos) break;
+		out += "  $ " + b.substr(i + 2, close - (i + 2)) + "\n";
+		i = close;
+	}
+	return out;
 }
 
 // Extract the directory component of a path for the "allow all in <dir>/"
@@ -471,6 +568,51 @@ ToolResult run_todoread(const json& /*input*/) {
 	return {format_todos(), false};
 }
 
+// Skill — load a skill's full instructions on demand.
+//
+// The system prompt advertises only each skill's name and (<=60 char)
+// description, because that index is carried on every request. Acting on
+// the description alone means guessing at the procedure, so this tool
+// hands back the real SKILL.md body when the model decides a skill fits.
+//
+// Expansion is identical to the `/skill-name` path — skills::Expand runs
+// {{args}} substitution and !`cmd` dynamic-context injection — so a skill
+// behaves the same whether the user invoked it or the model did. Expand()
+// also records the use, which is what makes autonomous invocations show up
+// in the BFS usage telemetry.
+ToolResult run_skill(const json& input) {
+	const std::string name = input.value("name", std::string{});
+	if (name.empty()) {
+		return {"error: Skill requires a `name` argument", true};
+	}
+	const std::string args = input.value("args", std::string{});
+
+	// In plan mode the model must be able to read a procedure, but the
+	// act of reading it must not execute anything — so !`cmd` markers are
+	// reported rather than run. This is what lets Skill stay in the
+	// read-only toolset (see IsReadOnly).
+	const bool planMode = api::g_plan_mode.load(std::memory_order_relaxed);
+
+	bool found = false;
+	std::string body = skills::Expand(name, args, found, /*runShell=*/!planMode);
+	if (!found) {
+		// List what does exist so a near-miss name self-corrects in one
+		// turn instead of the model retrying blind.
+		std::string known;
+		for (const auto& s : skills::All()) {
+			if (!known.empty()) known += ", ";
+			known += s.name;
+		}
+		return {"error: no skill named '" + name + "'"
+				+ (known.empty() ? std::string(" (no skills are installed)")
+								 : " — available skills: " + known), true};
+	}
+	if (body.empty()) {
+		return {"error: skill '" + name + "' has an empty body", true};
+	}
+	return {body, false};
+}
+
 ToolResult run_websearch(const json& input) {
 	const std::string query = input.value("query", std::string{});
 	if (query.empty()) {
@@ -697,11 +839,7 @@ ToolResult run_bash(const json& input) {
 		return {"error: command timed out after " + std::to_string(timeout) + "s\n" + output, true};
 	}
 
-	constexpr size_t kMaxBytes = 32 * 1024;
-	if (output.size() > kMaxBytes) {
-		output.resize(kMaxBytes);
-		output += "\n[... output truncated]";
-	}
+	output = CapOutput("bash", std::move(output));
 
 	if (!WIFEXITED(status)) {
 		return {"error: shell terminated abnormally (output: " + output + ")", true};
@@ -860,12 +998,7 @@ ToolResult run_grep(const json& input) {
 				+ (output.empty() ? "" : ": " + output), true};
 	}
 
-	constexpr size_t kMaxBytes = 32 * 1024;
-	if (output.size() > kMaxBytes) {
-		output.resize(kMaxBytes);
-		output += "\n[... output truncated]";
-	}
-	return {output, false};
+	return {CapOutput("grep", std::move(output)), false};
 }
 
 } // namespace
@@ -1053,7 +1186,8 @@ json builtin_definitions() {
 			{"name", "Bash"},
 			{"description",
 				"Run a shell command via `sh -c` and return its combined stdout+stderr "
-				"plus exit code. Output is truncated to 32 KiB. The user is prompted "
+				"plus exit code. Output over 32 KiB is saved to a file and replaced "
+				"by a head+tail preview naming that path. The user is prompted "
 				"for permission on the first Bash call of each session unless they "
 				"pre-approved Bash; answer (a)lways to skip subsequent prompts. "
 				"Prefer Read/Glob/Grep for pure inspection."},
@@ -1073,8 +1207,9 @@ json builtin_definitions() {
 			{"description",
 				"Search for a pattern across files under a directory. Uses POSIX "
 				"grep -rn internally with -H (always-show-filename). Returns matches "
-				"in `path:line:match` format, one per line. Output is truncated at "
-				"32 KiB with a [... output truncated] marker."},
+				"in `path:line:match` format, one per line. Output over 32 KiB is "
+				"saved to a file and replaced by a head+tail preview naming that "
+				"path — Read it to see the omitted portion."},
 			{"input_schema", {
 				{"type", "object"},
 				{"properties", {
@@ -1187,11 +1322,7 @@ ToolResult exec_capture(const char* const argv[]) {
 
 	if (killed) return {"[interrupted]", true};
 
-	constexpr size_t kMaxBytes = 32 * 1024;
-	if (output.size() > kMaxBytes) {
-		output.resize(kMaxBytes);
-		output += "\n[... output truncated]";
-	}
+	output = CapOutput("query", std::move(output));
 	if (!WIFEXITED(status)) {
 		return {"error: command terminated abnormally\n" + output, true};
 	}
@@ -1302,7 +1433,8 @@ json haiku_definitions() {
 				"'BEOS:TYPE == \"text/x-source-code\"', "
 				"'name == \"*.cpp\" && last_modified > %1hour%', "
 				"'claude:component == \"networking\"'. "
-				"Returns one path per line, truncated at 32 KiB."},
+				"Returns one path per line. Output over 32 KiB is saved to a file "
+				"and replaced by a head+tail preview naming that path."},
 			{"input_schema", {
 				{"type", "object"},
 				{"properties", {
@@ -1409,6 +1541,48 @@ json haiku_definitions() {
 
 json Definitions() {
 	json out = builtin_definitions();
+
+	// Skill — only offered when there is at least one model-invocable
+	// skill, so a fresh install doesn't advertise a tool that can only
+	// return errors. The available names go in the schema as an enum so
+	// the model picks a real skill instead of inventing one.
+	{
+		json names = json::array();
+		for (const auto& s : skills::All()) {
+			if (s.disableModelInvocation) continue;   // user-invoke-only
+			if (s.state == "archived")    continue;   // aged out of the prompt
+			names.push_back(s.name);
+		}
+		if (!names.empty()) {
+			out.push_back({
+				{"name", "Skill"},
+				{"description",
+					"Load the full instructions for an Agent Skill. The system "
+					"prompt lists only each skill's name and a one-line "
+					"description; call this to get the actual procedure before "
+					"acting on it. Do not guess a skill's steps from its "
+					"description — load it first."},
+				{"input_schema", {
+					{"type", "object"},
+					{"properties", {
+						{"name", {
+							{"type", "string"},
+							{"enum", names},
+							{"description", "The skill to load."},
+						}},
+						{"args", {
+							{"type", "string"},
+							{"description",
+								"Optional argument text substituted for "
+								"{{args}} in the skill body."},
+						}},
+					}},
+					{"required", json::array({"name"})},
+				}},
+			});
+		}
+	}
+
 	if (const char* key = std::getenv("BRAVE_SEARCH_API_KEY"); key && *key) {  // flawfinder: ignore
 		out.push_back({
 			{"name", "WebSearch"},
@@ -1456,6 +1630,7 @@ ToolResult Run(const std::string& name, const json& input) {
 	if (name == "WebSearch") return run_websearch(input);
 	if (name == "TodoWrite") return run_todowrite(input);
 	if (name == "TodoRead")  return run_todoread(input);
+	if (name == "Skill")     return run_skill(input);
 	if (name == "Task")      return {"error: Task is handled by the agent loop", true};
 #ifdef __HAIKU__
 	if (name == "Query")     return run_query(input);
@@ -1494,8 +1669,14 @@ int EditedLine(const std::string& name, const json& input) {
 	return 0;
 }
 
-bool RequiresPermission(const std::string& name) {
+bool RequiresPermission(const std::string& name, const json& input) {
 	if (name == "Bash" || name == "Write" || name == "Edit") return true;
+	// Skill: loading instructions is harmless, but expanding a body that
+	// contains !`cmd` executes shell. Typing /skill-name is explicit
+	// consent; the model calling the tool is not, so gate that case.
+	if (name == "Skill") {
+		return skills::BodyRunsShell(input.value("name", std::string{}));
+	}
 #ifdef __HAIKU__
 	// WriteAttr is auto-approved — the claude:* namespace gate
 	// inside run_write_attr is the safety layer now. IndexAttr
@@ -1515,6 +1696,9 @@ bool IsReadOnly(const std::string& name) {
 	    || name == "WebFetch" || name == "WebSearch"
 	    || name == "Task" || name == "TodoRead" || name == "TodoWrite")
 		return true;
+	// Skill is plan-safe: run_skill suppresses !`cmd` execution while
+	// plan mode is active, so loading a skill only ever returns text.
+	if (name == "Skill") return true;
 #ifdef __HAIKU__
 	if (name == "Query" || name == "ReadAttr") return true;
 #endif
@@ -1526,6 +1710,7 @@ bool IsReadOnly(const std::string& name) {
 std::string Preview(const std::string& name, const json& input) {
 	if (name == "Write") return preview_write(input);
 	if (name == "Edit")  return preview_edit(input);
+	if (name == "Skill") return preview_skill(input);
 #ifdef __HAIKU__
 	if (name == "WriteAttr") return preview_write_attr(input);
 	if (name == "IndexAttr") return preview_index_attr(input);
@@ -1655,6 +1840,9 @@ std::string ArgSummary(const std::string& name, const json& input,
 	std::string out;
 	if (name == "Bash") {
 		out = str("command");
+	} else if (name == "Skill") {
+		out = str("name");
+		if (const std::string a = str("args"); !a.empty()) out += " " + a;
 	} else if (name == "Read" || name == "Write" || name == "Edit") {
 		out = str("path");
 	} else if (name == "Glob") {
