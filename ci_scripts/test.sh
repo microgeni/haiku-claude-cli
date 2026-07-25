@@ -59,5 +59,9 @@ step "Agent Skills + Subagents tests"
 bash tests/skills_agents_test.sh
 echo "PASS"
 
+step "learning-loop tests (skill telemetry, /learn, caching, budget)"
+bash tests/learning_loop_test.sh
+echo "PASS"
+
 echo
 echo "=== all tests passed ==="
