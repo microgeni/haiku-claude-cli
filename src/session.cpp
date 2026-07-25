@@ -252,10 +252,16 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 
 	commands::Load(paths::ConfigDir() + "/commands");
 	skills::Load(paths::UserSkillsDir(), paths::ProjectSkillsDir());
+	// Index the usage attributes once so lifecycle queries stay O(1),
+	// then age skills that have gone unused. Both are cheap no-ops
+	// after the first run.
+	skills::EnsureUsageIndexes();
+	skills::ApplyLifecycle();
 	agents::Load(paths::UserAgentsDir(), paths::ProjectAgentsDir());
 	std::vector<std::string> all_slash = {
 		"/help", "/clear", "/model", "/compact", "/usage",
-		"/todos", "/memory", "/stats", "/skills", "/agents",
+		"/todos", "/memory", "/stats", "/skills", "/agents", "/learn",
+		"/doctor",
 		"/open", "/notify", "/think", "/plan", "/execute",
 		"/remote-control", "/ludicrous", "/exit", "/quit",
 	};

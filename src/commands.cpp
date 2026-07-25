@@ -14,9 +14,12 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_map>
 
 #include "api.h"
+#include "diagnostics.h"
+#include "learn.h"
 #include "models.h"
 #include "paths.h"
 #include "skills.h"
@@ -131,7 +134,10 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 			"  /todos             show the current in-session todo list\n"
 			"  /memory [user]     open CLAUDE.md in $EDITOR (project by default)\n"
 			"  /stats             lifetime token usage and tool stats\n"
+			"  /doctor            diagnostics: memory, skills, MCP servers, hooks\n"
 			"  /skills            list Agent Skills (invoke one with /skill-name)\n"
+			"                     /skills pin|unpin <name>, /skills prune\n"
+			"  /learn [what]      distill a reusable skill from sources or this session\n"
 			"  /agents            list subagents Claude can delegate to via Task\n"
 			"  /open [N|URL]      list URLs from this session, open #N, or open URL\n"
 			"  /notify [on|off|S] desktop notification on slow turns (default 60s)\n"
@@ -330,20 +336,76 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 		return SlashAction::Continue;
 	}
 	if (cmd == "/skills") {
+		// Subcommands: /skills pin <name>, /skills unpin <name>,
+		// /skills prune — everything else lists.
+		std::string sub, subarg;
+		{
+			std::istringstream iss(args);
+			iss >> sub;
+			std::getline(iss, subarg);
+			const auto b = subarg.find_first_not_of(" \t");
+			subarg = (b == std::string::npos) ? std::string{} : subarg.substr(b);
+		}
+
+		if (sub == "pin" || sub == "unpin") {
+			if (subarg.empty()) {
+				std::cout << tui::Meta("[usage: /skills " + sub + " <skill-name>]") << "\n";
+				return SlashAction::Continue;
+			}
+			if (skills::SetPinned(subarg, sub == "pin")) {
+				std::cout << tui::Meta("[" + subarg + " "
+					+ (sub == "pin" ? "pinned — exempt from auto-archiving"
+									: "unpinned")) << "]\n";
+			} else {
+				std::cout << tui::Meta("[no such skill: " + subarg + "]") << "\n";
+			}
+			return SlashAction::Continue;
+		}
+
+		if (sub == "prune") {
+			const int changed = skills::ApplyLifecycle();
+			if (changed == 0) {
+				std::cout << tui::Meta("[no skill states changed]") << "\n";
+			} else {
+				std::cout << tui::Meta("[" + std::to_string(changed)
+					+ " skill state(s) updated — archived skills stay on disk "
+					  "and stay invocable, they just leave the system prompt]") << "\n";
+			}
+			return SlashAction::Continue;
+		}
+
 		const auto& all = skills::All();
 		if (all.empty()) {
 			std::cout << tui::Meta("[no skills loaded — add one under "
 				+ paths::UserSkillsDir() + "/<name>/SKILL.md or "
-				+ paths::ProjectSkillsDir() + "/<name>/SKILL.md]") << "\n";
+				+ paths::ProjectSkillsDir() + "/<name>/SKILL.md, or run "
+				  "/learn to distil one from this session]") << "\n";
 			return SlashAction::Continue;
 		}
 		std::string body = "skills (invoke with /<name>):\n";
 		for (const auto& s : all) {
 			body += "  /" + s.name;
 			if (s.disableModelInvocation) body += "  (manual)";
+			if (s.pinned)                 body += "  [pinned]";
+			if (!s.state.empty() && s.state != "active")
+				body += "  [" + s.state + "]";
+			if (s.uses > 0) {
+				body += "  (" + std::to_string(s.uses) + " use"
+					 + (s.uses == 1 ? "" : "s");
+				if (s.lastUsed > 0) {
+					const double days =
+						std::difftime(::time(nullptr), s.lastUsed) / 86400.0;
+					if (days < 1.0)      body += ", today";
+					else                 body += ", " + std::to_string(
+						static_cast<int>(days)) + "d ago";
+				}
+				body += ")";
+			}
 			if (!s.description.empty()) body += "  \xE2\x80\x94 " + s.description;
 			body += "\n";
 		}
+		body += "\n  /skills pin|unpin <name>   exempt a skill from auto-archiving\n";
+		body += "  /skills prune              re-evaluate stale/archived states\n";
 		std::cout << tui::Meta(body) << "\n";
 		return SlashAction::Continue;
 	}
@@ -607,6 +669,27 @@ SlashAction Dispatch(const std::string& line, LoopCtx& ctx,
 		if (ctx.redraw_status) ctx.redraw_status();
 		return SlashAction::Continue;
 	}
+	// /doctor — the same report the GUI shows under Help > Diagnostics.
+	// Most useful for answering "why isn't Claude using my skill?", since
+	// a skill can be on disk and runnable yet absent from the system
+	// prompt (archived, manual-only, or missing a description).
+	if (cmd == "/doctor") {
+		char cwdbuf[4096];
+		const std::string wd = getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : "";
+		std::cout << tui::Meta(diagnostics::BuildReport(
+			ctx.model, wd, config::kVersion)) << "\n";
+		return SlashAction::Continue;
+	}
+	// /learn — distill a reusable skill from sources or from what we
+	// just did. Expands to a normal user turn so the model does the
+	// work with its existing tools; no extra tool surface needed.
+	if (cmd == "/learn") {
+		passthrough_out = learn::BuildPrompt(args);
+		std::cout << tui::Meta("[learning a skill — the model will gather "
+							   "sources and write a SKILL.md]") << "\n";
+		return SlashAction::Passthrough;
+	}
+
 	// Fall back to user-defined commands loaded from
 	// .claude/commands/*.md. If a match exists we substitute
 	// {{args}} and hand the expanded text back to the REPL loop.
