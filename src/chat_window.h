@@ -120,6 +120,9 @@ private:
 	void _SendTurn();
 	void _LaunchWorker(const std::string& userText);
 	void _LaunchCompact();       // summarize + replace context, keep scrollback
+	void _LaunchLearn();         // Tools > Learn a Skill…: distil a SKILL.md
+	void _RefreshSkillMenu();    // rebuild Tools > Skills from disk
+	void _RunSkill(const std::string& name);  // expand a skill, send as a turn
 	void _SpawnWorker();         // shared: start spinner + worker thread on fWorkerMessages
 	void _HandlePermRequest(BMessage* msg);
 	void _HandleChoiceRequest(BMessage* msg);
@@ -168,6 +171,7 @@ private:
 	BMenuItem*     fLudicrousItem = nullptr;  // Tools > Ludicrous Mode (checkmark)
 	BMenuItem*     fPlanItem      = nullptr;  // Tools > Plan Mode (checkmark)
 	BMenuItem*     fRemoteItem    = nullptr;  // Tools > Remote Control (checkmark)
+	BMenu*         fSkillMenu    = nullptr;  // Tools > Skills (rebuilt on demand)
 	BMenuItem*     fInputItem     = nullptr;  // View > Input (checkmark)
 	BTextView*     fOutput        = nullptr;
 	WelcomeView*   fWelcome       = nullptr;  // startup splash, collapsed on first turn
@@ -301,6 +305,9 @@ private:
 	// fMessages with the compacted two-entry array instead of adopting
 	// fWorkerMessages, and leaves the on-screen transcript intact.
 	bool                fCompactPending = false;
+	// Set for a /learn turn so MSG_WORKER_DONE rescans the skills dir —
+	// the turn may have written a new SKILL.md that the menu should show.
+	bool                fLearnPending   = false;
 
 	// ── Remote control (Telegram bridge) ──────────────────────────────────────
 	// Guards fMessages reads taken by the remote-control poller thread

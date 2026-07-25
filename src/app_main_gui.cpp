@@ -288,6 +288,8 @@ public:
 		// and Task-delegated subagents as the CLI.
 		commands::Load(paths::ConfigDir() + "/commands");
 		skills::Load(paths::UserSkillsDir(), paths::ProjectSkillsDir());
+		skills::EnsureUsageIndexes();
+		skills::ApplyLifecycle();
 		agents::Load(paths::UserAgentsDir(), paths::ProjectAgentsDir());
 
 		// Resolve authentication (OAuth tokens, ANTHROPIC_API_KEY, or a
