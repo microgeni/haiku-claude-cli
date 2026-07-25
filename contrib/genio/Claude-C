@@ -12,9 +12,11 @@
 #   The trailing "-C" makes Genio show it under Tools as "Claude" with the
 #   Alt+C shortcut. Restart Genio (or reopen the Tools menu) to pick it up.
 #
-# OPTIONAL visibility gating via BFS attributes on this file:
-#   addattr genio:scope      "editor,project"   Claude-C
-#   addattr genio:file_types "cpp,h,c,cxx,hpp"  Claude-C
+# OPTIONAL visibility gating via BFS attributes on this file (empty == always
+# shown). NOTE: scope WITHOUT "global" hides the item at startup (no file/
+# project open yet) — include "global" to keep Claude on a fresh launch:
+#   addattr genio:scope      "global,editor,project"  Claude-C
+#   addattr genio:file_types "cpp,h,c,cxx,hpp"        Claude-C
 #
 # Genio passes context as arguments (already chdir'd into --project-dir):
 #   --project-dir <path>    active project root
