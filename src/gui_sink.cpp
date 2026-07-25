@@ -174,7 +174,7 @@ api::Permission GuiSink::AskPermission(const std::string& tool_name,
 {
 	// Tools that are always safe need no dialog.
 	if (api::AlwaysAllowed().count(tool_name)) return api::Permission::Allow;
-	if (!tools::RequiresPermission(tool_name))  return api::Permission::Allow;
+	if (!tools::RequiresPermission(tool_name, input))  return api::Permission::Allow;
 
 	// Send a structured diff to the chat window before asking (or auto-approving).
 	// This fires for Edit and Write regardless of ludicrous mode so the user

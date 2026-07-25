@@ -26,8 +26,14 @@ json Definitions();
 ToolResult Run(const std::string& name, const json& input);
 
 // True when a tool must prompt the user for permission before its
-// first execution in a session. Currently Bash and Write.
-bool RequiresPermission(const std::string& name);
+// first execution in a session. Currently Bash, Write, and Edit.
+//
+// `input` is optional and lets a tool decide per-call: the Skill tool
+// only prompts when the named skill's body contains a !`cmd` marker,
+// since expanding it would execute shell that the user never typed.
+// Callers that pass nothing get the conservative name-only answer.
+bool RequiresPermission(const std::string& name,
+                        const json& input = json::object());
 
 // True when a tool cannot mutate the filesystem, shell, or any external
 // state — safe to expose in Plan Mode. Read/Glob/Grep/WebFetch/WebSearch/
