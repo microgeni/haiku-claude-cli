@@ -4,7 +4,135 @@ All notable changes to this project are recorded here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.14.0] - 2026-07-25
+
+### Added
+
+- **Claude now knows it can create skills.** The system prompt gained a short
+  authoring block, so the learning loop closes without the user having to
+  remember `/learn` exists. After a non-trivial task — several tool calls, a
+  fiddly fix, a workflow worth repeating — Claude briefly *offers* to save the
+  approach as a skill, and offers to correct a skill it loaded that turned out
+  to be wrong or outdated.
+  - **Suggest-only by design:** it must not create skills unprompted, and must
+    not offer for routine one-step requests. Writing files into the user's
+    config directory mid-task is a surprise; the goal is discoverability, not
+    a pile of skills nobody asked for.
+  - The guidance is present **even when no skills are installed** — a fresh
+    setup is exactly when the model needs to know the capability exists,
+    otherwise the loop can never start. It restates the 60-character
+    description limit, since this path bypasses `/learn`'s embedded authoring
+    standards.
+  - It lives in the cached *stable* system-prompt tier, so it costs nothing
+    after the first request of a session.
+- **Skills are now genuinely autonomous.** A new `Skill` tool lets Claude load
+  a skill's full instructions on demand. Previously the model saw only each
+  skill's <=60-character description in the system prompt and had no way to
+  read the body, so "model-invoked" meant improvising a procedure from a
+  one-line summary; only typing `/skill-name` expanded the real steps. Now the
+  description is an *index* and the tool fetches the *procedure* — the system
+  prompt says so explicitly, and instructs the model not to infer a skill's
+  contents from its description.
+  - The tool is only advertised when at least one model-invocable skill exists,
+    and the available names ship as a schema `enum` so the model picks a real
+    skill instead of inventing one. An unknown name lists the real skills back.
+  - Expansion goes through the same path as `/skill-name` (`{{args}}` plus
+    ``!`cmd``` injection), so a skill behaves identically however it is
+    invoked — **including recording its use**, which finally makes the BFS
+    usage telemetry count autonomous invocations rather than manual ones only.
+  - **Security:** a skill body can execute shell via ``!`cmd```. Typing
+    `/skill-name` is explicit consent; the model calling a tool is not. The
+    `Skill` tool therefore prompts for permission *only* when the named skill's
+    body actually contains a ``!`cmd``` marker, and the prompt preview lists
+    the exact commands that would run. Skills without shell load freely.
+  - **Plan mode:** loading a skill is read-only, so `Skill` stays available —
+    but ``!`cmd``` markers are reported as `[not run in plan mode: ...]`
+    instead of being executed, preserving the hard read-only guarantee.
+    `RequiresPermission()` gained an optional `input` argument to support this
+    per-call decision; existing callers are unaffected.
+- **Diagnostics now reports Agent Skills**, and the report is no longer
+  GUI-only: the CLI gets it via a new **`/doctor`** command, and the GUI keeps
+  it under Help > Diagnostics. (`diagnostics.cpp` was already compiled into the
+  CLI but unreachable there.)
+  The skills section answers the question the rest of the UI could not:
+  *why isn't Claude using my skill?* A skill can sit on disk, run fine by name,
+  and still never be chosen autonomously — because it is archived, marked
+  `disable-model-invocation`, or simply has no `description` in its
+  frontmatter. Each skill is listed with `[in prompt]` / `[not in prompt]`, its
+  use count and last-used age, whether it runs shell on expand, and, when
+  hidden, the specific reason. A footer summarises "N of M advertised to
+  Claude" and notes that hidden skills stay runnable by name.
+- **GUI: Tools > Skills.** A submenu listing every installed skill with its
+  description, restoring the manual invocation path the GUI lost when slash
+  commands were removed in 1.11. Picking one expands it and sends it as a
+  normal turn. Shell-bearing skills show a confirmation listing the commands
+  first. The submenu is rebuilt after a `/learn` turn, so a newly authored
+  skill appears without restarting.
+- **`/learn` — distil a reusable skill from what you just did.** Point it at
+  a directory, a URL, pasted notes, or nothing at all (in which case it
+  reviews the current conversation) and Claude authors a `SKILL.md` using the
+  tools it already has. No new tool surface: the command expands to a single
+  instructed turn, so it works identically in the CLI, the GUI, and over the
+  Telegram bridge. The embedded authoring standards enforce a ≤60-character
+  skill description — descriptions are loaded into the system prompt of every
+  session, so an overlong one is paid for on every request.
+  - In the GUI this is **Tools ▸ Learn a Skill…**, which prompts for the
+    sources (or focus) and runs the same turn. Leaving the field blank
+    distils the current conversation; Cancel and a blank field are
+    distinguished, so an accidental Esc never spends a turn.
+- **Skill usage telemetry and lifecycle, stored in BFS attributes.** Each
+  invocation stamps `claude:skill_uses` and `claude:skill_lastused` on the
+  skill's `SKILL.md`; `claude:skill_state` and `claude:skill_pinned` carry
+  lifecycle. Skills unused for 30 days become `stale`, 90 days `archived`.
+  Archived skills stay on disk and stay invocable by name — they are only
+  dropped from the system prompt, which is the part that costs tokens on every
+  request. Nothing is ever auto-deleted, and pinned skills never transition.
+  Because the attributes are indexed, ageing is a BFS query rather than a
+  directory walk, and the data is visible in Tracker.
+  - `/skills` now shows use counts, last-used age, and lifecycle state.
+  - `/skills pin|unpin <name>` exempts a skill from auto-archiving.
+  - `/skills prune` re-evaluates all lifecycle states on demand.
+
+### Changed
+
+- **Prompt caching now uses all four `cache_control` breakpoints** instead of
+  two. The system prompt is split into a *stable* tier (CLAUDE.md, BFS summary
+  snapshot, behaviour/skills/agents blocks) and a *volatile* tier (`--system`
+  text, working directory), letting the large stable prefix earn its own
+  long-lived cache entry that survives across turns and across sessions in the
+  same project. The remaining breakpoints track the tail of the conversation so
+  history stays warm as it grows. Markers are only placed on messages that can
+  actually carry one — a marker on an empty-content message is silently ignored
+  by the API and would waste a breakpoint. `api.cpp` verifies the stable text
+  really is a prefix of the composed prompt before splitting, so sub-agent and
+  custom-system turns fall back safely to a single block.
+- **Large tool output is now saved to disk instead of being discarded.**
+  `Bash`, `Grep`, and `Query` output over 32 KiB was previously truncated with
+  the remainder lost, leaving Claude unable to see or even name what it missed.
+  The full output is now written to `/tmp/claude-results/` and replaced in
+  context by a head+tail preview annotated with the byte count and the file
+  path, so the remainder can be retrieved with `Read` or `Grep`. Keeping both
+  ends matters: the head carries the first output, the tail usually carries the
+  summary or error that says how it finished. A failed spill degrades to the
+  old truncation behaviour rather than failing the tool call.
+- **The tool-use loop is now bounded by an iteration budget** (60 rounds).
+  Previously unbounded, a pathological loop would burn tokens until the user
+  interrupted it. Read-only tools are refunded and never charged, so a turn
+  that legitimately researches across many files is not cut short — only rounds
+  that can change state count. The read-only test reuses `tools::IsReadOnly`,
+  the same allowlist plan mode uses to strip mutating tools, so the two cannot
+  drift apart. On exhaustion Claude is asked for a summary of what was done and
+  what remains, which yields a usable answer instead of a silently amputated
+  one.
+- The plan-mode directive moved into the volatile system-prompt tier. It
+  toggles mid-session via `/plan` and `/execute`, so keeping it out of the
+  stable tier means a toggle no longer invalidates the cached prefix.
+- `RenameModal` (`gui_widgets`) is now a general one-line prompt: the window
+  title, field label, confirm-button text, and width are parameters, and
+  `Go(bool* accepted)` reports whether the user confirmed. Existing callers
+  are unaffected by the defaults. The out-param exists because `Go()` destroys
+  the window before returning, so an `Accepted()` getter would read freed
+  memory.
 
 ## [1.13.0] - 2026-07-23
 
