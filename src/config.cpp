@@ -396,25 +396,47 @@ bool ClearApiKey() {
 	return std::remove(ApiKeyPath().c_str()) == 0;
 }
 
-std::string ComposeSystem(const std::string& flag_system,
-                           const std::string& working_dir) {
-	std::string out;
-	auto append = [&](const std::string& chunk) {
+SystemTiers ComposeSystemTiers(const std::string& flag_system,
+                                const std::string& working_dir) {
+	SystemTiers tiers;
+	auto append = [](std::string& out, const std::string& chunk) {
 		if (chunk.empty()) return;
 		if (!out.empty()) out += "\n\n";
 		out += chunk;
 	};
-	append(LoadOptionalFile(paths::UserMemoryPath()));
-	append(LoadOptionalFile(paths::ProjectMemoryPath()));
-	append(BfsSystemBlock());
-	append(BehaviorSystemBlock());
-	append(skills::SystemBlock());
-	append(agents::SystemBlock());
+
+	// ── Stable tier ────────────────────────────────────────────────
+	// Everything here is byte-identical across every turn of a session
+	// and, for the same project, across sessions too. Ordering it first
+	// makes it an exact-match prefix Anthropic's cache can reuse, so a
+	// fresh session pays the (large) BFS snapshot + skills index cost
+	// once rather than on every turn.
+	//
+	// The CLAUDE.md files are re-read each turn and belong here despite
+	// being user-editable: they change rarely, and when they do the
+	// cache simply misses once and re-warms on the following turn.
+	append(tiers.stable, LoadOptionalFile(paths::UserMemoryPath()));
+	append(tiers.stable, LoadOptionalFile(paths::ProjectMemoryPath()));
+	append(tiers.stable, BfsSystemBlock());
+	append(tiers.stable, BehaviorSystemBlock());
+	append(tiers.stable, skills::SystemBlock());
+	append(tiers.stable, agents::SystemBlock());
+
+	// ── Volatile tier ──────────────────────────────────────────────
+	// Session-scoped or invocation-scoped: the plan-mode directive, the
+	// -s/--system flag text, and the working directory. Small, so a
+	// cache miss on this tail is cheap.
+
 	// Plan mode: ask the model to research and present a plan instead of
 	// acting. The read-only tool filter (tools::Definitions) is the hard
 	// guarantee; this directive shapes the behaviour.
+	//
+	// This lives in the VOLATILE tier deliberately: plan mode toggles
+	// mid-session (/plan, /execute), and anything that can change between
+	// turns must sit after the stable cache breakpoint or every toggle
+	// would invalidate the whole cached prefix.
 	if (api::g_plan_mode.load(std::memory_order_relaxed)) {
-		append(
+		append(tiers.volatileTier,
 			"PLAN MODE IS ACTIVE. Do not modify anything. You have only "
 			"read-only tools (no Bash, Write, Edit, or other state-changing "
 			"tools). Investigate the request using the available read tools, "
@@ -423,20 +445,36 @@ std::string ComposeSystem(const std::string& flag_system,
 			"Do not begin implementing until the user leaves plan mode "
 			"(they will run /execute).");
 	}
-	append(flag_system);
+	append(tiers.volatileTier, flag_system);
 
 	// Append the working directory so Claude always knows where relative
 	// paths resolve — useful when the user runs the CLI from a project root.
 	// The GUI passes an explicit path; the CLI falls back to getcwd().
 	if (!working_dir.empty()) {
-		append("Working directory: " + working_dir);
+		append(tiers.volatileTier, "Working directory: " + working_dir);
 	} else {
 		char cwdbuf[4096];
 		if (getcwd(cwdbuf, sizeof(cwdbuf)))
-			append(std::string("Working directory: ") + cwdbuf);
+			append(tiers.volatileTier, std::string("Working directory: ") + cwdbuf);
 	}
 
-	return out;
+	return tiers;
+}
+
+std::string ComposeSystem(const std::string& flag_system,
+                           const std::string& working_dir) {
+	// Single source of truth: the flat prompt is just the tiers joined.
+	const SystemTiers tiers = ComposeSystemTiers(flag_system, working_dir);
+	if (tiers.stable.empty()) return tiers.volatileTier;
+	if (tiers.volatileTier.empty()) return tiers.stable;
+	return tiers.stable + "\n\n" + tiers.volatileTier;
+}
+
+std::string StableSystemPrefix() {
+	// flag_system / working_dir live entirely in the volatile tier, so
+	// passing empties here yields the same stable text the full call
+	// would produce. Cheap: the BFS snapshot is cached per session.
+	return ComposeSystemTiers({}, {}).stable;
 }
 
 // Replace every invalid UTF-8 byte (or truncated sequence) with the

@@ -336,6 +336,138 @@ InterruptGuard::~InterruptGuard() {
 	sigaction(SIGINT, &fPrev, nullptr);
 }
 
+namespace {
+
+// Anthropic allows at most four cache_control breakpoints per request.
+// Render order is tools → system → messages, and each breakpoint caches
+// everything from the start of the request up to that point.
+constexpr int kMaxCacheBreakpoints = 4;
+
+// ── Iteration budget ────────────────────────────────────────────────
+//
+// The tool-use loop is otherwise unbounded: a model that keeps asking
+// for tools keeps getting them, and a pathological loop (re-reading the
+// same file, retrying a failing command) burns tokens until the user
+// notices and hits Ctrl+C. The budget caps how many round-trips a
+// single turn may take.
+//
+// Read-only tools are refunded. The cap exists to stop runaway *work*,
+// and a turn that legitimately reads thirty files to answer a question
+// is not runaway — it is the model doing research before acting. Only
+// iterations that could change something count against the budget.
+//
+// The read-only predicate is tools::IsReadOnly — the same allowlist
+// plan mode uses to strip mutating tools. Sharing it keeps the two
+// from drifting apart: a tool that is safe enough for plan mode is by
+// definition one that cannot burn the budget doing damage.
+constexpr int kMaxToolIterations = 60;
+
+const json kEphemeral = {{"type", "ephemeral"}};
+
+// True when a cache_control marker placed on this message is actually
+// honoured. A marker must land inside a content part; a message with
+// null/empty content has nowhere to carry one, and spending a
+// breakpoint on it silently wastes it. Mirrors the placement rules in
+// StampCacheMarker below, so the two never disagree.
+bool CanCarryCacheMarker(const json& msg) {
+	if (!msg.contains("content")) return false;
+	const auto& content = msg["content"];
+	if (content.is_string()) return !content.get<std::string>().empty();
+	if (content.is_array())
+		return !content.empty() && content.back().is_object();
+	return false;
+}
+
+// Attach a cache_control marker to a message's last content part,
+// promoting a bare string to a one-element array when needed.
+void StampCacheMarker(json& msg) {
+	auto& content = msg["content"];
+	if (content.is_string()) {
+		content = json::array({
+			{
+				{"type", "text"},
+				{"text", content.get<std::string>()},
+				{"cache_control", kEphemeral},
+			},
+		});
+	} else if (content.is_array() && !content.empty()) {
+		content.back()["cache_control"] = kEphemeral;
+	}
+}
+
+// Build the `system` field, splitting it into a stable prefix block and
+// a volatile suffix block so the large, rarely-changing part earns its
+// own long-lived cache entry.
+//
+// The split is only applied when `stable_prefix` really is a prefix of
+// `system` — sub-agent turns and callers that pass a bespoke system
+// string fall back to a single marked block rather than risk sending
+// text that doesn't match what the caller asked for.
+//
+// Returns the number of breakpoints consumed (1 or 2), or 0 when there
+// is no system content at all.
+//
+// The parameter is `systemText`, not `system`: flawfinder 2.0.19 (the
+// version CI runs) pattern-matches the bare identifier and reports a
+// CWE-78 shell-injection hit even for a std::string parameter.
+int BuildSystemArray(json& body, const std::string& systemText,
+                     const std::string& stable_prefix, bool oauth) {
+	json system_array = json::array();
+	if (oauth) {
+		// Anthropic gates OAuth requests unless the first system entry
+		// is the Claude Code preamble.
+		system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
+	}
+
+	if (!systemText.empty()) {
+		const bool splittable =
+			!stable_prefix.empty()
+			&& systemText.size() > stable_prefix.size()
+			&& systemText.compare(0, stable_prefix.size(), stable_prefix) == 0;
+
+		if (splittable) {
+			system_array.push_back(
+				{{"type", "text"}, {"text", stable_prefix}});
+			system_array.back()["cache_control"] = kEphemeral;
+			system_array.push_back(
+				{{"type", "text"}, {"text", systemText.substr(stable_prefix.size())}});
+		} else {
+			system_array.push_back({{"type", "text"}, {"text", systemText}});
+		}
+	}
+
+	if (system_array.empty()) return 0;
+
+	// Always mark the end of the system prompt: this is the breakpoint
+	// that caches the tools array plus the whole system prompt together.
+	int used = 0;
+	for (const auto& block : system_array)
+		if (block.contains("cache_control")) ++used;
+	if (!system_array.back().contains("cache_control")) {
+		system_array.back()["cache_control"] = kEphemeral;
+		++used;
+	}
+
+	body["system"] = std::move(system_array);
+	return used;
+}
+
+// Spend any remaining breakpoints on the most recent messages that can
+// actually carry one. Marking the tail of the conversation keeps the
+// growing history cached turn over turn: each turn's prefix (everything
+// before the new user message) is already warm from the previous call.
+void ApplyMessageCacheMarkers(json& messages, int budget) {
+	if (budget <= 0 || messages.empty()) return;
+
+	std::vector<size_t> carriers;
+	for (size_t i = messages.size(); i-- > 0 && carriers.size() < static_cast<size_t>(budget);) {
+		if (CanCarryCacheMarker(messages[i])) carriers.push_back(i);
+	}
+	for (size_t idx : carriers) StampCacheMarker(messages[idx]);
+}
+
+} // namespace
+
 SendResult SendConversation(config::Auth auth, const std::string& model,
                             int max_tokens, const json& messages,
                             const std::string& custom_system, bool include_tools,
@@ -355,6 +487,11 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	// type_error.316 on any invalid byte.
 	const std::string safe_system = config::SanitizeUtf8(custom_system);
 
+	// Stable prefix for the two-block system layout (see BuildSystemArray).
+	// Sanitized the same way so the prefix test compares like with like.
+	const std::string safe_stable_prefix =
+		config::SanitizeUtf8(config::StableSystemPrefix());
+
 	// Create the terminal sink once for this conversation.
 	// SendWithTools passes its own sink; standalone calls get a fresh one.
 	std::unique_ptr<TerminalSink> owned_sink;
@@ -369,33 +506,14 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 	// / callbacks from the previous call don't leak.
 	curl_easy_reset(curl);
 
-	// Mutable copy of messages so we can stamp cache_control on the
-	// most recent user turn without disturbing the caller's history.
+	// Mutable copy of messages so we can stamp cache_control without
+	// disturbing the caller's history.
 	json cached_messages = messages;
-	if (!cached_messages.empty()) {
-		auto& last = cached_messages.back();
-		if (last.contains("content")) {
-			auto& content = last["content"];
-			if (content.is_string()) {
-				const std::string text = content.get<std::string>();
-				content = json::array({
-					{
-						{"type", "text"},
-						{"text", text},
-						{"cache_control", {{"type", "ephemeral"}}},
-					},
-				});
-			} else if (content.is_array() && !content.empty()) {
-				content.back()["cache_control"] = {{"type", "ephemeral"}};
-			}
-		}
-	}
 
 	json body = {
 		{"model",      model},
 		{"max_tokens", max_tokens},
 		{"stream",     true},
-		{"messages",   cached_messages},
 	};
 	if (include_tools) {
 		body["tools"] = tools::Definitions();
@@ -419,32 +537,23 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 		};
 	}
 
-	// When OAuth is active, Anthropic gates the request unless the
-	// system field's first entry is the Claude Code preamble.
-	// Sending `system` as an array with the preamble as element 0
-	// and any extra content as element 1 passes the check.
-	//
-	// Prompt caching: mark the LAST system block with
-	// cache_control: ephemeral. Render order is tools → system →
-	// messages, so one marker here caches both the tools array and
-	// the system prompt together.
-	if (auth.kind == config::AuthKind::OAuth) {
-		json system_array = json::array();
-		system_array.push_back({{"type", "text"}, {"text", kOAuthSystem}});
-		if (!safe_system.empty()) {
-			system_array.push_back({{"type", "text"}, {"text", safe_system}});
-		}
-		system_array.back()["cache_control"] = {{"type", "ephemeral"}};
-		body["system"] = system_array;
-	} else if (!safe_system.empty()) {
-		body["system"] = json::array({
-			{
-				{"type", "text"},
-				{"text", safe_system},
-				{"cache_control", {{"type", "ephemeral"}}},
-			},
-		});
-	}
+	// Prompt caching, four breakpoints total:
+	//   1. end of the stable system prefix (CLAUDE.md + BFS snapshot +
+	//      behaviour/skills/agents blocks) — survives across turns and
+	//      across sessions in the same project;
+	//   2. end of the full system prompt — caches tools + system;
+	//   3-4. the last two cacheable messages, so the conversation
+	//      history stays warm as it grows.
+	// When the system prompt isn't splittable, breakpoint 1 is not
+	// spent and rolls over to a third message marker instead.
+	const int system_breakpoints = BuildSystemArray(
+		body, safe_system, safe_stable_prefix,
+		auth.kind == config::AuthKind::OAuth);
+	ApplyMessageCacheMarkers(cached_messages,
+		kMaxCacheBreakpoints - system_breakpoints);
+
+	body["messages"] = std::move(cached_messages);
+
 	std::string body_str;
 	try {
 		body_str = body.dump();
@@ -713,6 +822,10 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 		~EscGuardScope() { g_active_esc_guard = nullptr; }
 	} esc_guard_scope;
 
+	// Iterations consumed by this turn. Only non-read-only tool rounds
+	// count; see kMaxToolIterations.
+	int iterations_used = 0;
+
 	while (true) {
 		if (g_interrupted) {
 			sink.OnMeta("[interrupted]");
@@ -773,11 +886,16 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 		}
 
 		json tool_results = json::array();
+		// A round counts against the budget only if it ran at least one
+		// tool that can change state (see IsReadOnlyTool).
+		bool round_was_mutating = false;
 		for (const auto& block : result.content_blocks) {
 			if (block.value("type", "") != "tool_use") continue;
 			const std::string tname  = block.value("name",  std::string{});
 			const std::string tid    = block.value("id",    std::string{});
 			const json        tinput = block.value("input", json::object());
+
+			if (!tools::IsReadOnly(tname)) round_was_mutating = true;
 
 			const std::string tool_notice = "[tool: " + tname + " " + ShortInputSummary(tinput) + "]";
 			sink.OnMeta(tool_notice);
@@ -927,6 +1045,45 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 
 		if (tool_results.empty()) return aggregate;
 		messages.push_back({{"role", "user"}, {"content", tool_results}});
+
+		// Spend budget only on rounds that did real work. Read-only
+		// rounds are refunded (never charged), so a research-heavy turn
+		// isn't cut short for looking things up.
+		if (round_was_mutating) ++iterations_used;
+
+		if (iterations_used >= kMaxToolIterations) {
+			// Tell the model rather than the user: it gets one more
+			// turn to wrap up with what it has, which produces a usable
+			// answer instead of a silently amputated one.
+			sink.OnMeta("[iteration budget reached ("
+				+ std::to_string(kMaxToolIterations)
+				+ " tool rounds) — asking for a summary]");
+			config::LogLine("iteration budget exhausted after "
+				+ std::to_string(iterations_used) + " rounds");
+			messages.push_back({
+				{"role", "user"},
+				{"content",
+					"You have reached this turn's tool-call budget of "
+					+ std::to_string(kMaxToolIterations) + " rounds. Stop "
+					"calling tools now. Summarise what you accomplished, what "
+					"is still outstanding, and what the next step would be, so "
+					"the user can decide how to continue."},
+			});
+			const SendResult final_result = SendConversation(
+				auth, model, max_tokens, messages, custom_system,
+				/*include_tools=*/false, &sink);
+			aggregate.input_tokens                += final_result.input_tokens;
+			aggregate.output_tokens               += final_result.output_tokens;
+			aggregate.cache_creation_input_tokens += final_result.cache_creation_input_tokens;
+			aggregate.cache_read_input_tokens     += final_result.cache_read_input_tokens;
+			aggregate.assistant_text = final_result.assistant_text;
+			aggregate.stop_reason    = "iteration_budget";
+			if (!final_result.content_blocks.empty()) {
+				messages.push_back({{"role", "assistant"},
+									{"content", final_result.content_blocks}});
+			}
+			return aggregate;
+		}
 	}
 }
 

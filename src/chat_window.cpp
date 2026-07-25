@@ -66,6 +66,9 @@
 #include "tee_sink.h"
 #include "md_renderer.h"
 #include "models.h"
+#include "learn.h"
+#include "skills.h"
+#include "tools.h"
 #include "paths.h"
 #include "session_store.h"
 #include "telegram.h"
@@ -381,6 +384,21 @@ void ChatWindow::_BuildMenuBar()
 		telegram::RemoteControl::ConfigIsValid(config::Load(), &remoteWhy);
 	fRemoteItem->SetEnabled(remoteConfigured);
 	toolsMenu->AddItem(fRemoteItem);
+
+	// Skills: one item per installed Agent Skill, so the GUI can run them
+	// the way the CLI's /skill-name does. Built once here; _RefreshSkillMenu
+	// repopulates it after /learn writes a new skill.
+	toolsMenu->AddSeparatorItem();
+	fSkillMenu = new BMenu("Skills");
+	toolsMenu->AddItem(fSkillMenu);
+	_RefreshSkillMenu();
+
+	// Learn a skill: distil the current conversation (or whatever sources
+	// the user names) into a reusable SKILL.md. Not a toggle — it runs a
+	// turn, so it sits below a separator with the other actions.
+	toolsMenu->AddItem(new BMenuItem(
+		"\xF0\x9F\x8E\x93 Learn a Skill\xE2\x80\xA6",   // 🎓 …
+		new BMessage(gui::MSG_LEARN_SKILL)));
 	fMenuBar->AddItem(toolsMenu);
 
 	// ── Help ────────────────────────────────────────────────────────────────
@@ -1041,6 +1059,17 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		_LaunchCompact();
 		break;
 
+	case gui::MSG_LEARN_SKILL:
+		_LaunchLearn();
+		break;
+
+	case gui::MSG_RUN_SKILL: {
+		const char* skill = nullptr;
+		if (msg->FindString("skill", &skill) == B_OK && skill && skill[0])
+			_RunSkill(skill);
+		break;
+	}
+
 	case gui::MSG_CLEAR_HISTORY: {
 		// Confirm before wiping persisted prompt history.
 		const size_t n = fInput ? fInput->HistoryCount() : 0;
@@ -1519,6 +1548,13 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 		// Auto-save session to BFS after every completed turn.
 		_SaveSession();
+
+		// A /learn turn may have written a new SKILL.md — rescan so it
+		// appears in Tools > Skills without needing a restart.
+		if (fLearnPending) {
+			fLearnPending = false;
+			_RefreshSkillMenu();
+		}
 
 		// Keep the sidebar current if it's open (title/turn count may
 		// have changed, or this may be a brand-new session file).
@@ -2177,6 +2213,155 @@ void ChatWindow::_LaunchCompact()
 	});
 	fTurnCommitted  = false;
 	fCompactPending = true;
+
+	_SpawnWorker();
+}
+
+// Rebuild Tools > Skills from the on-disk skill set. Called once when the
+// menu is built and again after /learn, so a freshly authored skill shows
+// up without restarting. Archived skills are listed too — the user asking
+// for one by name is exactly the signal that revives it.
+void ChatWindow::_RefreshSkillMenu()
+{
+	if (!fSkillMenu) return;
+
+	// Drop the previous contents (BMenu::RemoveItem transfers ownership).
+	while (BMenuItem* old = fSkillMenu->RemoveItem(int32(0)))
+		delete old;
+
+	skills::Load(paths::UserSkillsDir(), paths::ProjectSkillsDir());
+	const auto& all = skills::All();
+
+	if (all.empty()) {
+		BMenuItem* none = new BMenuItem("(no skills installed)", nullptr);
+		none->SetEnabled(false);
+		fSkillMenu->AddItem(none);
+		return;
+	}
+
+	for (const auto& s : all) {
+		// Label with the description so the menu is self-documenting.
+		std::string label = s.name;
+		if (!s.description.empty())
+			label += "  \xE2\x80\x94  " + s.description;   // —
+		BMessage* msg = new BMessage(gui::MSG_RUN_SKILL);
+		msg->AddString("skill", s.name.c_str());
+		fSkillMenu->AddItem(new BMenuItem(label.c_str(), msg));
+	}
+	fSkillMenu->SetTargetForItems(this);
+}
+
+// Run a skill from the Skills menu: expand it exactly as the CLI's
+// /skill-name does (including {{args}} and !`cmd`) and send the result as
+// a normal user turn. This is the GUI's manual invocation path — the model
+// can also reach the same skills autonomously via the Skill tool.
+void ChatWindow::_RunSkill(const std::string& name)
+{
+	if (fWorkerRunning.load()) return;
+
+	// A skill whose body runs shell gets an explicit confirmation here.
+	// Typing /skill-name in the CLI is itself the consent; picking a menu
+	// item is a weaker signal, and the commands are worth seeing first.
+	if (skills::BodyRunsShell(name)) {
+		std::string body = "The skill \"" + name + "\" runs shell commands "
+		                   "when expanded:\n\n";
+		nlohmann::json in;
+		in["name"] = name;
+		body += tools::Preview("Skill", in);
+		body += "\nRun it?";
+		BAlert* confirm = new BAlert("Run Skill", body.c_str(),
+		    "Cancel", "Run", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		confirm->SetShortcut(0, B_ESCAPE);
+		if (confirm->Go() != 1) return;
+	}
+
+	bool found = false;
+	const std::string expanded = skills::Expand(name, std::string(), found);
+	if (!found || expanded.empty()) {
+		_AppendToolLine("[skill '" + name + "' could not be expanded]\n");
+		return;
+	}
+
+	_DismissWelcome();
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
+	_AppendText("/" + name + "\n");
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
+
+	_LaunchWorker(expanded);
+}
+
+// Tools > Learn a Skill…: distil a reusable Agent Skill from whatever the
+// user names — a directory, a URL, pasted notes — or, when the field is
+// left empty, from the conversation so far. Mirrors the CLI's /learn.
+//
+// The GUI has no slash commands (see _SendTurn), so this menu item is the
+// only surface for /learn here. It runs as a normal turn: learn::BuildPrompt
+// returns one instruction and the model does the work with the tools it
+// already has, writing the SKILL.md via the Write tool.
+void ChatWindow::_LaunchLearn()
+{
+	if (fWorkerRunning.load()) return;          // a turn is already running
+
+	// Ask what to learn from. An empty field is meaningful here (= "this
+	// conversation"), so we distinguish it from Cancel via the out-param
+	// rather than by testing the returned string for emptiness.
+	RenameModal* modal = new RenameModal(
+		"",
+		"Learn a Skill",
+		"Sources or focus (blank = this conversation):",
+		"Learn",
+		gui::ScalePx(460));
+	bool accepted = false;
+	const std::string request = modal->Go(&accepted);   // self-quits
+	if (!accepted) return;                              // Cancel / Esc / close
+
+	// Blank field means "distil the conversation" — which needs one to exist.
+	if (request.empty() && fMessages.empty()) {
+		BAlert* none = new BAlert("Learn a Skill",
+		    "There is no conversation yet to learn from.\n\n"
+		    "Either have a conversation first, or name a directory, "
+		    "file, or URL to learn from.",
+		    "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+		none->SetType(B_INFO_ALERT);
+		none->Go();
+		return;
+	}
+
+	_DismissWelcome();
+
+	// Visible markers in the scrollback so the turn reads like any other.
+	AppendWithColor(fOutput, "\nyou \xE2\x96\xB8 ", kColorUserLabel, fZoomFactor);
+	_AppendText(request.empty()
+		? std::string("Learn a skill from this conversation\n")
+		: std::string("Learn a skill: " + request + "\n"));
+	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
+
+	fPendingUserText.clear();
+	fPendingAssistantText.clear();
+	fInCodeBlock = false;
+	fCodeBuffer.clear();
+	fLineBuffer.clear();
+	fInWebFetch = false;
+	fWebFetchBuf.clear();
+
+	_SetBusy(true);
+	fTurnStartTime = system_time();
+	fToolsUsed     = 0;
+
+	_SpinnerStart();
+	BMessage tickMsg(gui::MSG_TICK);
+	fSpinnerTimer = new BMessageRunner(BMessenger(this), &tickMsg, 80000LL);
+
+	// Same prompt the CLI builds, so both front-ends author skills to the
+	// same standards.
+	fWorkerMessages = fMessages;
+	fWorkerMessages.push_back({
+		{"role", "user"},
+		{"content", learn::BuildPrompt(request)},
+	});
+	fTurnCommitted  = false;
+	fCompactPending = false;
+	fLearnPending   = true;   // rescan skills when this turn finishes
 
 	_SpawnWorker();
 }

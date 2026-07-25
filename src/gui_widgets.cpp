@@ -102,16 +102,18 @@ SessionItem::SessionItem(const std::string& label, const std::string& path,
 // RenameModal
 // ---------------------------------------------------------------------------
 
-RenameModal::RenameModal(const std::string& current)
-	: BWindow(BRect(0, 0, 320, 90), "Rename Session",
+RenameModal::RenameModal(const std::string& current, const char* title,
+                         const char* label, const char* okLabel,
+                         float widthPx)
+	: BWindow(BRect(0, 0, widthPx, 90), title,
 	          B_MODAL_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
 	          B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
 	  fDoneSem(create_sem(0, "rename_modal"))
 {
-	fField = new BTextControl("name", nullptr, current.c_str(),
+	fField = new BTextControl("name", label, current.c_str(),
 	                          new BMessage('RNok'));
 	fField->SetTarget(this);
-	BButton* ok     = new BButton("ok", "Rename", new BMessage('RNok'));
+	BButton* ok     = new BButton("ok", okLabel, new BMessage('RNok'));
 	BButton* cancel = new BButton("cancel", "Cancel", new BMessage('RNcl'));
 	ok->MakeDefault(true);
 
@@ -145,21 +147,27 @@ void RenameModal::MessageReceived(BMessage* msg)
 {
 	if (msg->what == 'RNok') {
 		if (const char* t = fField->Text()) fResult = t;
+		fAccepted = true;
 		_Finish();
 		return;
 	}
-	if (msg->what == 'RNcl') { fResult.clear(); _Finish(); return; }
+	if (msg->what == 'RNcl') { fResult.clear(); fAccepted = false; _Finish(); return; }
 	BWindow::MessageReceived(msg);
 }
 
+// Closing the window (title-bar close) is a cancel, not a confirm — leave
+// fAccepted false so callers that accept empty input don't act on it.
 bool RenameModal::QuitRequested() { _Finish(); return true; }
 
-std::string RenameModal::Go()
+std::string RenameModal::Go(bool* accepted)
 {
 	Show();
 	acquire_sem(fDoneSem);
-	const std::string r = fResult;
+	// Read both results BEFORE Quit() — it deletes this window.
+	const std::string r  = fResult;
+	const bool        ok = fAccepted;
 	if (Lock()) Quit();
+	if (accepted) *accepted = ok;
 	return r;
 }
 

@@ -85,6 +85,45 @@ bool        ClearApiKey();
 std::string ComposeSystem(const std::string& flag_system,
                            const std::string& working_dir = {});
 
+// The system prompt split into two cache tiers, ordered stable-first.
+//
+// Anthropic's prompt cache matches on an exact prefix: everything up
+// to a cache_control breakpoint must be byte-identical to the previous
+// request or the cache misses. Splitting lets the large, rarely-changing
+// part earn a long-lived cache entry even when the tail changes.
+//
+//   stable   — user/project CLAUDE.md, the BFS tool guidance + summary
+//              snapshot, behaviour guidance, and the skills/agents
+//              index. Byte-identical across turns of a session and
+//              (mostly) across sessions in the same project, so it
+//              survives as a warm prefix. The CLAUDE.md files are
+//              re-read every turn and belong here despite being
+//              user-editable: they change rarely, so an edit costs one
+//              cache miss and then re-warms.
+//   volatile — the plan-mode directive (toggled mid-session by /plan
+//              and /execute), the -s/--system flag text, and the
+//              working-directory line.
+//
+// Concatenating stable + "\n\n" + volatile reproduces exactly what
+// ComposeSystem() returns, so callers that don't care about caching
+// can keep using ComposeSystem().
+struct SystemTiers {
+	std::string stable;
+	std::string volatileTier;
+};
+
+// Build the tiered system prompt. Same inputs and same joined output
+// as ComposeSystem(); only the split point is additional information.
+SystemTiers ComposeSystemTiers(const std::string& flag_system,
+                                const std::string& working_dir = {});
+
+// The stable tier on its own, for the API client's cache-breakpoint
+// placement. api.cpp receives an already-composed system string, so it
+// verifies this really is a prefix of that string before splitting it
+// into two cacheable blocks — a mismatch (sub-agent prompt, custom
+// caller) just falls back to a single block.
+std::string StableSystemPrefix();
+
 // Replace invalid UTF-8 bytes (including truncated sequences) with
 // U+FFFD so nlohmann::json::dump() never throws type_error.316.
 std::string SanitizeUtf8(const std::string& s);

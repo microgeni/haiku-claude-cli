@@ -56,19 +56,31 @@ private:
 	std::string fTitle;   // raw title (no "  (N)" turn-count suffix)
 };
 
-// RenameModal — a tiny modal prompt with a single text field, used to
-// rename a saved session. Go() returns the entered text, or empty on cancel.
+// RenameModal — a small modal prompt with a single text field. Go()
+// returns the entered text, or empty on cancel.
+//
+// The window title, label, and confirm-button text are configurable so
+// the same widget serves any one-line prompt; the defaults keep the
+// original "rename a saved session" behaviour for existing callers.
 class RenameModal : public BWindow {
 public:
-	explicit RenameModal(const std::string& current);
+	explicit RenameModal(const std::string& current,
+	                     const char* title      = "Rename Session",
+	                     const char* label      = nullptr,
+	                     const char* okLabel    = "Rename",
+	                     float       widthPx    = 320.0f);
 	~RenameModal() override;
 
 	void Show() override;
 	void MessageReceived(BMessage* msg) override;
 	bool QuitRequested() override;
 
-	// Show modally and return the entered name (empty = cancelled).
-	std::string Go();
+	// Show modally and return the entered text (empty = cancelled, or an
+	// empty field — use the `accepted` out-param to tell them apart).
+	//
+	// Go() destroys the window before returning, so an Accepted() getter
+	// would be a use-after-free. Callers that care take the out-param.
+	std::string Go(bool* accepted = nullptr);
 
 private:
 	void _Finish();
@@ -77,6 +89,7 @@ private:
 	sem_id        fDoneSem;
 	std::string   fResult;
 	bool          fFinished = false;
+	bool          fAccepted = false;
 };
 
 // SessionListView — BListView that pops a right-click context menu

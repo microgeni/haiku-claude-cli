@@ -143,7 +143,7 @@ api::Permission TerminalSink::AskPermission(const std::string& tool_name,
 	using Permission = api::Permission;
 
 	if (api::AlwaysAllowed().count(tool_name)) return Permission::Allow;
-	if (!tools::RequiresPermission(tool_name))  return Permission::Allow;
+	if (!tools::RequiresPermission(tool_name, input))  return Permission::Allow;
 
 	// Ludicrous mode: auto-approve all tools.
 	if (api::g_ludicrous_mode.load()) {

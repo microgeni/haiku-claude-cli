@@ -134,8 +134,13 @@ int main(int argc, char** argv) {
 EOF
 
 step "compile skills/agents test driver"
+# skills.cpp uses the Be API (BNode/BVolume) for usage attributes on
+# Haiku, so the driver links libbe there. Harmless elsewhere: the
+# flag is only added when the library exists.
+BE_LIB=""
+[ "$(uname -s)" = "Haiku" ] && BE_LIB="-lbe"
 g++ -std=c++17 -Isrc $JSON_CFLAGS "$WORK/driver.cpp" \
-	"$OBJ_SKILLS" "$OBJ_AGENTS" "$OBJ_PATHS" -o "$WORK/driver" \
+	"$OBJ_SKILLS" "$OBJ_AGENTS" "$OBJ_PATHS" $BE_LIB -o "$WORK/driver" \
 	|| { fail "driver failed to compile"; echo "Results: $PASS passed, $((FAIL+1)) failed"; exit 1; }
 pass
 

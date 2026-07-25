@@ -3,10 +3,20 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+
+#ifdef __HAIKU__
+#include <Node.h>
+#include <Volume.h>
+#include <VolumeRoster.h>
+#include <fs_attr.h>
+#include <fs_index.h>
+#endif
 
 #include "paths.h"
 
@@ -15,6 +25,71 @@ namespace skills {
 namespace {
 
 std::vector<Skill> g_skills;
+
+// BFS attribute names for usage telemetry. Kept in the claude:
+// namespace so they never collide with BEOS:* or user attributes.
+const char* const kAttrUses     = "claude:skill_uses";
+const char* const kAttrLastUsed = "claude:skill_lastused";
+const char* const kAttrState    = "claude:skill_state";
+const char* const kAttrPinned   = "claude:skill_pinned";
+
+const char* const kStateActive   = "active";
+const char* const kStateStale    = "stale";
+const char* const kStateArchived = "archived";
+
+// Path to the SKILL.md that carries a skill's attributes.
+std::string skill_file(const Skill& s) { return s.dir + "/SKILL.md"; }
+
+#ifdef __HAIKU__
+
+// Read the usage attributes off a skill's SKILL.md. Missing attributes
+// leave the corresponding fields at their defaults, so a skill that has
+// never been invoked simply reads as zero uses / never used.
+void read_usage_attrs(Skill& s) {
+	BNode node(skill_file(s).c_str());
+	if (node.InitCheck() != B_OK) return;
+
+	int32 uses = 0;
+	if (node.ReadAttr(kAttrUses, B_INT32_TYPE, 0, &uses, sizeof(uses))
+			== static_cast<ssize_t>(sizeof(uses)))
+		s.uses = uses;
+
+	int64 last = 0;
+	if (node.ReadAttr(kAttrLastUsed, B_INT64_TYPE, 0, &last, sizeof(last))
+			== static_cast<ssize_t>(sizeof(last)))
+		s.lastUsed = static_cast<time_t>(last);
+
+	attr_info info {};
+	if (node.GetAttrInfo(kAttrState, &info) == B_OK && info.size > 0) {
+		std::string val(static_cast<size_t>(info.size), '\0');
+		if (node.ReadAttr(kAttrState, B_STRING_TYPE, 0, &val[0],
+				static_cast<size_t>(info.size)) > 0) {
+			// Stored with a trailing NUL; trim it.
+			const size_t nul = val.find('\0');
+			if (nul != std::string::npos) val.resize(nul);
+			s.state = val;
+		}
+	}
+
+	bool pinned = false;
+	if (node.ReadAttr(kAttrPinned, B_BOOL_TYPE, 0, &pinned, sizeof(pinned))
+			== static_cast<ssize_t>(sizeof(pinned)))
+		s.pinned = pinned;
+}
+
+// Write the state attribute back to disk.
+void write_state_attr(const Skill& s, const char* state) {
+	BNode node(skill_file(s).c_str());
+	if (node.InitCheck() != B_OK) return;
+	node.WriteAttr(kAttrState, B_STRING_TYPE, 0, state, std::strlen(state) + 1);
+}
+
+#else  // !__HAIKU__
+
+void read_usage_attrs(Skill&) {}
+void write_state_attr(const Skill&, const char*) {}
+
+#endif
 
 std::string slurp(const std::string& path) {
 	std::ifstream f(path);
@@ -152,7 +227,7 @@ std::string substitute_args(const std::string& body, const std::string& args) {
 // Replace dynamic-context lines of the form  !`shell command`  with the
 // command's stdout. The marker is a backtick-delimited command preceded
 // by `!`. Multiple may appear; each is expanded independently.
-std::string inject_dynamic_context(const std::string& body) {
+std::string inject_dynamic_context(const std::string& body, bool runShell) {
 	std::string out;
 	out.reserve(body.size());
 	size_t i = 0;
@@ -163,7 +238,13 @@ std::string inject_dynamic_context(const std::string& body) {
 			const size_t close = body.find('`', cmdStart);
 			if (close != std::string::npos) {
 				const std::string cmd = body.substr(cmdStart, close - cmdStart);
-				out += capture_command(cmd);
+				if (runShell) {
+					out += capture_command(cmd);
+				} else {
+					// Plan mode / read-only: show what would have run
+					// rather than running it.
+					out += "[not run in plan mode: " + cmd + "]";
+				}
 				i = close + 1;
 				continue;
 			}
@@ -198,6 +279,10 @@ bool load_skill_dir(const std::string& dir, const std::string& dirName) {
 			if (!t.empty() && t[0] != '#') { skill.description = t; break; }
 		}
 	}
+
+	// Pull in usage telemetry so callers (listings, SystemBlock) can
+	// see counts and lifecycle state without a second pass.
+	read_usage_attrs(skill);
 
 	// Replace any existing entry with the same name (project overrides
 	// user because the project dir is scanned second).
@@ -250,27 +335,202 @@ const Skill* Find(const std::string& name) {
 	return nullptr;
 }
 
-std::string Expand(const std::string& name, const std::string& args, bool& found) {
+bool BodyRunsShell(const std::string& name) {
+	const Skill* s = Find(name);
+	if (!s) return false;
+	// Mirror inject_dynamic_context's scan: a '!' immediately followed by
+	// a backtick, with a closing backtick somewhere after it.
+	const std::string& b = s->body;
+	for (size_t i = 0; i + 1 < b.size(); ++i) {
+		if (b[i] == '!' && b[i + 1] == '`'
+		    && b.find('`', i + 2) != std::string::npos)
+			return true;
+	}
+	return false;
+}
+
+std::string Expand(const std::string& name, const std::string& args, bool& found,
+                   bool runShell) {
 	const Skill* s = Find(name);
 	if (!s) { found = false; return {}; }
 	found = true;
+	// Telemetry before expansion: an invocation counts even if a
+	// !`cmd` line inside the body later fails.
+	RecordUse(name);
 	std::string expanded = substitute_args(s->body, args);
-	expanded = inject_dynamic_context(expanded);
+	expanded = inject_dynamic_context(expanded, runShell);
 	return trim(expanded);
 }
 
 std::string SystemBlock() {
 	std::string block;
+	bool anyRunsShell = false;
 	for (const auto& s : g_skills) {
 		if (s.disableModelInvocation) continue;
 		if (s.description.empty()) continue;
+		// Archived skills stay on disk and stay invocable by name, but
+		// are dropped from the system prompt — carrying a skill nobody
+		// has used in months costs tokens on every single request.
+		if (s.state == kStateArchived) continue;
 		block += "- " + s.name + ": " + s.description + "\n";
+		if (BodyRunsShell(s.name)) anyRunsShell = true;
 	}
-	if (block.empty()) return {};
-	return "Available skills (invoke by following the instructions for "
-	       "the matching one when a user request fits its description; the "
-	       "user can also invoke a skill directly by typing /skill-name):\n"
-	     + block;
+
+	std::string out;
+
+	// ── Index of what exists (omitted when nothing is invocable) ──────
+	if (!block.empty()) {
+		out += "Available skills — reusable procedures for specific tasks:\n";
+		out += block;
+		out += "\nThese one-line descriptions are an index, NOT the procedure. "
+			   "When a request matches one, call the `Skill` tool with that "
+			   "name to load the actual steps, then follow them. Do not infer "
+			   "a skill's contents from its description or improvise the "
+			   "procedure yourself. The user can also run a skill directly by "
+			   "typing /skill-name.\n";
+		if (anyRunsShell) {
+			// Be explicit that loading is not always free, so the model
+			// doesn't treat Skill as a zero-consequence lookup.
+			out += "Some skills run shell commands as part of loading; those "
+				   "prompt for permission first.\n";
+		}
+		out += "\n";
+	}
+
+	// ── How new skills come into existence ────────────────────────────
+	// Deliberately present even with zero skills installed: a fresh setup
+	// is exactly when the model needs to know this is possible, otherwise
+	// the loop never starts. Kept short because it sits in the cached
+	// stable tier of every request.
+	//
+	// Suggest-only by design. Writing files into the user's config dir
+	// mid-task is a surprise, and the point is to make the capability
+	// discoverable, not to accumulate skills nobody asked for.
+	out += "Creating skills: when you finish something non-trivial — a task "
+		   "that took several tool calls, a fiddly fix, or a workflow worth "
+		   "repeating — briefly offer to save it as a skill for next time. "
+		   "Offer; do not create one unprompted, and do not offer for routine "
+		   "one-step requests. If the user accepts, write "
+		 + paths::UserSkillsDir() + "/<name>/SKILL.md (or "
+		 + paths::ProjectSkillsDir() + "/<name>/SKILL.md when it is specific "
+		   "to this project) with YAML frontmatter containing `name:` and a "
+		   "`description:` of 60 characters or fewer — the description is "
+		   "loaded into every future session, so keep it to one short "
+		   "sentence — followed by the procedure in markdown. The user can "
+		   "also run /learn themselves to have you do this in more depth.\n"
+		   "If a skill you loaded turns out to be wrong, outdated, or missing "
+		   "a step, say so and offer to correct it. Stale skills are worse "
+		   "than none.\n";
+
+	return out;
+}
+
+void RecordUse(const std::string& name) {
+#ifdef __HAIKU__
+	Skill* target = nullptr;
+	for (auto& s : g_skills)
+		if (s.name == name) { target = &s; break; }
+	if (!target) return;
+
+	BNode node(skill_file(*target).c_str());
+	if (node.InitCheck() != B_OK) return;
+
+	const int32 uses = target->uses + 1;
+	const int64 now  = static_cast<int64>(::time(nullptr));
+	node.WriteAttr(kAttrUses, B_INT32_TYPE, 0, &uses, sizeof(uses));
+	node.WriteAttr(kAttrLastUsed, B_INT64_TYPE, 0, &now, sizeof(now));
+
+	target->uses     = uses;
+	target->lastUsed = static_cast<time_t>(now);
+
+	// Using a skill revives it: a stale or archived skill that just
+	// proved useful should not stay demoted until the next sweep.
+	if (target->state == kStateStale || target->state == kStateArchived) {
+		node.WriteAttr(kAttrState, B_STRING_TYPE, 0,
+			kStateActive, std::strlen(kStateActive) + 1);
+		target->state = kStateActive;
+	}
+#else
+	(void)name;
+#endif
+}
+
+int ApplyLifecycle(int staleAfterDays, int archiveAfterDays) {
+#ifdef __HAIKU__
+	if (staleAfterDays <= 0 || archiveAfterDays <= 0) return 0;
+
+	const time_t now = ::time(nullptr);
+	int changed = 0;
+
+	for (auto& s : g_skills) {
+		// Pinned skills opt out of all automatic transitions.
+		if (s.pinned) continue;
+
+		// A skill that has never been invoked ages from its file
+		// mtime, not from epoch — otherwise every newly authored
+		// skill would be archived the moment it is written.
+		time_t reference = s.lastUsed;
+		if (reference == 0) {
+			struct stat st {};
+			if (stat(skill_file(s).c_str(), &st) == 0) reference = st.st_mtime;
+			else continue;
+		}
+
+		const double ageDays = std::difftime(now, reference) / 86400.0;
+		const char*  want    = kStateActive;
+		if (ageDays >= archiveAfterDays)   want = kStateArchived;
+		else if (ageDays >= staleAfterDays) want = kStateStale;
+
+		// Treat an unset state as "active" so a no-op sweep writes nothing.
+		const std::string current = s.state.empty() ? kStateActive : s.state;
+		if (current == want) continue;
+
+		write_state_attr(s, want);
+		s.state = want;
+		++changed;
+	}
+	return changed;
+#else
+	(void)staleAfterDays; (void)archiveAfterDays;
+	return 0;
+#endif
+}
+
+bool SetPinned(const std::string& name, bool pinned) {
+#ifdef __HAIKU__
+	for (auto& s : g_skills) {
+		if (s.name != name) continue;
+		BNode node(skill_file(s).c_str());
+		if (node.InitCheck() != B_OK) return false;
+		node.WriteAttr(kAttrPinned, B_BOOL_TYPE, 0, &pinned, sizeof(pinned));
+		s.pinned = pinned;
+		// Pinning a demoted skill restores it immediately; the user is
+		// saying it matters regardless of how long it has sat unused.
+		if (pinned && (s.state == kStateStale || s.state == kStateArchived)) {
+			write_state_attr(s, kStateActive);
+			s.state = kStateActive;
+		}
+		return true;
+	}
+	return false;
+#else
+	(void)name; (void)pinned;
+	return false;
+#endif
+}
+
+void EnsureUsageIndexes() {
+#ifdef __HAIKU__
+	BVolume    vol;
+	BVolumeRoster roster;
+	if (roster.GetBootVolume(&vol) != B_OK) return;
+	const dev_t dev = vol.Device();
+	// fs_create_index returns an error when the index already exists;
+	// that is the expected steady state, so the result is ignored.
+	fs_create_index(dev, kAttrUses,     B_INT32_TYPE,  0);
+	fs_create_index(dev, kAttrLastUsed, B_INT64_TYPE,  0);
+	fs_create_index(dev, kAttrState,    B_STRING_TYPE, 0);
+#endif
 }
 
 } // namespace skills

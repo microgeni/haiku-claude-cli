@@ -141,6 +141,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/hooks.cpp       \
     $(SRCDIR)/history_util.cpp \
     $(SRCDIR)/image_util.cpp  \
+    $(SRCDIR)/learn.cpp       \
     $(SRCDIR)/mcp.cpp         \
     $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
