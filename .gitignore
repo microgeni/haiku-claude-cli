@@ -35,6 +35,9 @@
 # Project-specific
 build/
 build-release/
+# Cross-compile trees (make ARCH=arm64 → build-arm64/, build-release-arm64/)
+build-*-arm64/
+build-arm64/
 .claude/
 
 # Genio IDE workspace files
