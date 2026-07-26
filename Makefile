@@ -165,10 +165,15 @@ PKG_STAGE   := $(BUILDDIR)/pkg
 # while the arm64 cross build statically links libcurl/libedit/OpenSSL/
 # yaml-cpp (no arm64 HaikuPorts repo exists) and so needs only ncurses and
 # zlib. libtracker/libbe/libnetwork come from the haiku package itself.
+#
+# ca_root_certificates is required explicitly on arm64: the CA bundle is a
+# hard runtime requirement for TLS (libcurl has the path compiled in), and
+# the arm64 Haiku image does not ship it. On x86_64 it arrives transitively
+# via HaikuPorts' curl, but static linking severs that chain.
 ifeq ($(ARCH),arm64)
-PKG_REQUIRES := haiku >= r1~beta5\n\tlib:libncursesw\n\tlib:libz
+PKG_REQUIRES := haiku >= r1~beta5\n\tca_root_certificates\n\tlib:libncursesw\n\tlib:libz
 else
-PKG_REQUIRES := haiku >= r1~beta5\n\tlib:libcurl\n\tlib:libcrypto >= 3\n\tlib:libssl >= 3\n\tlib:libedit\n\tlib:libyaml_cpp
+PKG_REQUIRES := haiku >= r1~beta5\n\tca_root_certificates\n\tlib:libcurl\n\tlib:libcrypto >= 3\n\tlib:libssl >= 3\n\tlib:libedit\n\tlib:libyaml_cpp
 endif
 
 # Whether the GUI ships is independent of the above.

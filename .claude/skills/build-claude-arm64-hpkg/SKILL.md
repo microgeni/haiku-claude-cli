@@ -137,6 +137,44 @@ pkgman install claude_cli-<version>-1-arm64.hpkg
 # or: cp it into /boot/system/packages/
 ```
 
+### First-boot runtime traps on a fresh arm64 image
+
+Neither of these is visible from the build side, and both produce errors that
+point nowhere near the cause. Check them before debugging anything else.
+
+1. **No CA bundle.** The arm64 image ships 13 packages and
+   `ca_root_certificates` is *not* among them (verify:
+   `strings haiku-mmc.image | grep ca_root` → nothing). libcurl has
+   `/boot/system/data/ssl/CARootCertificates.pem` compiled in, so without it
+   every request fails with `Problem with SSL CA cert (path? access rights)`.
+   Install `generated.arm64/download/ca_root_certificates-*-any.hpkg`
+   (architecture `any`, so the same file works). The package now declares
+   this as a requirement, so a missing bundle fails at install instead.
+   Note `CURL_CA_BUNDLE` does **not** help — that is a curl(1) feature, the
+   string isn't even in libcurl.
+
+2. **Clock at 1970.** A Pi 5 without a fitted RTC coin cell and with no NTP
+   client (the image has no `ntpdate`/`sntp`/`ntpd`) boots at the epoch.
+   Server certs are short-lived — Anthropic's is ~90 days — so any clock
+   that far off fails verification with
+   `SSL peer certificate or SSH remote key was not ok`. Fix with
+   `date -s "YYYY-MM-DD HH:MM:SS"`, then enable NTP in the Time preferences
+   app so it survives a cold boot.
+
+### Trap: GUI starts but no window appears
+
+If `Claude` shows in the Deskbar but no window is visible, suspect
+`gui_prefs.msg` copied from another machine. It stores the window frame, and
+a frame saved on a large desktop (taurus is 5120x2160) lands far outside a
+1080p Pi display. `ChatWindow::_LoadGuiPrefs` clamps the frame into
+`BScreen::Frame()`, but a build predating that fix will not. Workaround:
+`rm ~/config/settings/claude-cli/gui_prefs.msg`.
+
+This is the general hazard of copying `~/config/settings/claude-cli/` between
+machines. `credentials.json` and `config.json` transfer cleanly; window
+geometry does not. Also note that sharing one OAuth refresh token across two
+machines logs the other out, because the token rotates on refresh.
+
 ## Gotcha: package requires are keyed on ARCH, not BUILD_GUI
 
 `PKG_REQUIRES` must switch on `$(ARCH)`, because static-vs-dynamic linking is
