@@ -214,15 +214,10 @@ bool SaveTokens(const OAuthTokens& tokens) {
 		{"refresh_token", tokens.refresh_token},
 		{"expires_at",    tokens.expires_at},
 	};
-	std::ofstream f(path);
-	if (!f.is_open()) {
-		std::cerr << "error: cannot write " << path << "\n";
-		return false;
-	}
-	f << j.dump(2) << "\n";
-	f.close();
 	// Open with O_CREAT|0600 so the file is never world-readable even
 	// transiently — avoids the chmod-after-open TOCTOU race (CWE-362).
+	// Note that O_CREAT only applies the mode when it actually creates
+	// the file, so nothing may open it beforehand.
 	const int fd = ::open(path.c_str(),
 	                      O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0) {
