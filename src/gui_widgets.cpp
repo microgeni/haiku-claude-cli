@@ -284,8 +284,11 @@ SessionWindow::SessionWindow(BWindow* owner, BHandler* target)
 bool SessionWindow::QuitRequested()
 {
 	// Don't destroy — just tuck the window away so its list survives and
-	// View ▸ Sessions can bring it straight back.
+	// View ▸ Sessions can bring it straight back. Return focus to the owning
+	// chat window so the user can keep typing instead of being left with no
+	// active window.
 	if (!IsHidden()) Hide();
+	if (fOwner) fOwner->Activate(true);
 	return false;
 }
 
