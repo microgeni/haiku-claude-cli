@@ -104,6 +104,38 @@ private:
 	BHandler* fTarget = nullptr;
 };
 
+// SessionWindow — a standalone floating window that hosts the saved-session
+// list plus New/Open/Rename/Delete buttons. It replaces the old collapsible
+// left sidebar: the list and buttons all post the shared gui::MSG_SESSION_*
+// codes to the owning ChatWindow (passed as `target`), so the existing
+// load/delete/rename handlers work unchanged.
+//
+// The window owns its SessionListView; the ChatWindow reaches it through
+// List() to repopulate and read the selection. Closing the window just hides
+// it (View ▸ Sessions toggles visibility) so the list state survives; the
+// ChatWindow deletes it for real on quit.
+class SessionListView;
+class SessionWindow : public BWindow {
+public:
+	SessionWindow(BWindow* owner, BHandler* target);
+
+	// The hosted list, so the owner can refresh it and read the selection.
+	SessionListView* List() const { return fList; }
+
+	// Closing only hides the window so it can be toggled back open with its
+	// contents intact. Returns false to veto the real close.
+	bool QuitRequested() override;
+
+	// Show centred over the owning window the first time, then remember the
+	// last position on subsequent shows.
+	void ShowNear(BWindow* owner);
+
+private:
+	SessionListView* fList  = nullptr;
+	BWindow*         fOwner = nullptr;
+	bool             fPlaced = false;   // has the frame been positioned once
+};
+
 // NotifySlider — slider for the notification delay. Snaps to 10-second
 // steps and shows a plain-English label ("Notify is disabled" / "Notify
 // after 30s") that updates live as the thumb moves.

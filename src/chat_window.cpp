@@ -499,66 +499,12 @@ void ChatWindow::_BuildLayout()
 	// badge matches the Tools menu checkmark from the start.
 	fTokenBar->SetLudicrous(api::g_ludicrous_mode.load());
 
-	// ── Session sidebar (left dock, hidden until View ▸ Sessions) ─────────────
-	fSessionList = new SessionListView("sessionlist", this);
-	fSessionList->SetSelectionMessage(nullptr); // single-click just highlights
-	fSessionList->SetInvocationMessage(           // double-click loads
-		new BMessage(gui::MSG_SESSION_SELECT));
-	fSessionScroll = new BScrollView("sessionscroll", fSessionList,
-	                                 0, false, true, B_FANCY_BORDER);
-	// A BListView reports a content-derived minimum width (the widest session
-	// title), which propagates up through the scroll view, the session panel
-	// and the horizontal split, freezing the whole window's minimum width far
-	// wider than it should be — and that in turn lets the bottom input bar
-	// overflow to the right and clip the buttons once the window is narrowed.
-	// Pin a small explicit min on both the list and its scroller so the
-	// sidebar (and the window) can shrink freely; the splitter governs the
-	// real width.
-	fSessionList->SetExplicitMinSize(BSize(60, B_SIZE_UNSET));
-	fSessionScroll->SetExplicitMinSize(BSize(60, 50));
-	fSessionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-	BButton* sessNew = new BButton("sessnew", "New",
-	                               new BMessage(gui::MSG_SESSION_NEW));
-	BButton* sessOpen = new BButton("sessopen", "Open",
-	                                new BMessage(gui::MSG_SESSION_SELECT));
-	BButton* sessRen = new BButton("sessren", "Rename",
-	                               new BMessage(gui::MSG_SESSION_RENAME));
-	BButton* sessDel = new BButton("sessdel", "Delete",
-	                               new BMessage(gui::MSG_SESSION_DELETE));
-	fSessionPanel = new BView("sessionpanel", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
-	fSessionPanel->SetResizingMode(B_FOLLOW_NONE);
-	fSessionPanel->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-
-	// Keep the action buttons grouped at the left at a uniform width
-	// (so the 2x2 grid lines up) rather than stretching to fill the
-	// panel. A trailing glue on each row pushes them left no matter how
-	// wide the sidebar is dragged.
-	float btnW = 0.0f;
-	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
-		btnW = std::max(btnW, b->PreferredSize().Width());
-	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
-		b->SetExplicitSize(BSize(btnW, B_SIZE_UNSET));
-
-	BLayoutBuilder::Group<>(fSessionPanel, B_VERTICAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_SMALL_INSETS)
-		.Add(new BStringView("sesshdr", "Sessions"), 0.0f)
-		.Add(fSessionScroll, 1.0f)
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(sessNew, 0.0f)
-			.Add(sessOpen, 0.0f)
-			.AddGlue()
-		.End()
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(sessRen, 0.0f)
-			.Add(sessDel, 0.0f)
-			.AddGlue()
-		.End()
-	.End();
-	// Keep the panel usable but let the window shrink: a small min-width
-	// (the splitter governs the actual width). A large min here would be
-	// summed into the window's minimum and block reducing the window.
-	fSessionPanel->SetExplicitMinSize(BSize(ScalePx(80), B_SIZE_UNSET));
-	fSessionPanel->SetExplicitMaxSize(BSize(ScalePx(500), B_SIZE_UNLIMITED));
+	// ── Session list ─────────────────────────────────────────────────────────
+	// The saved-session browser lives in its own floating SessionWindow now
+	// (View ▸ Sessions toggles it), not a docked sidebar. It is created lazily
+	// the first time the user opens it (_ToggleSessionList) so the chat window
+	// stays lean; fSessionList points at the list inside that window once it
+	// exists.
 
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
@@ -645,24 +591,16 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	// ── Layout ────────────────────────────────────────────────────────────────
-	// The session sidebar and chat area sit in a horizontal BSplitView so the
-	// sidebar divider can be dragged. The chat column (welcome splash +
-	// scroll) is the second item. It is a BGroupView so its own layout
-	// reflows its children on resize (Genio uses group views for such
-	// columns rather than bare B_FOLLOW_NONE BViews with explicit-size pins).
+	// The chat area is now the sole horizontal content — the saved-session
+	// browser lives in its own floating SessionWindow, so there is no docked
+	// sidebar or horizontal splitter here. The chat column (welcome splash +
+	// scroll) is a BGroupView so its own layout reflows its children on
+	// resize.
 	BGroupView* chatColumn = new BGroupView("chatcolumn", B_VERTICAL, 0.0f);
 	BLayoutBuilder::Group<>(chatColumn)
 		.Add(fWelcome, 0.0f)
 		.Add(fScroll, 1.0f)
 	.End();
-
-	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
-	fSplit->SetName("mainsplit");
-	BLayoutBuilder::Split<>(fSplit)
-		.Add(fSessionPanel, 0.28f)   // sidebar  — collapsible
-		.Add(chatColumn,    0.72f);  // chat     — takes the rest
-	// The sidebar is collapsible; the chat (index 1) is not.
-	fSplit->SetCollapsible(0, true);
 
 	// ── Bottom input pane ─────────────────────────────────────────────────────
 	// Built to match Genio's ConsoleIOTabView verbatim — the golden-standard
@@ -802,23 +740,20 @@ void ChatWindow::_BuildLayout()
 		.Add(fJumpBtn,     0.0f)
 	.End();
 
-	// Outer bar: panel grey, inset on the left by exactly the horizontal
-	// split's splitter width. The chat above sits inside that split, so
-	// with the session sidebar collapsed the splitter leaves a narrow grey
-	// strip down the chat's left edge. The spinner row is a sibling of the
-	// split, not a child, so without this inset it would run the full width
-	// and its dark surface would jut out past the chat's left edge.
+	// Outer bar: panel grey. The spinner row is a sibling of the chat
+	// column, so it runs the full width and its surface aligns with the
+	// chat's left edge (no sidebar splitter to inset around any more).
 	BGroupView* spinnerBar = new BGroupView("spinnerbar", B_HORIZONTAL, 0.0f);
 	spinnerBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	BLayoutBuilder::Group<>(spinnerBar)
-		.SetInsets(fSplit->SplitterSize(), 0.0f, 0.0f, 0.0f)
+		.SetInsets(0.0f, 0.0f, 0.0f, 0.0f)
 		.Add(spinnerRow, 1.0f)
 	.End();
 
 	BGroupView* chatArea = new BGroupView("chatarea", B_VERTICAL, 0.0f);
 	chatArea->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	BLayoutBuilder::Group<>(chatArea)
-		.Add(fSplit,     1.0f)
+		.Add(chatColumn, 1.0f)
 		.Add(spinnerBar, 0.0f)
 		.Add(fTokenBar,  0.0f)
 	.End();
@@ -886,8 +821,8 @@ void ChatWindow::_BuildLayout()
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
 
-	// Session sidebar starts hidden; View ▸ Sessions reveals it.
-	if (fSessionPanel) fSessionPanel->Hide();
+	// The session browser is a separate floating window created on demand by
+	// View ▸ Sessions; nothing to hide here.
 
 	// Enlarge the default window on HiDPI so the initial size stays
 	// proportional to the scaled widgets (the constructor's BRect is the
@@ -1656,9 +1591,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			_RefreshSkillMenu();
 		}
 
-		// Keep the sidebar current if it's open (title/turn count may
-		// have changed, or this may be a brand-new session file).
-		if (fSessionPanel && !fSessionPanel->IsHidden())
+		// Keep the session window current if it's open (title/turn count
+		// may have changed, or this may be a brand-new session file).
+		if (fSessionWindow && !fSessionWindow->IsHidden())
 			_RefreshSessionList();
 
 		// Desktop notification — always fire for longer turns (>5 s) so
@@ -1888,6 +1823,15 @@ bool ChatWindow::QuitRequested()
 	if (fSettings && fSettings->Lock())
 		fSettings->Quit();
 	fSettings = nullptr;
+
+	// Tear down the standalone session window (its QuitRequested vetoes a
+	// user close to stay toggleable, so quit it explicitly here). Detach the
+	// list pointer first — it lives inside that window and is freed with it.
+	if (fSessionWindow && fSessionWindow->Lock()) {
+		fSessionList = nullptr;
+		fSessionWindow->Quit();     // unlocks + destroys
+		fSessionWindow = nullptr;
+	}
 
 	return true;
 }

@@ -9,33 +9,52 @@
 #include <vector>
 
 #include <Alert.h>
+#include <Autolock.h>
 #include <ListView.h>
 #include <ScrollView.h>
 #include <SplitView.h>
 
-#include "gui_widgets.h"     // SessionItem, RenameModal, SessionListView
+#include "gui_widgets.h"     // SessionItem, RenameModal, SessionListView,
+                             // SessionWindow
 #include "session_store.h"
 
 // ---------------------------------------------------------------------------
-// Session sidebar
+// Session window
 // ---------------------------------------------------------------------------
 
+// View ▸ Sessions: create the floating session window on first use, then
+// toggle its visibility. The list is repopulated each time it is revealed so
+// it reflects sessions saved since it was last shown.
 void ChatWindow::_ToggleSessionList()
 {
-	if (!fSessionPanel) return;
-	if (fSessionPanel->IsHidden()) {
+	if (!fSessionWindow) {
+		// Lazily build the standalone window. It targets this ChatWindow, so
+		// the New/Open/Rename/Delete messages land in this handler and reuse
+		// the existing _Load/_Delete/_RenameSelectedSession logic. Its list
+		// becomes fSessionList (the sidebar's old member).
+		fSessionWindow = new SessionWindow(this, this);
+		fSessionList   = fSessionWindow->List();
+	}
+
+	if (fSessionWindow->IsHidden()) {
 		_RefreshSessionList();
-		fSessionPanel->Show();
+		fSessionWindow->ShowNear(this);
 	} else {
-		fSessionPanel->Hide();
+		fSessionWindow->Hide();
 	}
 }
 
 // Repopulate the list from the BFS session store, newest first. Marks the
-// row matching the currently-open session (fSessionPath) as selected.
+// row matching the currently-open session (fSessionPath) as selected. Safe
+// to call before the window has ever been opened (no-op when fSessionList is
+// still null).
 void ChatWindow::_RefreshSessionList()
 {
 	if (!fSessionList) return;
+
+	// The list lives in the SessionWindow's looper; lock it while we mutate
+	// its items from this (the ChatWindow) thread.
+	BAutolock listLock(fSessionList->Looper());
 
 	// Clear existing items.
 	for (int32 i = fSessionList->CountItems() - 1; i >= 0; --i)
@@ -58,6 +77,7 @@ void ChatWindow::_RefreshSessionList()
 void ChatWindow::_LoadSelectedSession()
 {
 	if (!fSessionList) return;
+	BAutolock listLock(fSessionList->Looper());
 	// Loading is a single-session action. If several rows are selected
 	// (multi-select for bulk delete), don't guess — require exactly one.
 	if (fSessionList->CountItems() == 0) return;
@@ -79,10 +99,13 @@ void ChatWindow::_DeleteSelectedSession()
 
 	// Collect the paths of every selected row (multi-select).
 	std::vector<std::string> paths;
-	for (int32 i = 0; i < fSessionList->CountItems(); ++i) {
-		if (!fSessionList->IsItemSelected(i)) continue;
-		SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(i));
-		if (item) paths.push_back(item->Path());
+	{
+		BAutolock listLock(fSessionList->Looper());
+		for (int32 i = 0; i < fSessionList->CountItems(); ++i) {
+			if (!fSessionList->IsItemSelected(i)) continue;
+			SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(i));
+			if (item) paths.push_back(item->Path());
+		}
 	}
 	if (paths.empty()) return;
 
@@ -111,14 +134,19 @@ void ChatWindow::_RenameSelectedSession()
 	if (!fSessionList) return;
 	// Rename is a single-row action — require exactly one selection.
 	int32 selCount = 0, only = -1;
-	for (int32 i = 0; i < fSessionList->CountItems(); ++i)
-		if (fSessionList->IsItemSelected(i)) { ++selCount; only = i; }
-	if (selCount != 1) return;
+	std::string itemPath, current;
+	{
+		BAutolock listLock(fSessionList->Looper());
+		for (int32 i = 0; i < fSessionList->CountItems(); ++i)
+			if (fSessionList->IsItemSelected(i)) { ++selCount; only = i; }
+		if (selCount != 1) return;
 
-	SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(only));
-	if (!item) return;
+		SessionItem* item = dynamic_cast<SessionItem*>(fSessionList->ItemAt(only));
+		if (!item) return;
+		itemPath = item->Path();
+		current  = item->Title();
+	}
 
-	const std::string current = item->Title();
 	RenameModal* modal = new RenameModal(current);
 	const std::string entered = modal->Go();   // self-quits
 
@@ -130,10 +158,10 @@ void ChatWindow::_RenameSelectedSession()
 		name.pop_back();
 	if (name.empty() || name == current) return;
 
-	if (session::Rename(item->Path(), name)) {
+	if (session::Rename(itemPath, name)) {
 		// If we renamed the currently-open session, keep fConvTopic in
 		// sync so the next auto-save doesn't overwrite the new title.
-		if (item->Path() == fSessionPath) fConvTopic = name;
+		if (itemPath == fSessionPath) fConvTopic = name;
 		_RefreshSessionList();
 	}
 }

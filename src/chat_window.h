@@ -39,6 +39,7 @@
 
 class BFilePanel;
 class BSplitView;
+class SessionWindow;
 
 namespace telegram { class RemoteControl; }
 
@@ -200,11 +201,10 @@ private:
 	float          fZoomFactor    = 1.0f;     // desired output font multiplier
 	float          fAppliedZoom   = 1.0f;     // uniform zoom currently applied to the buffer
 
-	// ── Session sidebar ────────────────────────────────────────────────────────
-	BView*         fSessionPanel  = nullptr;  // left dock container (hidden by default)
-	BListView*     fSessionList   = nullptr;  // titles of saved sessions
-	BScrollView*   fSessionScroll = nullptr;  // scroller around fSessionList
-	BSplitView*    fSplit         = nullptr;  // draggable divider: sidebar | chat
+	// ── Session window (separate floating window) ────────────────────────────
+	SessionWindow* fSessionWindow = nullptr;  // standalone session list (lazy)
+	BListView*     fSessionList   = nullptr;  // list inside fSessionWindow
+	BSplitView*    fSplit         = nullptr;  // (unused; chat has no sidebar now)
 	BSplitView*    fVSplit        = nullptr;  // draggable divider: chat | input pane
 
 	// Window minimum size (computed in _BuildLayout from the fixed row
