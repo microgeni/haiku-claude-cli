@@ -1010,7 +1010,7 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			// (Task and ordinary tools).
 			if (const std::string nudge = workflow::Observe(tname, tinput, tres.is_error);
 			    !nudge.empty())
-				sink.OnMeta(nudge);
+				sink.OnNotice(nudge);
 
 			if (tname == "Read" && !tres.is_error)
 				config::AutoWriteSummaryIfMissing(tinput.value("path", std::string{}), tres.content);

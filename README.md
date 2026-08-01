@@ -362,6 +362,10 @@ nudges rarer, or raise `order` for a longer context window. It never
 generates code and never blocks a tool — any internal failure is
 swallowed so the tool loop is unaffected.
 
+Both the CLI and the GUI display nudges (the GUI renders them as a
+tool-log line). The Telegram bridge learns but stays silent: it
+suppresses advisory output by design to keep the phone chat clean.
+
 ### MCP servers
 
 Each server is spawned as a subprocess at startup. The CLI runs the

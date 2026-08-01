@@ -1342,6 +1342,15 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 	}
 
+	case gui::MSG_NOTICE: {
+		// Workflow nudge or similar advisory. Rendered in the tool-log
+		// style so it reads as system commentary, not assistant text.
+		const char* text = nullptr;
+		if (msg->FindString("text", &text) == B_OK && text)
+			_AppendToolLine("\n" + std::string(text) + "\n");
+		break;
+	}
+
 	case gui::MSG_TOOL_DONE: {
 		const char* name = nullptr;
 		bool        ok   = true;
