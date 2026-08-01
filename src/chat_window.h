@@ -176,7 +176,7 @@ private:
 	BTextView*     fOutput        = nullptr;
 	WelcomeView*   fWelcome       = nullptr;  // startup splash, collapsed on first turn
 	BScrollView*   fScroll        = nullptr;
-	BButton*       fJumpBtn       = nullptr;  // floating "↓" overlay button
+	BButton*       fJumpBtn       = nullptr;  // "↓" on the spinner row, enabled when needed
 	TokenBar*      fTokenBar      = nullptr;
 	InputView*     fInput         = nullptr;
 	BScrollView*   fInputScroll   = nullptr;  // vertical scrollbar around fInput
@@ -260,18 +260,23 @@ private:
 	BFilePanel*    fExportPanel   = nullptr;  // lazily created B_SAVE_PANEL
 
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
-	bool           fUserScrolled  = false;
+	// No flag is kept: every append site samples _IsNearBottom() before
+	// inserting and follows the output only if the user was already at the
+	// bottom. The previous fUserScrolled member was never set to true, so
+	// every "don't scroll" check passed and appends always jumped to the
+	// end — which is what defeated scrolling back to read.
 
 	// ── Spinner timer ────────────────────────────────────────────────────────
 	BMessageRunner* fSpinnerTimer  = nullptr;
 
 	// ── Inline thinking spinner state ─────────────────────────────────────────
-	// While waiting for the first token, a spinner line is the last text in
-	// fOutput. fSpinnerActive guards the tick/erase; fSpinnerOffset is where
-	// the spinner text begins (everything from there to end is rewritten or
-	// erased). A fresh verb + clock are chosen per turn.
+	// The spinner frame is drawn in fSpinnerView, a fixed-height strip
+	// directly below the chat. It is deliberately NOT written into fOutput:
+	// rewriting trailing text every 80 ms reflowed the document and fought
+	// the scroll position, which made the view jitter during a reply.
+	// fSpinnerActive guards the tick. A fresh verb + clock per turn.
+	BStringView* fSpinnerView   = nullptr;
 	bool       fSpinnerActive = false;
-	int32      fSpinnerOffset = 0;
 	int        fSpinnerStep   = 0;
 	int        fSpinnerVerb   = 0;
 	bigtime_t  fSpinnerStart  = 0;
