@@ -145,15 +145,21 @@ std::string Observe(const std::string& tool_name, const json& tinput, bool is_er
 	std::string nudge;
 	try {
 		const std::string key = MakeKey(tool_name, tinput, is_error);
+
+		// Capture what the model expected here *before* Observe() advances
+		// the context. Afterwards Predict() answers "what usually follows
+		// the anomaly?", which is not the question being asked — and for a
+		// novel context it is almost always empty, so the "you usually do
+		// X here" half of the nudge would never appear.
+		const std::string expected = g_nudges ? g_model->Predict() : std::string{};
+
 		g_model->Observe(key);
 
 		if (g_nudges && g_model->LastWasAnomaly()) {
 			// A phrased-later hook could hand the window to the LLM; for now a
 			// compact, honest note. Keep it low-key — it's a hint, not an alarm.
-			double p = 0.0;
-			const std::string expected = g_model->Predict(&p);
 			nudge = "\xE2\x9A\xA1 workflow: unusual step (" + key + ")";
-			if (!expected.empty())
+			if (!expected.empty() && expected != key)
 				nudge += " — you usually do '" + expected + "' here";
 		}
 
