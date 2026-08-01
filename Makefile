@@ -219,6 +219,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/history_util.cpp \
     $(SRCDIR)/image_util.cpp  \
     $(SRCDIR)/learn.cpp       \
+    $(SRCDIR)/markov.cpp      \
     $(SRCDIR)/mcp.cpp         \
     $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
@@ -229,7 +230,8 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/sse_parser.cpp  \
     $(SRCDIR)/stats.cpp       \
     $(SRCDIR)/transcript_export.cpp \
-    $(SRCDIR)/tools.cpp
+    $(SRCDIR)/tools.cpp       \
+    $(SRCDIR)/workflow.cpp
 
 # GUI-specific front-end files.
 GUI_FRONT_SRCS := \

@@ -31,6 +31,7 @@
 #include "terminal_sink.h"
 #include "tools.h"
 #include "tui.h"
+#include "workflow.h"
 
 // Shared cancellation flag used across tools.cpp and api.cpp. Lives
 // at global scope so the SIGINT handler (C callback) can write it.
@@ -1001,6 +1002,15 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 				            json{{"tool_input", tinput}, {"tool_result", tres.content},
 				                 {"is_error", tres.is_error}}, tname);
 			}
+
+			// Feed the workflow memory. Observe() learns the event and
+			// returns a nudge only when this step is anomalous given the
+			// recent context; it swallows its own errors, and is inert
+			// unless enabled in config.json. Covers both branches above
+			// (Task and ordinary tools).
+			if (const std::string nudge = workflow::Observe(tname, tinput, tres.is_error);
+			    !nudge.empty())
+				sink.OnMeta(nudge);
 
 			if (tname == "Read" && !tres.is_error)
 				config::AutoWriteSummaryIfMissing(tinput.value("path", std::string{}), tres.content);

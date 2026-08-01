@@ -303,6 +303,13 @@ key is optional; CLI flags override the file.
 
   "logging": { "enabled": false },
 
+  "workflow": {
+    "enabled":            false,
+    "nudges":             true,
+    "surprise_threshold": 0.85,
+    "order":              2
+  },
+
   "prices": {
     "claude-sonnet-4-6": { "input":  3.0, "output": 15.0 },
     "claude-opus-4-6":   { "input": 15.0, "output": 75.0 },
@@ -335,6 +342,25 @@ events, `tool_name` injected). A non-zero exit blocks the next
 action — `UserPromptSubmit` drops the turn, `PreToolUse` synthesizes
 a denied tool result. Stderr is mirrored to the user's own stderr so
 hooks can talk back.
+
+### Workflow memory
+
+Off by default. When `enabled` is `true`, the CLI learns the *shape*
+of your tool sequences on a per-repository basis — a small Markov
+model over canonical event keys like `edit:src/auth.py` or
+`run:bash:ok`. After each tool call it flags a step that is unusual
+given the recent context with a one-line nudge:
+
+```
+⚡ workflow: unusual step (run:bash:err) — you usually do 'edit:src/api.cpp' here
+```
+
+State lives in `<ConfigDir>/workflow/<repo>.json` and accumulates
+across sessions; each repository gets its own model. Set `nudges` to
+`false` to learn silently, raise `surprise_threshold` (0–1) to make
+nudges rarer, or raise `order` for a longer context window. It never
+generates code and never blocks a tool — any internal failure is
+swallowed so the tool loop is unaffected.
 
 ### MCP servers
 
