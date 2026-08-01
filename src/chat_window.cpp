@@ -2133,7 +2133,7 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 		// Multimodal turn — content is an array of blocks: the text first,
 		// then one `image` block per dropped image (base64 source).
 		nlohmann::json content = nlohmann::json::array();
-		if (!userText.empty())
+		if (userText.find_first_not_of(" \t\r\n\f\v") != std::string::npos)
 			content.push_back({{"type", "text"}, {"text", userText}});
 		for (const auto& [mediaType, b64] : fPendingImages) {
 			content.push_back({

@@ -22,6 +22,7 @@
 
 #include "agents.h"
 #include "editor_integration.h"
+#include "history_util.h"
 #include "hooks.h"
 #include "output_sink.h"
 #include "repl.h"
@@ -508,7 +509,14 @@ SendResult SendConversation(config::Auth auth, const std::string& model,
 
 	// Mutable copy of messages so we can stamp cache_control without
 	// disturbing the caller's history.
-	json cached_messages = messages;
+	//
+	// Repair empty / whitespace-only content blocks on the way out. This
+	// is the single choke point every request passes through, so it also
+	// rescues resumed sessions whose saved history already contains such
+	// a block — otherwise they 400 with "text content blocks must contain
+	// non-whitespace text" on every attempt. Runs before the cache
+	// markers are stamped so no breakpoint lands on a dropped block.
+	json cached_messages = config::RepairEmptyTextBlocks(messages);
 
 	json body = {
 		{"model",      model},
@@ -957,7 +965,13 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 						tres.content  = "error: sub-agent failed";
 						tres.is_error = true;
 					} else {
-						tres.content  = sub.assistant_text;
+						// A sub-agent that answered with tool use only (or
+						// was cut short) leaves no text behind; an empty
+						// tool_result is rejected by the API.
+						tres.content  = sub.assistant_text.find_first_not_of(" \t\r\n\f\v")
+						              == std::string::npos
+						              ? "(sub-agent returned no output)"
+						              : sub.assistant_text;
 						tres.is_error = false;
 						aggregate.input_tokens  += sub.input_tokens;
 						aggregate.output_tokens += sub.output_tokens;
@@ -1034,6 +1048,13 @@ SendResult SendWithTools(const config::Auth& auth, const std::string& model,
 			stats::RecordTool(tname, static_cast<int>(tres.content.size()), savedBytes);
 
 			tres.content = config::SanitizeUtf8(tres.content);
+
+			// Never emit an empty tool_result: MCP servers and tools that
+			// print nothing would otherwise poison the saved history with
+			// a block the API rejects.
+			if (tres.content.find_first_not_of(" \t\r\n\f\v") == std::string::npos)
+				tres.content = tres.is_error ? "(tool failed with no message)"
+				                             : "(no output)";
 
 			tool_results.push_back({
 				{"type",        "tool_result"},

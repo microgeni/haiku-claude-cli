@@ -60,10 +60,20 @@ void ProcessSseEvent(const std::string& event, StreamState* state) {
 			}
 		} else if (type == "content_block_stop") {
 			if (state->current_type == "text") {
-				state->content_blocks.push_back({
-					{"type", "text"},
-					{"text", state->current_text},
-				});
+				// Only keep the text block if it has non-whitespace
+				// content. The API rejects a replayed assistant turn whose
+				// text block is empty or whitespace-only ("text content
+				// blocks must contain non-whitespace text"), which happens
+				// when the model emits an empty text block before going
+				// straight to tool use.
+				const bool hasText = state->current_text.find_first_not_of(
+					" \t\r\n\f\v") != std::string::npos;
+				if (hasText) {
+					state->content_blocks.push_back({
+						{"type", "text"},
+						{"text", state->current_text},
+					});
+				}
 			} else if (state->current_type == "thinking") {
 				// Preserve the thinking block verbatim (with its signature)
 				// so it can be replayed on the next tool-use turn — the API
