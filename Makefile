@@ -513,10 +513,27 @@ $(UNIT_BUILDDIR)/image_util_test: tests/unit/image_util_test.cpp \
 	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
 	    tests/unit/image_util_test.cpp src/image_util.cpp
 
+# markov unit test — links the pure markov.cpp TU (no BeAPI, no network).
+$(UNIT_BUILDDIR)/markov_test: tests/unit/markov_test.cpp \
+        src/markov.cpp tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/markov_test.cpp src/markov.cpp
+
+# workflow unit test — workflow.cpp pulls in markov.cpp for the model and
+# paths.cpp for the per-repo state directory.
+$(UNIT_BUILDDIR)/workflow_test: tests/unit/workflow_test.cpp \
+        src/workflow.cpp src/markov.cpp src/paths.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/workflow_test.cpp src/workflow.cpp src/markov.cpp \
+	    src/paths.cpp
+
 UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test \
              $(UNIT_BUILDDIR)/history_util_test \
              $(UNIT_BUILDDIR)/transcript_export_test \
-             $(UNIT_BUILDDIR)/image_util_test
+             $(UNIT_BUILDDIR)/image_util_test \
+             $(UNIT_BUILDDIR)/markov_test \
+             $(UNIT_BUILDDIR)/workflow_test
 
 test-unit: $(UNIT_BINS)
 	@echo "=== unit tests ==="
