@@ -98,3 +98,104 @@ TEST_CASE("cap of zero collapses to an empty (but valid) array") {
 	CHECK(out.is_array());
 	CHECK(out.empty());
 }
+
+// ---------------------------------------------------------------------------
+// RepairEmptyTextBlocks — no content block may be empty or whitespace-only,
+// or the Messages API rejects the whole request with HTTP 400.
+// ---------------------------------------------------------------------------
+
+using config::RepairEmptyTextBlocks;
+
+TEST_CASE("whitespace-only string content becomes a placeholder") {
+	json msgs = json::array({ userMsg("   \n\t ") });
+	json out = RepairEmptyTextBlocks(msgs);
+	CHECK(out[0]["content"] == "(no content)");
+}
+
+TEST_CASE("well-formed messages are returned untouched") {
+	json msgs = json::array({ userMsg("hello"), asstMsg("hi") });
+	CHECK(RepairEmptyTextBlocks(msgs) == msgs);
+}
+
+TEST_CASE("an empty text block beside a tool_use is dropped, tool_use kept") {
+	json msgs = json::array({{
+		{"role", "assistant"},
+		{"content", json::array({
+			{{"type", "text"}, {"text", "\n"}},
+			{{"type", "tool_use"}, {"id", "t1"}, {"name", "Bash"},
+			 {"input", json::object()}},
+		})},
+	}});
+	json out = RepairEmptyTextBlocks(msgs);
+	REQUIRE(out[0]["content"].size() == 1);
+	CHECK(out[0]["content"][0]["type"] == "tool_use");
+	CHECK(out[0]["content"][0]["id"] == "t1");
+}
+
+TEST_CASE("an empty tool_result gets the (no output) marker") {
+	json msgs = json::array({{
+		{"role", "user"},
+		{"content", json::array({
+			{{"type", "tool_result"}, {"tool_use_id", "t1"}, {"content", "  "}},
+		})},
+	}});
+	json out = RepairEmptyTextBlocks(msgs);
+	CHECK(out[0]["content"][0]["content"] == "(no output)");
+	CHECK(out[0]["content"][0]["tool_use_id"] == "t1");
+}
+
+TEST_CASE("a tool_result with missing or null content is repaired") {
+	json msgs = json::array({{
+		{"role", "user"},
+		{"content", json::array({
+			{{"type", "tool_result"}, {"tool_use_id", "t1"}},
+			{{"type", "tool_result"}, {"tool_use_id", "t2"}, {"content", json()}},
+		})},
+	}});
+	json out = RepairEmptyTextBlocks(msgs);
+	CHECK(out[0]["content"][0]["content"] == "(no output)");
+	CHECK(out[0]["content"][1]["content"] == "(no output)");
+}
+
+TEST_CASE("a tool_result whose content is a block array is repaired in place") {
+	json msgs = json::array({{
+		{"role", "user"},
+		{"content", json::array({
+			{{"type", "tool_result"}, {"tool_use_id", "t1"},
+			 {"content", json::array({ {{"type", "text"}, {"text", " "}} })}},
+		})},
+	}});
+	json out = RepairEmptyTextBlocks(msgs);
+	const json& inner = out[0]["content"][0]["content"];
+	REQUIRE(inner.size() == 1);
+	CHECK(inner[0]["text"] == "(no output)");
+}
+
+TEST_CASE("an array emptied by the repair gets a placeholder text block") {
+	json msgs = json::array({{
+		{"role", "assistant"},
+		{"content", json::array({ {{"type", "text"}, {"text", ""}} })},
+	}});
+	json out = RepairEmptyTextBlocks(msgs);
+	REQUIRE(out[0]["content"].size() == 1);
+	CHECK(out[0]["content"][0]["type"] == "text");
+	CHECK(out[0]["content"][0]["text"] == "(no content)");
+}
+
+TEST_CASE("image blocks survive an empty sibling text block") {
+	json msgs = json::array({{
+		{"role", "user"},
+		{"content", json::array({
+			{{"type", "text"}, {"text", ""}},
+			{{"type", "image"}, {"source", {{"type", "base64"}}}},
+		})},
+	}});
+	json out = RepairEmptyTextBlocks(msgs);
+	REQUIRE(out[0]["content"].size() == 1);
+	CHECK(out[0]["content"][0]["type"] == "image");
+}
+
+TEST_CASE("non-array input is returned unchanged by the repair") {
+	json nul = json();
+	CHECK(RepairEmptyTextBlocks(nul) == nul);
+}

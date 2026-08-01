@@ -1,8 +1,8 @@
 name			claude_cli
 version			@VERSION@-@BUILD@
-architecture		x86_64
-summary			"Native Claude client for Haiku OS (CLI + GUI)"
-description		"A native Claude client for Haiku OS — both a terminal CLI (claude) and a BeAPI desktop app (Claude). It treats Haiku as a first-class platform, not an afterthought."
+architecture		@ARCH@
+summary			"@SUMMARY@"
+description		"A native Claude client for Haiku OS. It treats Haiku as a first-class platform, not an afterthought."
 packager		"Daniel Benjaminsson <info@microgeni.se>"
 vendor			"Microgeni AB"
 copyrights		"2026 Microgeni AB"
@@ -11,13 +11,8 @@ urls			"https://gitea.microgeni.synology.me/daniel/haiku-claude-cli"
 provides {
 	claude_cli = @VERSION@-@BUILD@
 	cmd:claude = @VERSION@-@BUILD@
-	app:Claude = @VERSION@-@BUILD@
+@PROVIDES_EXTRA@
 }
 requires {
-	haiku >= r1~beta5
-	lib:libcurl
-	lib:libcrypto >= 3
-	lib:libssl >= 3
-	lib:libedit
-	lib:libyaml_cpp
+@REQUIRES@
 }

@@ -1,13 +1,18 @@
 #include "gui_widgets.h"
 
+#include <algorithm>
 #include <cstdio>
 
+#include <Button.h>
 #include <LayoutBuilder.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
+#include <ScrollView.h>
+#include <StringView.h>
 #include <TextView.h>
 
 #include "gui_messages.h"
+#include "gui_scale.h"
 
 // ---------------------------------------------------------------------------
 // ChoiceModal
@@ -214,6 +219,92 @@ void SessionListView::MouseDown(BPoint where)
 		return;
 	}
 	BListView::MouseDown(where);
+}
+
+// ---------------------------------------------------------------------------
+// SessionWindow
+// ---------------------------------------------------------------------------
+
+SessionWindow::SessionWindow(BWindow* owner, BHandler* target)
+	: BWindow(BRect(0, 0, gui::ScalePx(320), gui::ScalePx(440)),
+	          "Sessions", B_FLOATING_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+	          B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
+	  fOwner(owner)
+{
+	// A floating subset window stays above its owner and follows it between
+	// workspaces without stealing the app's quit behaviour.
+	if (owner) AddToSubset(owner);
+
+	fList = new SessionListView("sessionlist", target);
+	fList->SetSelectionMessage(nullptr);              // single-click highlights
+	fList->SetInvocationMessage(                      // double-click loads
+		new BMessage(gui::MSG_SESSION_SELECT));
+
+	BScrollView* scroll = new BScrollView("sessionscroll", fList,
+	                                      0, false, true, B_FANCY_BORDER);
+	scroll->SetExplicitMinSize(BSize(gui::ScalePx(120), gui::ScalePx(120)));
+
+	BButton* sessNew = new BButton("sessnew", "New",
+	                               new BMessage(gui::MSG_SESSION_NEW));
+	BButton* sessOpen = new BButton("sessopen", "Open",
+	                                new BMessage(gui::MSG_SESSION_SELECT));
+	BButton* sessRen = new BButton("sessren", "Rename",
+	                               new BMessage(gui::MSG_SESSION_RENAME));
+	BButton* sessDel = new BButton("sessdel", "Delete",
+	                               new BMessage(gui::MSG_SESSION_DELETE));
+	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
+		b->SetTarget(target);
+
+	// Uniform button width so the two rows line up as a tidy grid.
+	float btnW = 0.0f;
+	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
+		btnW = std::max(btnW, b->PreferredSize().Width());
+	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
+		b->SetExplicitSize(BSize(btnW, B_SIZE_UNSET));
+
+	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_SMALL_INSETS)
+		.Add(scroll, 1.0f)
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+			.Add(sessNew, 0.0f)
+			.Add(sessOpen, 0.0f)
+			.AddGlue()
+		.End()
+		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+			.Add(sessRen, 0.0f)
+			.Add(sessDel, 0.0f)
+			.AddGlue()
+		.End()
+	.End();
+
+	SetSizeLimits(gui::ScalePx(200), gui::ScalePx(600),
+	              gui::ScalePx(160), 100000);
+}
+
+bool SessionWindow::QuitRequested()
+{
+	// Don't destroy — just tuck the window away so its list survives and
+	// View ▸ Sessions can bring it straight back. Return focus to the owning
+	// chat window so the user can keep typing instead of being left with no
+	// active window.
+	if (!IsHidden()) Hide();
+	if (fOwner) fOwner->Activate(true);
+	return false;
+}
+
+void SessionWindow::ShowNear(BWindow* owner)
+{
+	if (!fPlaced && owner) {
+		// Dock just to the left of the owning window on first reveal.
+		BRect of = owner->Frame();
+		float w = Frame().Width();
+		float x = of.left - w - gui::ScalePx(12);
+		if (x < 0) x = of.right + gui::ScalePx(12);   // no room left → go right
+		MoveTo(x, of.top);
+		fPlaced = true;
+	}
+	if (IsHidden()) Show();
+	Activate(true);
 }
 
 // ---------------------------------------------------------------------------

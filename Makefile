@@ -1,6 +1,31 @@
-CXX      ?= c++
 CXXSTD   ?= -std=c++17
 WARN     ?= -Wall -Wextra -Wpedantic
+
+# ── Target architecture ─────────────────────────────────────────────────────
+# ARCH selects the target. The default is the host architecture, i.e. a
+# normal native build. `make ARCH=arm64` cross-compiles for Haiku/aarch64
+# (Raspberry Pi 5) using the cross-tools from a Haiku arm64 build tree plus
+# a staged dependency prefix built by ci_scripts/bootstrap_arm64_deps.sh.
+#
+# There is no arm64 HaikuPorts repository, so anything the target image does
+# not already ship (libcurl, libedit, OpenSSL, yaml-cpp) is linked statically.
+# That leaves only ncurses and zlib as runtime dependencies, both of which
+# are part of the Haiku arm64 image.
+ARCH ?= $(shell uname -m 2>/dev/null || echo x86_64)
+
+ifeq ($(ARCH),arm64)
+    HAIKU_ARM64_TREE ?= /Data/Code/Repos/haiku/generated.arm64
+    HAIKU_SRC        ?= /Data/Code/Repos/haiku
+    CROSS_TOOLS   ?= $(HAIKU_ARM64_TREE)/cross-tools-arm64
+    CROSS_SYSROOT ?= $(CROSS_TOOLS)/sysroot/boot/system
+    ARM64_DEPS    ?= /Data/Code/cross/haiku-arm64-deps
+    ARM64_KITS    ?= $(HAIKU_ARM64_TREE)/objects/haiku/arm64/release/kits
+    CXX           := $(CROSS_TOOLS)/bin/aarch64-unknown-haiku-g++
+    BUILD_GUI     ?= yes
+else
+    CXX      ?= c++
+    BUILD_GUI ?= yes
+endif
 
 # ── Parallel build ──────────────────────────────────────────────────────────
 # Default to one compile job per CPU so a plain `make` uses all cores. The
@@ -35,10 +60,33 @@ else
     BUILDDIR  := build
 endif
 
+# Cross builds get their own tree so a native build isn't invalidated.
+ifneq ($(ARCH),$(shell uname -m 2>/dev/null || echo x86_64))
+    BUILDDIR := $(BUILDDIR)-$(ARCH)
+endif
+
 CXXFLAGS ?= $(CXXSTD) $(WARN) $(OPT) $(LTO_FLAGS)
 LDFLAGS  ?= $(LTO_FLAGS) $(STRIP)
 
 PKG_CONFIG ?= pkg-config
+
+ifeq ($(ARCH),arm64)
+
+# Cross build: no target pkg-config exists, so point at the staged prefix
+# directly. libcurl, libedit and OpenSSL are the static archives; ncurses,
+# zlib and the Haiku kits come from the cross sysroot and stay dynamic.
+CURL_CFLAGS    := -I$(ARM64_DEPS)/include
+CURL_LIBS      := $(ARM64_DEPS)/lib/libcurl.a
+JSON_CFLAGS    := -I$(ARM64_DEPS)/include
+OPENSSL_CFLAGS :=
+OPENSSL_LIBS   := $(CROSS_SYSROOT)/develop/lib/libssl.a \
+                  $(CROSS_SYSROOT)/develop/lib/libcrypto.a
+LIBEDIT_CFLAGS := -I$(ARM64_DEPS)/include
+LIBEDIT_LIBS   := $(ARM64_DEPS)/lib/libedit.a
+HAIKU_LIBS     := -L$(CROSS_SYSROOT)/develop/lib -lncursesw -lz -lnetwork -lbe
+
+else
+
 CURL_CFLAGS    := $(shell $(PKG_CONFIG) --cflags libcurl     2>/dev/null)
 CURL_LIBS      := $(shell $(PKG_CONFIG) --libs   libcurl     2>/dev/null || echo -lcurl)
 JSON_CFLAGS    := $(shell $(PKG_CONFIG) --cflags nlohmann_json 2>/dev/null)
@@ -49,9 +97,11 @@ OPENSSL_LIBS   := $(shell $(PKG_CONFIG) --libs   openssl     2>/dev/null || \
                    echo -lssl -lcrypto)
 LIBEDIT_CFLAGS := $(shell $(PKG_CONFIG) --cflags libedit     2>/dev/null)
 LIBEDIT_LIBS   := $(shell $(PKG_CONFIG) --libs   libedit     2>/dev/null || echo -ledit)
+HAIKU_LIBS     := $(shell uname -s 2>/dev/null | grep -q Haiku && echo "-lbe" || echo "")
+
+endif
 
 CXXFLAGS += $(CURL_CFLAGS) $(JSON_CFLAGS) $(OPENSSL_CFLAGS) $(LIBEDIT_CFLAGS) -pthread -D_DEFAULT_SOURCE
-HAIKU_LIBS := $(shell uname -s 2>/dev/null | grep -q Haiku && echo "-lbe" || echo "")
 LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(LIBEDIT_LIBS) -pthread $(HAIKU_LIBS)
 
 SRCDIR   := src
@@ -105,8 +155,35 @@ PKG_NAME    ?= claude_cli
 # binary's config::kVersion can never drift apart.
 PKG_VERSION ?= $(strip $(shell cat VERSION 2>/dev/null))
 PKG_BUILD   ?= 1
-PKG_ARCH    ?= x86_64
+PKG_ARCH    ?= $(ARCH)
 PKG_STAGE   := $(BUILDDIR)/pkg
+
+# .PackageInfo token expansion.
+#
+# The dependency set is a property of the *architecture*, not of the GUI:
+# the native build links everything dynamically against HaikuPorts packages,
+# while the arm64 cross build statically links libcurl/libedit/OpenSSL/
+# yaml-cpp (no arm64 HaikuPorts repo exists) and so needs only ncurses and
+# zlib. libtracker/libbe/libnetwork come from the haiku package itself.
+#
+# ca_root_certificates is required explicitly on arm64: the CA bundle is a
+# hard runtime requirement for TLS (libcurl has the path compiled in), and
+# the arm64 Haiku image does not ship it. On x86_64 it arrives transitively
+# via HaikuPorts' curl, but static linking severs that chain.
+ifeq ($(ARCH),arm64)
+PKG_REQUIRES := haiku >= r1~beta5\n\tca_root_certificates\n\tlib:libncursesw\n\tlib:libz
+else
+PKG_REQUIRES := haiku >= r1~beta5\n\tca_root_certificates\n\tlib:libcurl\n\tlib:libcrypto >= 3\n\tlib:libssl >= 3\n\tlib:libedit\n\tlib:libyaml_cpp
+endif
+
+# Whether the GUI ships is independent of the above.
+ifeq ($(BUILD_GUI),no)
+PKG_SUMMARY        := Native Claude client for Haiku OS (CLI)
+PKG_PROVIDES_EXTRA :=
+else
+PKG_SUMMARY        := Native Claude client for Haiku OS (CLI + GUI)
+PKG_PROVIDES_EXTRA := \tapp:Claude = $(PKG_VERSION)-$(PKG_BUILD)
+endif
 
 # Compile the marketing version into the binary from the same PKG_VERSION,
 # so config::kVersion always matches the package that shipped it.
@@ -142,6 +219,7 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/history_util.cpp \
     $(SRCDIR)/image_util.cpp  \
     $(SRCDIR)/learn.cpp       \
+    $(SRCDIR)/markov.cpp      \
     $(SRCDIR)/mcp.cpp         \
     $(SRCDIR)/md_text.cpp     \
     $(SRCDIR)/models.cpp      \
@@ -152,7 +230,8 @@ GUI_CORE_SRCS := \
     $(SRCDIR)/sse_parser.cpp  \
     $(SRCDIR)/stats.cpp       \
     $(SRCDIR)/transcript_export.cpp \
-    $(SRCDIR)/tools.cpp
+    $(SRCDIR)/tools.cpp       \
+    $(SRCDIR)/workflow.cpp
 
 # GUI-specific front-end files.
 GUI_FRONT_SRCS := \
@@ -179,17 +258,37 @@ GUI_SRCS := $(GUI_CORE_SRCS) $(GUI_FRONT_SRCS)
 GUI_OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/gui_%.o,$(GUI_SRCS))
 GUI_DEPS := $(GUI_OBJS:.o=.d)
 
+ifeq ($(ARCH),arm64)
+
+# Cross build. yaml-cpp comes from the staged prefix as a static archive.
+# The private Haiku headers must come from the *source tree* — `findpaths`
+# would return the host's x86_64 headers and silently poison the build.
+# libshared.a / libtracker.so aren't in the cross sysroot, so point the
+# linker at the kits directory of the arm64 build tree.
+YAMLCPP_CFLAGS := -I$(ARM64_DEPS)/include
+YAMLCPP_LIBS   := $(ARM64_DEPS)/lib/libyaml-cpp.a
+GUI_PRIVATE_INCLUDES := -I$(HAIKU_SRC)/headers/private/shared \
+                        -I$(HAIKU_SRC)/headers/private/interface
+GUI_EXTRA_LIBS := -L$(CROSS_SYSROOT)/develop/lib \
+                  -L$(ARM64_KITS)/shared -L$(ARM64_KITS)/tracker \
+                  -lncursesw -lz
+
+else
+
 YAMLCPP_CFLAGS := $(shell $(PKG_CONFIG) --cflags yaml-cpp 2>/dev/null)
 YAMLCPP_LIBS   := $(shell $(PKG_CONFIG) --libs   yaml-cpp 2>/dev/null || echo -lyaml-cpp)
+GUI_PRIVATE_INCLUDES := $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/shared 2>/dev/null | sed 's/^/-I/') \
+                        $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/interface 2>/dev/null | sed 's/^/-I/')
+GUI_EXTRA_LIBS :=
+
+endif
 
 # Same compile flags as the CLI + libbe headers + yaml-cpp.
 # Private Haiku headers (BPrivate::BToolBar lives in private/shared) are
 # added so the Genio-style ToolBar compiles; libshared provides the symbol.
-GUI_PRIVATE_INCLUDES := $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/shared 2>/dev/null | sed 's/^/-I/') \
-                        $(shell findpaths -e B_FIND_PATH_HEADERS_DIRECTORY private/interface 2>/dev/null | sed 's/^/-I/')
 GUI_CXXFLAGS := $(CXXFLAGS) $(YAMLCPP_CFLAGS) $(GUI_PRIVATE_INCLUDES)
 GUI_LIBS     := $(CURL_LIBS) $(OPENSSL_LIBS) $(YAMLCPP_LIBS) \
-                -pthread -lbe -lshared -lnetwork -ltracker
+                -pthread -lbe -lshared -lnetwork -ltracker $(GUI_EXTRA_LIBS)
 
 $(BUILDDIR)/gui_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@mkdir -p $(@D)
@@ -264,7 +363,7 @@ $(BUILDDIR):
 	mkdir -p $@
 
 clean:
-	rm -rf build build-release
+	rm -rf build build-release build-arm64 build-release-arm64
 
 install: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)
@@ -290,23 +389,32 @@ install: $(BIN)
 # Build a Haiku HPKG. Requires Haiku's `package` tool.
 package: $(PKG_FILE)
 
-# One HPKG ships both front-ends: the CLI binary (bin/claude) and the
-# GUI app (apps/Claude) plus the GUI's syntax-highlight data. The GUI is
-# Haiku-only, so its binary is a prerequisite here too.
-$(PKG_FILE): $(BIN) $(GUI_BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
+# One HPKG normally ships both front-ends: the CLI binary (bin/claude) and
+# the GUI app (apps/Claude) plus the GUI's syntax-highlight data. On cross
+# builds where the GUI can't be built (BUILD_GUI=no) the package is CLI-only.
+ifeq ($(BUILD_GUI),no)
+PKG_BIN_DEPS := $(BIN)
+else
+PKG_BIN_DEPS := $(BIN) $(GUI_BIN)
+endif
+
+$(PKG_FILE): $(PKG_BIN_DEPS) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	@command -v package >/dev/null 2>&1 || { \
 	    echo "error: 'package' command not found — HPKG build requires Haiku."; \
 	    exit 1; \
 	}
 	rm -rf "$(PKG_STAGE)"
 	mkdir -p "$(PKG_STAGE)/bin" \
-	         "$(PKG_STAGE)/apps" \
-	         "$(PKG_STAGE)/data/claude-gui/styles" \
-	         "$(PKG_STAGE)/data/claude-gui/languages" \
 	         "$(PKG_STAGE)/documentation/man/man1" \
 	         "$(PKG_STAGE)/documentation/packages/claude-cli"
+	@if [ "$(BUILD_GUI)" != "no" ]; then \
+	    mkdir -p "$(PKG_STAGE)/apps" \
+	             "$(PKG_STAGE)/data/claude-gui/styles" \
+	             "$(PKG_STAGE)/data/claude-gui/languages"; \
+	fi
 	cp "$(BIN)"      "$(PKG_STAGE)/bin/claude"
-	cp "$(GUI_BIN)"  "$(PKG_STAGE)/apps/Claude"
+	@if [ -f "$(GUI_BIN)" ]; then cp "$(GUI_BIN)" "$(PKG_STAGE)/apps/Claude"; \
+	 else echo "  (GUI not built for $(ARCH) — packaging CLI only)"; fi
 	cp docs/claude.1  "$(PKG_STAGE)/documentation/man/man1/claude.1"
 	cp CHANGELOG.md   "$(PKG_STAGE)/documentation/packages/claude-cli/CHANGELOG.md"
 	cp README.md      "$(PKG_STAGE)/documentation/packages/claude-cli/ReadMe.md"
@@ -326,14 +434,20 @@ $(PKG_FILE): $(BIN) $(GUI_BIN) .PackageInfo.in docs/claude.1 | $(BUILDDIR)
 	    if [ -f "$(ICON_HVIF)" ]; then \
 	        echo "  stamping BEOS:ICON onto staged binaries"; \
 	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/bin/claude"; \
-	        addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/apps/Claude"; \
+	        [ -f "$(PKG_STAGE)/apps/Claude" ] && \
+	            addattr -t "'VICN'" -f "$(ICON_HVIF)" BEOS:ICON "$(PKG_STAGE)/apps/Claude" || true; \
 	    fi; \
 	    echo "  stamping BEOS:APP_SIG (cli=$(APP_SIG), gui=$(GUI_APP_SIG))"; \
 	    addattr -t mime BEOS:APP_SIG "$(APP_SIG)"     "$(PKG_STAGE)/bin/claude"; \
-	    addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(PKG_STAGE)/apps/Claude"; \
+	    [ -f "$(PKG_STAGE)/apps/Claude" ] && \
+	        addattr -t mime BEOS:APP_SIG "$(GUI_APP_SIG)" "$(PKG_STAGE)/apps/Claude" || true; \
 	fi
 	sed -e 's/@VERSION@/$(PKG_VERSION)/g' \
 	    -e 's/@BUILD@/$(PKG_BUILD)/g' \
+	    -e 's/@ARCH@/$(PKG_ARCH)/g' \
+	    -e 's|@SUMMARY@|$(PKG_SUMMARY)|g' \
+	    -e 's|@PROVIDES_EXTRA@|$(PKG_PROVIDES_EXTRA)|g' \
+	    -e 's|@REQUIRES@|\t$(PKG_REQUIRES)|g' \
 	    .PackageInfo.in > "$(PKG_STAGE)/.PackageInfo"
 	rm -f "$(PKG_FILE)"
 	package create -C "$(PKG_STAGE)" "$(PKG_FILE)"
@@ -401,10 +515,27 @@ $(UNIT_BUILDDIR)/image_util_test: tests/unit/image_util_test.cpp \
 	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
 	    tests/unit/image_util_test.cpp src/image_util.cpp
 
+# markov unit test — links the pure markov.cpp TU (no BeAPI, no network).
+$(UNIT_BUILDDIR)/markov_test: tests/unit/markov_test.cpp \
+        src/markov.cpp tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/markov_test.cpp src/markov.cpp
+
+# workflow unit test — workflow.cpp pulls in markov.cpp for the model and
+# paths.cpp for the per-repo state directory.
+$(UNIT_BUILDDIR)/workflow_test: tests/unit/workflow_test.cpp \
+        src/workflow.cpp src/markov.cpp src/paths.cpp \
+        tests/unit/doctest.h | $(UNIT_BUILDDIR)
+	$(CXX) $(UNIT_CXXFLAGS) $(JSON_CFLAGS) -o $@ \
+	    tests/unit/workflow_test.cpp src/workflow.cpp src/markov.cpp \
+	    src/paths.cpp
+
 UNIT_BINS := $(UNIT_BUILDDIR)/md_text_test $(UNIT_BUILDDIR)/sse_parser_test \
              $(UNIT_BUILDDIR)/history_util_test \
              $(UNIT_BUILDDIR)/transcript_export_test \
-             $(UNIT_BUILDDIR)/image_util_test
+             $(UNIT_BUILDDIR)/image_util_test \
+             $(UNIT_BUILDDIR)/markov_test \
+             $(UNIT_BUILDDIR)/workflow_test
 
 test-unit: $(UNIT_BINS)
 	@echo "=== unit tests ==="

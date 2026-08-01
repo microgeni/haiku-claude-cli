@@ -62,13 +62,35 @@ longer reflect back into Genio).
 
 ### Optional: scope the menu item
 
-You can gate when **Claude** appears in the Tools menu using BFS attributes
-on the extension file:
+By default (no attributes) **Claude** is always shown in the Tools menu.
+You can gate when it appears using BFS attributes on the extension file:
 
 ```sh
-addattr genio:scope      "editor,project"   ~/config/settings/Genio/extensions/Claude-C
-addattr genio:file_types "cpp,h,c,cxx,hpp"  ~/config/settings/Genio/extensions/Claude-C
+addattr genio:scope      "global,editor,project"  ~/config/settings/Genio/extensions/Claude-C
+addattr genio:file_types "cpp,h,c,cxx,hpp"        ~/config/settings/Genio/extensions/Claude-C
 ```
+
+`genio:scope` is a comma-separated list of `global`, `editor`, and/or
+`project`. Genio's `ExtensionManager::AppliesTo()` shows the item when the
+scope matches the current context: `editor` requires a file open, `project`
+requires a project loaded, and `global` matches unconditionally.
+
+> **Gotcha — an empty Tools menu at startup.** If you set `genio:scope` to
+> `"editor,project"` *without* `global`, the item is **hidden whenever no
+> file and no project are open** — which is exactly the state Genio is in
+> right after launch. With Claude as the only extension installed, this makes
+> the whole Tools menu look empty until you open something. Include `global`
+> if you want Claude available from a fresh launch, or just leave
+> `genio:scope` unset (empty scope == global == always shown). To undo a
+> too-narrow scope:
+>
+> ```sh
+> rmattr genio:scope ~/config/settings/Genio/extensions/Claude-C
+> ```
+
+`genio:file_types` is a comma-separated list of lowercase extensions (no
+dot). When set, the item only appears while a file of one of those types is
+focused; leave it unset to match any (or no) file.
 
 ## Verifying
 

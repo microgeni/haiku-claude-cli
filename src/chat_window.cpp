@@ -452,8 +452,12 @@ void ChatWindow::_BuildLayout()
 	// freely shrinkable; B_FOLLOW_ALL still lets it fill the scroll view.
 	fOutput->SetExplicitMinSize(BSize(80, 40));
 
+	// B_NO_BORDER: a bordered scroll view draws a light grey bevel whose
+	// bottom edge reads as a divider between the chat and the spinner row
+	// below it. Without it the chat surface and the spinner row share one
+	// continuous background (both kColorChatBg) and read as a single pane.
 	fScroll = new BScrollView("scroll", fOutput,
-	                          B_FOLLOW_NONE, 0, false, true, B_FANCY_BORDER);
+	                          B_FOLLOW_NONE, 0, false, true, B_NO_BORDER);
 	// Decouple the chat's layout size from the BTextView's content-derived
 	// size: an explicit min lets it yield space to the fixed bottom strip,
 	// and an explicit *max* of unlimited tells the layout it may grow to
@@ -471,12 +475,23 @@ void ChatWindow::_BuildLayout()
 	// ── Welcome splash (shown above the chat until the first turn) ───────────
 	fWelcome = new WelcomeView();
 
-	// Floating jump-to-bottom button (overlaid, repositioned in FrameResized).
-	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93 New", // ↓
+	// Jump-to-newest button. It lives in the bottom button column beside
+	// Send/Clear rather than floating over the chat: as a window-level
+	// overlay it was positioned from fScroll->Frame(), which is in the
+	// chat column's coordinate space, so it landed near the top-left of
+	// the window instead of over the chat. Keeping it in the layout also
+	// means it can never drift out of place on resize.
+	//
+	// It lives at the right end of the spinner strip below the chat (see
+	// the strip's construction further down), so it sits with the chat it
+	// acts on rather than among the input controls. Permanently visible
+	// and enabled only when there is content below the viewport — on a
+	// fixed-height row a disabled button costs nothing and keeps the row
+	// from ever changing shape.
+	fJumpBtn = new BButton("jumpbtn", "\xE2\x86\x93", // ↓
 	                        new BMessage(gui::MSG_JUMP_BOTTOM));
-	fJumpBtn->SetExplicitSize(BSize(ScalePx(80), ScalePx(26)));
-	fJumpBtn->Hide();
-	AddChild(fJumpBtn); // added directly to window, not layout
+	fJumpBtn->SetToolTip("Scroll down to the newest message");
+	fJumpBtn->SetEnabled(false);
 
 	// ── Token bar ────────────────────────────────────────────────────────────
 	fTokenBar = new TokenBar();
@@ -484,66 +499,12 @@ void ChatWindow::_BuildLayout()
 	// badge matches the Tools menu checkmark from the start.
 	fTokenBar->SetLudicrous(api::g_ludicrous_mode.load());
 
-	// ── Session sidebar (left dock, hidden until View ▸ Sessions) ─────────────
-	fSessionList = new SessionListView("sessionlist", this);
-	fSessionList->SetSelectionMessage(nullptr); // single-click just highlights
-	fSessionList->SetInvocationMessage(           // double-click loads
-		new BMessage(gui::MSG_SESSION_SELECT));
-	fSessionScroll = new BScrollView("sessionscroll", fSessionList,
-	                                 0, false, true, B_FANCY_BORDER);
-	// A BListView reports a content-derived minimum width (the widest session
-	// title), which propagates up through the scroll view, the session panel
-	// and the horizontal split, freezing the whole window's minimum width far
-	// wider than it should be — and that in turn lets the bottom input bar
-	// overflow to the right and clip the buttons once the window is narrowed.
-	// Pin a small explicit min on both the list and its scroller so the
-	// sidebar (and the window) can shrink freely; the splitter governs the
-	// real width.
-	fSessionList->SetExplicitMinSize(BSize(60, B_SIZE_UNSET));
-	fSessionScroll->SetExplicitMinSize(BSize(60, 50));
-	fSessionScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-	BButton* sessNew = new BButton("sessnew", "New",
-	                               new BMessage(gui::MSG_SESSION_NEW));
-	BButton* sessOpen = new BButton("sessopen", "Open",
-	                                new BMessage(gui::MSG_SESSION_SELECT));
-	BButton* sessRen = new BButton("sessren", "Rename",
-	                               new BMessage(gui::MSG_SESSION_RENAME));
-	BButton* sessDel = new BButton("sessdel", "Delete",
-	                               new BMessage(gui::MSG_SESSION_DELETE));
-	fSessionPanel = new BView("sessionpanel", B_WILL_DRAW | B_SUPPORTS_LAYOUT);
-	fSessionPanel->SetResizingMode(B_FOLLOW_NONE);
-	fSessionPanel->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-
-	// Keep the action buttons grouped at the left at a uniform width
-	// (so the 2x2 grid lines up) rather than stretching to fill the
-	// panel. A trailing glue on each row pushes them left no matter how
-	// wide the sidebar is dragged.
-	float btnW = 0.0f;
-	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
-		btnW = std::max(btnW, b->PreferredSize().Width());
-	for (BButton* b : { sessNew, sessOpen, sessRen, sessDel })
-		b->SetExplicitSize(BSize(btnW, B_SIZE_UNSET));
-
-	BLayoutBuilder::Group<>(fSessionPanel, B_VERTICAL, B_USE_SMALL_SPACING)
-		.SetInsets(B_USE_SMALL_INSETS)
-		.Add(new BStringView("sesshdr", "Sessions"), 0.0f)
-		.Add(fSessionScroll, 1.0f)
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(sessNew, 0.0f)
-			.Add(sessOpen, 0.0f)
-			.AddGlue()
-		.End()
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(sessRen, 0.0f)
-			.Add(sessDel, 0.0f)
-			.AddGlue()
-		.End()
-	.End();
-	// Keep the panel usable but let the window shrink: a small min-width
-	// (the splitter governs the actual width). A large min here would be
-	// summed into the window's minimum and block reducing the window.
-	fSessionPanel->SetExplicitMinSize(BSize(ScalePx(80), B_SIZE_UNSET));
-	fSessionPanel->SetExplicitMaxSize(BSize(ScalePx(500), B_SIZE_UNLIMITED));
+	// ── Session list ─────────────────────────────────────────────────────────
+	// The saved-session browser lives in its own floating SessionWindow now
+	// (View ▸ Sessions toggles it), not a docked sidebar. It is created lazily
+	// the first time the user opens it (_ToggleSessionList) so the chat window
+	// stays lean; fSessionList points at the list inside that window once it
+	// exists.
 
 	// ── Input area ───────────────────────────────────────────────────────────
 	fInput = new InputView("input");
@@ -630,24 +591,16 @@ void ChatWindow::_BuildLayout()
 	.End();
 
 	// ── Layout ────────────────────────────────────────────────────────────────
-	// The session sidebar and chat area sit in a horizontal BSplitView so the
-	// sidebar divider can be dragged. The chat column (welcome splash +
-	// scroll) is the second item. It is a BGroupView so its own layout
-	// reflows its children on resize (Genio uses group views for such
-	// columns rather than bare B_FOLLOW_NONE BViews with explicit-size pins).
+	// The chat area is now the sole horizontal content — the saved-session
+	// browser lives in its own floating SessionWindow, so there is no docked
+	// sidebar or horizontal splitter here. The chat column (welcome splash +
+	// scroll) is a BGroupView so its own layout reflows its children on
+	// resize.
 	BGroupView* chatColumn = new BGroupView("chatcolumn", B_VERTICAL, 0.0f);
 	BLayoutBuilder::Group<>(chatColumn)
 		.Add(fWelcome, 0.0f)
 		.Add(fScroll, 1.0f)
 	.End();
-
-	fSplit = new BSplitView(B_HORIZONTAL, 1.0f);
-	fSplit->SetName("mainsplit");
-	BLayoutBuilder::Split<>(fSplit)
-		.Add(fSessionPanel, 0.28f)   // sidebar  — collapsible
-		.Add(chatColumn,    0.72f);  // chat     — takes the rest
-	// The sidebar is collapsible; the chat (index 1) is not.
-	fSplit->SetCollapsible(0, true);
 
 	// ── Bottom input pane ─────────────────────────────────────────────────────
 	// Built to match Genio's ConsoleIOTabView verbatim — the golden-standard
@@ -730,11 +683,79 @@ void ChatWindow::_BuildLayout()
 	// token bar here — above the divider — means the draggable divider sits
 	// directly below the token bar, and the usage readout stays attached to the
 	// chat output it summarises rather than riding up and down with the input.
+	// ── Spinner strip ────────────────────────────────────────────────────────
+	// A thin row directly below the chat holding the "thinking…" indicator
+	// on the left and the jump-to-latest button on the right. Its height is
+	// reserved permanently.
+	//
+	// The spinner used to be written into the chat BTextView and rewritten
+	// every 80 ms, which changed the document length on every tick —
+	// reflowing the text and fighting the scroll position. That was the
+	// jitter during a reply. A dedicated row never changes the layout, so
+	// ticking it costs one SetText().
+	fSpinnerView = new BStringView("spinnertext", "");
+	fSpinnerView->SetViewColor(kColorChatBg);
+	fSpinnerView->SetLowColor(kColorChatBg);
+	fSpinnerView->SetHighColor(kColorInputCyan);
+
+	BGroupView* spinnerRow = new BGroupView("spinnerrow", B_HORIZONTAL,
+	                                        B_USE_SMALL_SPACING);
+	spinnerRow->SetViewColor(kColorChatBg);
+	{
+		font_height sfh;
+		be_plain_font->GetHeight(&sfh);
+		const float textH = std::ceil(sfh.ascent + sfh.descent + sfh.leading);
+		// Tall enough for a compact square button, so the row height is
+		// stable whether or not the button is showing.
+		const float rowH  = std::max(textH + ScalePx(4.0f), ScalePx(22.0f));
+		// Match the chat's vertical scrollbar so the button lines up with
+		// the scrollbar column above it. GetScrollBarWidth() returns the
+		// BRect-style width (right - left), which spans one more pixel
+		// column than its value — measured 31.0 for a 32-pixel bar — so
+		// add one to get the pixel width the layout wants.
+		//
+		// B_V_SCROLL_BAR_WIDTH is only a last-resort fallback: it is a
+		// static 14.0 and is badly wrong wherever the user has resized
+		// their scrollbars (31.0 on this system).
+		float sbW = B_V_SCROLL_BAR_WIDTH;
+		if (be_control_look != nullptr) {
+			const float w = be_control_look->GetScrollBarWidth(B_VERTICAL);
+			if (w > 0.0f) sbW = w;
+		}
+		fJumpBtn->SetExplicitSize(BSize(sbW + 1.0f, rowH));
+		spinnerRow->SetExplicitSize(BSize(B_SIZE_UNSET, rowH));
+		spinnerRow->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, rowH));
+	}
+	BLayoutBuilder::Group<>(spinnerRow)
+		// No right inset: any padding there shows as a black gap between
+		// the button and the window edge. Left inset only, to keep the
+		// spinner text off the edge.
+		.SetInsets(B_USE_SMALL_INSETS, 0.0f, 0.0f, 0.0f)
+		// Glue rather than a weight on the label: a BStringView will not
+		// stretch past its preferred width, so a weight would leave the
+		// button parked right after the text instead of at the edge. The
+		// glue absorbs all spare width and pins the button hard right.
+		.Add(fSpinnerView, 0.0f)
+		.AddGlue()
+		.Add(fJumpBtn,     0.0f)
+	.End();
+
+	// Outer bar: panel grey. The spinner row is a sibling of the chat
+	// column, so it runs the full width and its surface aligns with the
+	// chat's left edge (no sidebar splitter to inset around any more).
+	BGroupView* spinnerBar = new BGroupView("spinnerbar", B_HORIZONTAL, 0.0f);
+	spinnerBar->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	BLayoutBuilder::Group<>(spinnerBar)
+		.SetInsets(0.0f, 0.0f, 0.0f, 0.0f)
+		.Add(spinnerRow, 1.0f)
+	.End();
+
 	BGroupView* chatArea = new BGroupView("chatarea", B_VERTICAL, 0.0f);
 	chatArea->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	BLayoutBuilder::Group<>(chatArea)
-		.Add(fSplit,    1.0f)
-		.Add(fTokenBar, 0.0f)
+		.Add(chatColumn, 1.0f)
+		.Add(spinnerBar, 0.0f)
+		.Add(fTokenBar,  0.0f)
 	.End();
 
 	// ── Vertical split: chat (top) over input pane (bottom) ────────────────────
@@ -800,8 +821,8 @@ void ChatWindow::_BuildLayout()
 	// Find bar starts hidden; Cmd-F reveals it.
 	if (fFindBar) fFindBar->Hide();
 
-	// Session sidebar starts hidden; View ▸ Sessions reveals it.
-	if (fSessionPanel) fSessionPanel->Hide();
+	// The session browser is a separate floating window created on demand by
+	// View ▸ Sessions; nothing to hide here.
 
 	// Enlarge the default window on HiDPI so the initial size stays
 	// proportional to the scaled widgets (the constructor's BRect is the
@@ -867,11 +888,9 @@ void ChatWindow::_PopulateModelMenu()
 
 void ChatWindow::_RepositionOverlays()
 {
-	if (!fJumpBtn || !fScroll) return;
-	const BRect sb = fScroll->Frame();
-	const float bw = fJumpBtn->Frame().Width();
-	const float bh = fJumpBtn->Frame().Height();
-	fJumpBtn->MoveTo(sb.right - bw - 12.0f, sb.bottom - bh - 12.0f);
+	// No floating overlays remain: the jump-to-newest button now lives in
+	// the bottom button column and is positioned by the layout. Kept as a
+	// hook so FrameResized has somewhere to call if an overlay returns.
 }
 
 // Re-assert the window's size limits after the base class has shown the
@@ -965,8 +984,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_JUMP_BOTTOM:
 		_ScrollToBottom();
-		fJumpBtn->Hide();
-		fUserScrolled = false;
+		if (fJumpBtn) fJumpBtn->SetEnabled(false);
 		break;
 
 	case gui::MSG_SETTINGS:
@@ -1287,8 +1305,8 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			// fighting several competing ScrollToOffset() calls.
 			if (stick)
 				_ScrollToBottom();
-			else if (fJumpBtn && fJumpBtn->IsHidden())
-				fJumpBtn->Show();  // let the user jump back down when ready
+			else if (fJumpBtn)
+				fJumpBtn->SetEnabled(true);  // new content is below the fold
 		}
 		break;
 	}
@@ -1342,6 +1360,18 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		break;
 	}
 
+	case gui::MSG_NOTICE: {
+		// Workflow nudge or similar advisory. Rendered in the tool-log
+		// style so it reads as system commentary, not assistant text.
+		// Flush any partial streamed line first so the nudge can't tear
+		// a half-rendered sentence or glue to it without a break.
+		if (fMdRenderer) fMdRenderer->Flush();
+		const char* text = nullptr;
+		if (msg->FindString("text", &text) == B_OK && text)
+			_AppendToolLine("\n" + std::string(text) + "\n");
+		break;
+	}
+
 	case gui::MSG_TOOL_DONE: {
 		const char* name = nullptr;
 		bool        ok   = true;
@@ -1366,6 +1396,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 
 	case gui::MSG_TOOL_DIFF: {
 		_SpinnerStop();
+		// Sampled before the first insert so a diff landing while the user
+		// reads further up doesn't drag them back down.
+		const bool diffStick = _IsNearBottom();
 		// Render a structured diff (from Edit/Write tools) as coloured lines.
 		// Each line in the "diff" string starts with a sigil:
 		//   '!' — header / meta line (path, ellipsis notice)
@@ -1404,7 +1437,7 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			}
 		}
 		AppendWithColor(fOutput, "\n", kColorToolLine, fZoomFactor);
-		if (!fUserScrolled) _ScrollToBottom();
+		if (diffStick) _ScrollToBottom();
 		break;
 	}
 
@@ -1440,6 +1473,8 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			AppendWithColor(fOutput,
 			    std::string("\n\xE2\x9A\xA0 ") + text + "\n", // ⚠
 			    kColorError, fZoomFactor);
+			// Deliberately unconditional: an error outranks the user's
+			// reading position — it should never scroll past unseen.
 			_ScrollToBottom();
 		}
 		break;
@@ -1556,9 +1591,9 @@ void ChatWindow::MessageReceived(BMessage* msg)
 			_RefreshSkillMenu();
 		}
 
-		// Keep the sidebar current if it's open (title/turn count may
-		// have changed, or this may be a brand-new session file).
-		if (fSessionPanel && !fSessionPanel->IsHidden())
+		// Keep the session window current if it's open (title/turn count
+		// may have changed, or this may be a brand-new session file).
+		if (fSessionWindow && !fSessionWindow->IsHidden())
 			_RefreshSessionList();
 
 		// Desktop notification — always fire for longer turns (>5 s) so
@@ -1789,6 +1824,15 @@ bool ChatWindow::QuitRequested()
 		fSettings->Quit();
 	fSettings = nullptr;
 
+	// Tear down the standalone session window (its QuitRequested vetoes a
+	// user close to stay toggleable, so quit it explicitly here). Detach the
+	// list pointer first — it lives inside that window and is freed with it.
+	if (fSessionWindow && fSessionWindow->Lock()) {
+		fSessionList = nullptr;
+		fSessionWindow->Quit();     // unlocks + destroys
+		fSessionWindow = nullptr;
+	}
+
 	return true;
 }
 
@@ -1798,20 +1842,29 @@ bool ChatWindow::QuitRequested()
 
 void ChatWindow::_AppendText(const std::string& text)
 {
+	// Capture the position BEFORE inserting: appending changes the scroll
+	// range, so asking afterwards would always look like "at the bottom".
+	// Only follow the output if the user was already there — otherwise
+	// leave their scroll position alone so they can read undisturbed.
+	const bool stick = _IsNearBottom();
 	AppendWithColor(fOutput, text, kColorText, fZoomFactor);
-	if (!fUserScrolled) _ScrollToBottom();
+	if (stick) _ScrollToBottom();
 }
 
 void ChatWindow::_AppendToolLine(const std::string& text)
 {
+	const bool stick = _IsNearBottom();
 	AppendWithColor(fOutput, text, kColorToolLine, fZoomFactor);
-	if (!fUserScrolled) _ScrollToBottom();
+	if (stick) _ScrollToBottom();
 }
 
 // ── Inline thinking spinner ────────────────────────────────────────────────
-// Renders a CLI-style "⣾ Thinking… 3s" line as the last text in the chat
-// output while waiting for the first token. _SpinnerTick rewrites it in
-// place; _SpinnerStop erases it before the real reply (or tool line) lands.
+// Renders a CLI-style "⣾ Thinking… 3s" line in the dedicated spinner strip
+// below the chat (fSpinnerView). It is deliberately NOT written into the
+// chat text view: rewriting trailing text every 80 ms reflowed the document
+// and fought the scroll position, which is what made the view jitter during
+// a reply. The strip keeps its height at all times, so starting and stopping
+// the spinner never moves anything.
 
 static std::string SpinnerLineText(int step, int verb, bigtime_t start)
 {
@@ -1831,35 +1884,27 @@ void ChatWindow::_SpinnerStart()
 	fSpinnerStep   = 0;
 	fSpinnerVerb   = static_cast<int>((system_time() / 1000) % kGuiVerbCount);
 	fSpinnerStart  = system_time();
-	fSpinnerOffset = fOutput->TextLength();
 	fSpinnerActive = true;
-	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
-	                                         fSpinnerStart), kColorInputCyan, fZoomFactor);
-	if (!fUserScrolled) _ScrollToBottom();
+	if (fSpinnerView)
+		fSpinnerView->SetText(SpinnerLineText(fSpinnerStep, fSpinnerVerb,
+		                                      fSpinnerStart).c_str());
 }
 
 void ChatWindow::_SpinnerTick()
 {
 	if (!fSpinnerActive) return;
 	fSpinnerStep++;
-	// Replace everything from the spinner offset to the end with the new
-	// frame. (Nothing else writes to fOutput while we're waiting, so the
-	// spinner is always the trailing text.)
-	const int32 end = fOutput->TextLength();
-	if (fSpinnerOffset <= end)
-		fOutput->Delete(fSpinnerOffset, end);
-	AppendWithColor(fOutput, SpinnerLineText(fSpinnerStep, fSpinnerVerb,
-	                                         fSpinnerStart), kColorInputCyan, fZoomFactor);
-	if (!fUserScrolled) _ScrollToBottom();
+	if (fSpinnerView)
+		fSpinnerView->SetText(SpinnerLineText(fSpinnerStep, fSpinnerVerb,
+		                                      fSpinnerStart).c_str());
 }
 
 void ChatWindow::_SpinnerStop()
 {
 	if (!fSpinnerActive) return;
 	fSpinnerActive = false;
-	const int32 end = fOutput->TextLength();
-	if (fSpinnerOffset <= end)
-		fOutput->Delete(fSpinnerOffset, end);
+	// Clear the text but keep the strip's reserved height.
+	if (fSpinnerView) fSpinnerView->SetText("");
 }
 
 void ChatWindow::_ScrollToBottom()
@@ -1983,6 +2028,9 @@ void ChatWindow::_FlushCodeBlock()
 {
 	if (fCodeBuffer.empty()) return;
 
+	// Sampled before any insert, for the same reason as _AppendText().
+	const bool stick = _IsNearBottom();
+
 	// Render the code block as styled text in the BTextView.
 	// Embedding BScintillaView as a child of BTextView is unreliable —
 	// Scintilla's internal state isn't ready until the view is fully
@@ -2051,12 +2099,12 @@ void ChatWindow::_FlushCodeBlock()
 		md::Run sep;
 		sep.text = "\n";
 		fMdRenderer->AppendRun(sep);
-		fMdRenderer->ScrollToEnd();
+		if (stick) fMdRenderer->ScrollToEnd();
 	} else {
 		_AppendText(fCodeBuffer);
 	}
 
-	if (!fUserScrolled) _ScrollToBottom();
+	if (stick) _ScrollToBottom();
 	fCodeBuffer.clear();
 	fCodeLang.clear();
 }
@@ -2091,9 +2139,9 @@ void ChatWindow::_SendTurn()
 	AppendWithColor(fOutput, "claude \xE2\x96\xB8 \n", kColorModelLabel, fZoomFactor);
 
 	// Sending is an explicit "show me this exchange" action: snap to the
-	// bottom and hide the jump button so streaming follows the reply.
+	// bottom and disable the jump button so streaming follows the reply.
 	_ScrollToBottom();
-	if (fJumpBtn && !fJumpBtn->IsHidden()) fJumpBtn->Hide();
+	if (fJumpBtn) fJumpBtn->SetEnabled(false);
 
 	_LaunchWorker(userText);
 }
@@ -2133,7 +2181,7 @@ void ChatWindow::_LaunchWorker(const std::string& userText)
 		// Multimodal turn — content is an array of blocks: the text first,
 		// then one `image` block per dropped image (base64 source).
 		nlohmann::json content = nlohmann::json::array();
-		if (!userText.empty())
+		if (userText.find_first_not_of(" \t\r\n\f\v") != std::string::npos)
 			content.push_back({{"type", "text"}, {"text", userText}});
 		for (const auto& [mediaType, b64] : fPendingImages) {
 			content.push_back({

@@ -307,6 +307,7 @@ Config Load() {
 		if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
 		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
 		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
+		if (j.contains("workflow"))     cfg.workflow    = j["workflow"];
 		// Accept both the current key and the legacy lowercase-t spelling
 		// so existing config.json files continue to work after the rename.
 		if (j.contains("fAllowDestructiveTools"))

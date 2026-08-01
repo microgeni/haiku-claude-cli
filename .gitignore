@@ -35,7 +35,14 @@
 # Project-specific
 build/
 build-release/
-.claude/
+# Cross-compile trees (make ARCH=arm64 → build-arm64/, build-release-arm64/)
+build-*-arm64/
+build-arm64/
+# Local Claude Code state is ignored, but project skills are shared —
+# they document project-specific procedures and belong in the repo.
+# (A bare ".claude/" would stop git descending, hence the /* + negation.)
+.claude/*
+!.claude/skills/
 
 # Genio IDE workspace files
 .genio.yaml

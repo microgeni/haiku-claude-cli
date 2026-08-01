@@ -707,7 +707,10 @@ int InteractiveLoop(const config::Auth& initial_auth, const config::Config& cfg,
 			api_content = text_content;
 		} else {
 			api_content = json::array();
-			api_content.push_back({{"type", "text"}, {"text", text_content}});
+			// Skip an empty text block (e.g. an image attached with no typed
+			// text) — the API rejects whitespace-only text content blocks.
+			if (text_content.find_first_not_of(" \t\r\n\f\v") != std::string::npos)
+				api_content.push_back({{"type", "text"}, {"text", text_content}});
 			for (auto& blk : pending_images)
 				api_content.push_back(std::move(blk));
 			pending_images.clear();

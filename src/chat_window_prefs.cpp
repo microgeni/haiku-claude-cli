@@ -10,6 +10,7 @@
 
 #include <File.h>
 #include <Message.h>
+#include <Screen.h>
 #include <SplitView.h>
 
 #include "config.h"
@@ -26,17 +27,43 @@ void ChatWindow::_LoadGuiPrefs()
 	if (prefs.Unflatten(&file) != B_OK) return;
 
 	// Window frame — clamp into the current screen so a prefs file from
-	// a larger display doesn't park the window off-screen.
+	// a larger display doesn't park the window off-screen. This matters
+	// whenever the settings directory is shared between machines: a frame
+	// saved on a 5120x2160 desktop leaves the window invisible on a 1080p
+	// screen, with the app still running and listed in the Deskbar.
 	BRect frame;
 	if (prefs.FindRect("frame", &frame) == B_OK && frame.IsValid()
 			&& frame.Width() > 200 && frame.Height() > 150) {
-		MoveTo(frame.LeftTop());
 		// Clamp to the window minimum so a small saved frame can't start
 		// the window below the floor that keeps the input bar visible.
 		float rw = frame.Width();
 		float rh = frame.Height();
 		if (rw < fWindowMinW) rw = fWindowMinW;
 		if (rh < fWindowMinH) rh = fWindowMinH;
+
+		BPoint origin = frame.LeftTop();
+
+		BScreen screen(this);
+		const BRect bounds = screen.Frame();
+		if (bounds.IsValid()) {
+			// Leave the title tab reachable: a window placed flush with
+			// the screen top can't be dragged back into view.
+			const float kTabAllowance = 24.0f;
+			const float usableTop = bounds.top + kTabAllowance;
+
+			// Never ask for more room than the screen actually has. The
+			// usable height excludes the tab allowance, otherwise pushing
+			// the origin down below would run the window off the bottom.
+			if (rw > bounds.Width())          rw = bounds.Width();
+			if (rh > bounds.bottom - usableTop) rh = bounds.bottom - usableTop;
+
+			if (origin.x + rw > bounds.right)  origin.x = bounds.right - rw;
+			if (origin.y + rh > bounds.bottom) origin.y = bounds.bottom - rh;
+			if (origin.x < bounds.left) origin.x = bounds.left;
+			if (origin.y < usableTop)   origin.y = usableTop;
+		}
+
+		MoveTo(origin);
 		ResizeTo(rw, rh);
 	}
 

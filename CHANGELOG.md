@@ -4,6 +4,28 @@ All notable changes to this project are recorded here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-07-26
+
+### Added
+
+- **Saved-session browser is now a standalone window.** View ▸ Sessions
+  (⌘B) opens a floating session list with New / Open / Rename / Delete
+  buttons instead of the old docked left sidebar. The chat column now fills
+  the full window width — no more splitter gutter or grey strip down the
+  left edge. Closing the session window hides it (the list survives) so it
+  toggles straight back, and focus returns to the chat window so typing
+  resumes immediately.
+- **`--print-only` flag.** Render the resolved `-a`/`--attach` files as a
+  PATH/SIZE table and exit without contacting the API — handy for checking
+  what would be attached. Errors when no attachment is supplied.
+- **Workflow nudges in the GUI.** The per-repo workflow-learning memory now
+  surfaces its suggestions in the desktop app, not just the CLI.
+
+### Fixed
+
+- **Chat stays still while a reply streams.** Output no longer jitters or
+  fights the scroll position as tokens arrive.
+
 ## [1.14.0] - 2026-07-25
 
 ### Added

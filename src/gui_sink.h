@@ -24,6 +24,7 @@ constexpr uint32_t MSG_ASK_PERM    = 'APEM'; // B_STRING_TYPE "tool", "preview"
 constexpr uint32_t MSG_ASK_CHOICE  = 'ACHO'; // "prompt" + B_STRING_TYPE[] "options"
 constexpr uint32_t MSG_STATUS      = 'STAT'; // B_INT32_TYPE "kind" (sink::StatusKind)
 constexpr uint32_t MSG_ERR         = 'RERR'; // B_STRING_TYPE "text"
+constexpr uint32_t MSG_NOTICE      = 'NTCE'; // B_STRING_TYPE "text" — advisory line
 constexpr uint32_t MSG_SEND        = 'SEND'; // input control / button → window
 constexpr uint32_t MSG_WORKER_DONE = 'WDNE'; // worker thread finished
 } // namespace gui
@@ -70,6 +71,9 @@ public:
 	void OnThinking(const std::string& chunk) override;
 	void OnMeta(const std::string&)       override {} // suppressed in GUI
 	void OnDiag(const std::string&)       override {} // suppressed in GUI
+	// Not suppressed: an advisory the user should actually see. Rendered
+	// as a tool-log line rather than assistant text.
+	void OnNotice(const std::string& text) override;
 	void OnToolStatus(const std::string& phase) override;
 	api::Permission AskPermission(const std::string& tool_name,
 	                              const nlohmann::json& input,

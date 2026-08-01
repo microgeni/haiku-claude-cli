@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include "repl.h"
 #include "session.h"
 #include "tui.h"
+#include "workflow.h"
 
 namespace {
 
@@ -147,6 +149,19 @@ int main(int argc, char* argv[]) {
 	api::g_thinking_budget.store(cfg.thinking_budget, std::memory_order_relaxed);
 	hooks::Load(cfg.hooks);
 	mcp::Init(cfg.mcp_servers);
+
+	// Workflow memory: learn this repo's tool sequences and flag steps
+	// that are unusual given recent context. Inert unless config.json
+	// sets "workflow": { "enabled": true }. Bind the model to the
+	// current repo, and persist what it learned on every exit path.
+	workflow::Configure(cfg.workflow);
+	if (workflow::Enabled()) {
+		char cwdbuf[PATH_MAX];
+		workflow::Begin(getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : ".");
+	}
+	struct WorkflowFlushGuard {
+		~WorkflowFlushGuard() { workflow::Flush(); }
+	} workflow_flush_guard;
 
 #ifdef __HAIKU__
 	// Ensure the claude:summary BFS index exists on this volume so
@@ -333,7 +348,7 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
-	if (!interactive && message.empty()) {
+	if (!interactive && message.empty() && !print_only) {
 		// With no message and no -i flag, default to interactive
 		// mode when stdin is a real terminal.
 		if (isatty(fileno(stdin))) {
@@ -360,6 +375,42 @@ int main(int argc, char* argv[]) {
 			resolved_attachments.emplace_back(use);
 		}
 		std::cout << tui::Meta(session::FormatAttachedLine(resolved_attachments)) << "\n";
+	}
+
+	// --print-only: render the resolved attachments as a table and exit
+	// without contacting the API. Requires at least one -a/--attach.
+	if (print_only) {
+		if (resolved_attachments.empty()) {
+			std::cerr << "error: --print-only requires at least one -a/--attach\n";
+			return 1;
+		}
+
+		std::vector<std::string> sizes;
+		sizes.reserve(resolved_attachments.size());
+		size_t pathWidth = 4;  // len("PATH")
+		size_t sizeWidth = 4;  // len("SIZE")
+		for (const auto& p : resolved_attachments) {
+			struct stat st;
+			std::string sz = "?";
+			if (stat(p.c_str(), &st) == 0)
+				sz = std::to_string(static_cast<long long>(st.st_size));
+			sizes.emplace_back(sz);
+			pathWidth = std::max(pathWidth, p.size());
+			sizeWidth = std::max(sizeWidth, sz.size());
+		}
+
+		auto pad = [](const std::string& s, size_t w) {
+			return s + std::string(w - s.size(), ' ');
+		};
+
+		std::cout << pad("PATH", pathWidth) << "  " << pad("SIZE", sizeWidth) << "\n";
+		std::cout << std::string(pathWidth, '-') << "  "
+				  << std::string(sizeWidth, '-') << "\n";
+		for (size_t i = 0; i < resolved_attachments.size(); ++i) {
+			std::cout << pad(resolved_attachments[i], pathWidth) << "  "
+					  << pad(sizes[i], sizeWidth) << "\n";
+		}
+		return 0;
 	}
 
 	const config::Auth auth = config::ResolveAuth();
