@@ -308,12 +308,15 @@ Config Load() {
 		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
 		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
 		if (j.contains("workflow"))     cfg.workflow    = j["workflow"];
-		// Accept both the current key and the legacy lowercase-t spelling
-		// so existing config.json files continue to work after the rename.
-		if (j.contains("fAllowDestructiveTools"))
-			cfg.fAllowDestructiveTools = j["fAllowDestructiveTools"].get<bool>();
+		// Canonical key is snake_case like every other config key. The two
+		// legacy spellings leaked the C++ member name into the JSON schema
+		// and are still accepted so existing config.json files keep working.
+		if (j.contains("allow_destructive_tools"))
+			cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
+		else if (j.contains("fAllowDestructiveTools"))
+			cfg.allow_destructive_tools = j["fAllowDestructiveTools"].get<bool>();
 		else if (j.contains("fAllowDestructivetools"))
-			cfg.fAllowDestructiveTools = j["fAllowDestructivetools"].get<bool>();
+			cfg.allow_destructive_tools = j["fAllowDestructivetools"].get<bool>();
 		if (j.contains("logging") && j["logging"].is_object()) {
 			cfg.logging_enabled = j["logging"].value("enabled", false);
 		}
@@ -331,8 +334,19 @@ Config Load() {
 	return cfg;
 }
 
-Auth ResolveAuth() {
-	if (auto stored = LoadTokens(); stored) {
+bool ApplyToolPolicy(const Config& cfg) {
+	if (!cfg.allow_destructive_tools) return false;
+
+	// Both globals are set. g_ludicrous_mode is what the permission gates
+	// in terminal_sink / gui_sink actually consult, so it is the switch
+	// that suppresses prompts. g_allow_destructive_tools remains the
+	// fallback consulted when stdin is not a usable TTY.
+	api::g_allow_destructive_tools = true;
+	api::g_ludicrous_mode.store(true);
+	return true;
+}
+
+Auth ResolveAuth() {	if (auto stored = LoadTokens(); stored) {
 		if (stored->IsExpired()) {
 			if (auto refreshed = RefreshTokens(*stored); refreshed) {
 				SaveTokens(*refreshed);

@@ -32,7 +32,11 @@ struct Config {
 	std::string system;  // flawfinder: ignore (member name, not the system() call)
 	bool        show_usage              = false;
 	bool        logging_enabled         = false;
-	bool        fAllowDestructiveTools = false;
+	// Config key "allow_destructive_tools". When true the session starts
+	// in ludicrous mode: every tool permission is auto-approved and the
+	// user is never prompted. Legacy spellings "fAllowDestructiveTools"
+	// and "fAllowDestructivetools" are still accepted on load.
+	bool        allow_destructive_tools = false;
 	bool        notify_enabled          = true;
 	double      notify_min_duration_sec = 60.0;
 	// Auto-compact fires `/compact` when a turn's input token count
@@ -59,6 +63,16 @@ struct Config {
 };
 
 Config Load();
+
+// Apply the tool-permission policy from config to the api:: globals.
+// `allow_destructive_tools` is a deliberate opt-in, so honouring it means
+// engaging ludicrous mode outright — the user has already stated they do
+// not want to be asked, and should not have to flip the switch again by
+// hand every session.
+//
+// Shared by the CLI and the GUI so the two front-ends cannot drift.
+// Returns true if ludicrous mode was engaged, so the caller can say so.
+bool ApplyToolPolicy(const Config& cfg);
 
 enum class AuthKind { None, OAuth, ApiKey };
 

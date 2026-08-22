@@ -63,5 +63,9 @@ step "learning-loop tests (skill telemetry, /learn, caching, budget)"
 bash tests/learning_loop_test.sh
 echo "PASS"
 
+step "config tool-permission policy tests"
+bash tests/config_tool_policy_test.sh
+echo "PASS"
+
 echo
 echo "=== all tests passed ==="

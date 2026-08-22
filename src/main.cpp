@@ -73,7 +73,7 @@ void PrintUsage(const char* prog, const std::string& default_model, int default_
 			  << "\n"
 			  << "Config file: " << paths::ConfigPath() << "\n"
 			  << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
-			  << "  fAllowDestructiveTools, prices. CLI flags override config values.\n"
+			  << "  allow_destructive_tools, prices. CLI flags override config values.\n"
 			  << "\n"
 			  << "Memory files (prepended to the system prompt, user before project):\n"
 			  << "  " << paths::UserMemoryPath() << "\n"
@@ -201,9 +201,15 @@ int main(int argc, char* argv[]) {
 	std::vector<std::string> parts;
 	std::vector<std::string> attachments;
 
-	// Seed the destructive-tool flag from config. -y/--yes below
-	// can still flip it on for ad-hoc runs.
-	if (cfg.fAllowDestructiveTools) api::g_allow_destructive_tools = true;
+	// Seed the tool-permission policy from config. "allow_destructive_tools"
+	// engages ludicrous mode outright, so the user is not asked again.
+	// -y/--yes below can still flip it on for ad-hoc runs.
+	if (config::ApplyToolPolicy(cfg)) {
+		std::cerr << tui::Yellow("\xE2\x9A\xA1 LUDICROUS MODE \xE2\x80\x94 "
+		                          "allow_destructive_tools is set in config.json; "
+		                          "all tool permissions auto-approved")
+		          << "\n";
+	}
 
 	// GUI launchers (e.g. Claude.app on Haiku) may not inherit a meaningful
 	// working directory.  Allow them to set CLAUDE_WORKING_DIR in the

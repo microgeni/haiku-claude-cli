@@ -836,8 +836,10 @@ RemoteControl::RemoteControl(const config::Config& cfg,
 	for (const auto& v : cfg.telegram["allowed_user_ids"]) {
 		if (v.is_number_integer()) fAllowed.insert(v.get<int64_t>());
 	}
-	fAllowDestructive = cfg.telegram.value("fAllowDestructiveTools",
-		cfg.telegram.value("fAllowDestructivetools", false));
+	// Canonical snake_case key first, then the two legacy spellings.
+	fAllowDestructive = cfg.telegram.value("allow_destructive_tools",
+		cfg.telegram.value("fAllowDestructiveTools",
+			cfg.telegram.value("fAllowDestructivetools", false)));
 }
 
 RemoteControl::~RemoteControl() { Stop(); }

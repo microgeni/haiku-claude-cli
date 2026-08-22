@@ -280,6 +280,14 @@ public:
 		config::InitLogging(cfg.logging_enabled);
 		config::SetHistoryMessageCap(cfg.history_max_messages);
 		api::g_thinking_budget.store(cfg.thinking_budget, std::memory_order_relaxed);
+		// Honour allow_destructive_tools the same way the CLI does. This
+		// runs before the ChatWindow is constructed, so the Tools menu
+		// checkmark and the token-bar indicator both pick the state up
+		// from api::g_ludicrous_mode and show it without extra wiring.
+		if (config::ApplyToolPolicy(cfg)) {
+			config::LogLine("gui: allow_destructive_tools set in config.json "
+			                "\xE2\x80\x94 starting in ludicrous mode");
+		}
 		config::LogLine("gui ReadyToRun fromGenio="
 			+ std::string(fFromGenio ? "yes" : "no")
 			+ " argv=[" + fRawArgv + "]");
