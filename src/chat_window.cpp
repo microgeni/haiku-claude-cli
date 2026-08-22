@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <string>
 
@@ -202,7 +203,8 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int notifyMinSec, const std::string& workingDir,
                         const std::string& initialPrompt, bool autoSend)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
-	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
+	           B_DOCUMENT_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+	           B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
 	, fModel(model)
 	, fConfigModel(model)
@@ -291,6 +293,7 @@ ChatWindow::~ChatWindow()
 	delete fSink;
 	delete fSpinnerTimer;
 	delete fExportPanel;
+	delete fBrowsePanel;
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,14 +1011,21 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// Open a directory-picker panel. The reply goes to this window
 		// as B_REFS_RECEIVED so we can extract the chosen path and push
 		// it back into the working-dir field.
-		BFilePanel* panel = new BFilePanel(B_OPEN_PANEL,
-		                                   new BMessenger(this),
-		                                   nullptr,
-		                                   B_DIRECTORY_NODE,
-		                                   false); // single selection
-		panel->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
-		panel->Show();
-		// panel deletes itself via BFilePanel's built-in quit handling.
+		//
+		// The panel is created once and reused. BFilePanel does not
+		// delete itself on dismissal (hideWhenDone defaults to true, so
+		// it merely hides), and it owns a BWindow — a fresh instance per
+		// click leaked 3 semaphores each time.
+		if (!fBrowsePanel) {
+			BMessenger target(this);
+			fBrowsePanel = new BFilePanel(B_OPEN_PANEL,
+			                              &target,
+			                              nullptr,
+			                              B_DIRECTORY_NODE,
+			                              false); // single selection
+			fBrowsePanel->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
+		}
+		fBrowsePanel->Show();
 		break;
 	}
 
@@ -1152,8 +1162,12 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// Lazily create the save panel; its B_SAVE_REQUESTED reply is
 		// retargeted to this window as MSG_EXPORT_SAVE.
 		if (!fExportPanel) {
+			// BFilePanel copies the messenger; it does not take ownership
+			// of the pointer, so pass a stack object rather than leaking
+			// a heap-allocated BMessenger.
+			BMessenger target(this);
 			fExportPanel = new BFilePanel(B_SAVE_PANEL,
-			                              new BMessenger(this),
+			                              &target,
 			                              nullptr, 0, false,
 			                              new BMessage(gui::MSG_EXPORT_SAVE));
 			fExportPanel->SetButtonLabel(B_DEFAULT_BUTTON, "Export");
@@ -1361,10 +1375,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case gui::MSG_NOTICE: {
-		// Workflow nudge or similar advisory. Rendered in the tool-log
-		// style so it reads as system commentary, not assistant text.
-		// Flush any partial streamed line first so the nudge can't tear
-		// a half-rendered sentence or glue to it without a break.
+		// A user-facing advisory. Rendered in the tool-log style so it
+		// reads as system commentary, not assistant text. Flush any
+		// partial streamed line first so the notice can't tear a
+		// half-rendered sentence or glue to it without a break.
 		if (fMdRenderer) fMdRenderer->Flush();
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text)
@@ -2441,6 +2455,34 @@ void ChatWindow::_SpawnWorker()
 	// touch it until after join() in MSG_WORKER_DONE, so no data race.
 	fWorker = std::thread([this, auth, model, maxTokens, systemPrompt, sink,
 	                       remote, promptText]() {
+		// Nothing may escape this lambda: an exception leaving a
+		// std::thread calls std::terminate() and kills the whole app.
+		// api::SendWithTools() reaches nlohmann::json, which throws on a
+		// truncated or malformed SSE chunk, so this is a live path.
+		//
+		// Both guards below run before the catch handlers' effects are
+		// observed by the window, and on every exit path.
+
+		// The window joins this thread, deletes fSink, and stops the
+		// spinner when MSG_WORKER_DONE arrives. If it were never posted
+		// the GUI would stay stuck "busy" with the turn unrecoverable.
+		struct DoneGuard {
+			ChatWindow* window;
+			~DoneGuard()
+			{
+				BMessenger(window).SendMessage(gui::MSG_WORKER_DONE);
+			}
+		} doneGuard { this };
+
+		// Releases the remote turn lock however this scope exits.
+		// Without it, a throw would leave the Telegram poll loop blocked
+		// in AcquireTurn() forever. Armed only once the turn is actually
+		// acquired, so acquire/release stay balanced.
+		struct TurnGuard {
+			telegram::RemoteControl* remote = nullptr;
+			~TurnGuard() { if (remote) remote->ReleaseTurn(); }
+		} turnGuard;
+
 		// Build the active sink. With no remote, it's just the GuiSink.
 		// With remote active, tee the GuiSink and a TelegramSink so the
 		// turn appears on both surfaces. AcquireTurn() serialises against
@@ -2450,36 +2492,44 @@ void ChatWindow::_SpawnWorker()
 		std::unique_ptr<TeeSink>                tee;
 		OutputSink* active = sink;
 
-		if (remote && remote->PrimaryUserId() != 0) {
-			remote->AcquireTurn();
-			remote->SendPromptNotice(promptText);
-			tgSink = std::make_unique<telegram::TelegramSink>(
-				remote->GetClient(),
-				remote->PrimaryUserId(),
-				remote->AllowDestructive(),
-				remote->AllowedToolsRef(),
-				remote->PermQueueRef());
-			tgSink->BeginMessage("assistant");
-			tee = std::make_unique<TeeSink>(sink, tgSink.get());
-			active = tee.get();
-		}
+		try {
+			if (remote && remote->PrimaryUserId() != 0) {
+				remote->AcquireTurn();
+				turnGuard.remote = remote;
+				remote->SendPromptNotice(promptText);
+				tgSink = std::make_unique<telegram::TelegramSink>(
+					remote->GetClient(),
+					remote->PrimaryUserId(),
+					remote->AllowDestructive(),
+					remote->AllowedToolsRef(),
+					remote->PermQueueRef());
+				tgSink->BeginMessage("assistant");
+				tee = std::make_unique<TeeSink>(sink, tgSink.get());
+				active = tee.get();
+			}
 
-		const api::SendResult result = api::SendWithTools(auth, model, maxTokens,
-		                   fWorkerMessages, systemPrompt, active);
-		sink->EndMessage();
-
-		if (remote) {
+			const api::SendResult result = api::SendWithTools(auth, model,
+			                   maxTokens, fWorkerMessages, systemPrompt, active);
+			sink->EndMessage();
 			if (tgSink) tgSink->EndMessage();
-			remote->ReleaseTurn();
-		}
 
-		BMessage tokMsg(gui::MSG_TOKENS);
-		tokMsg.AddInt32("input",  result.input_tokens);
-		tokMsg.AddInt32("output", result.output_tokens);
-		tokMsg.AddInt32("max",    maxTokens);
-		tokMsg.AddBool("ok", result.exit_code == 0);
-		BMessenger(this).SendMessage(&tokMsg);
-		BMessenger(this).SendMessage(gui::MSG_WORKER_DONE);
+			BMessage tokMsg(gui::MSG_TOKENS);
+			tokMsg.AddInt32("input",  result.input_tokens);
+			tokMsg.AddInt32("output", result.output_tokens);
+			tokMsg.AddInt32("max",    maxTokens);
+			tokMsg.AddBool("ok", result.exit_code == 0);
+			BMessenger(this).SendMessage(&tokMsg);
+		} catch (const std::exception& e) {
+			// Surface the failure in the transcript, then close the
+			// message out so the next turn starts on a clean line.
+			sink->OnError(std::string("Request failed: ") + e.what());
+			sink->EndMessage();
+			if (tgSink) tgSink->EndMessage();
+		} catch (...) {
+			sink->OnError("Request failed: unknown error");
+			sink->EndMessage();
+			if (tgSink) tgSink->EndMessage();
+		}
 	});
 	// NOTE: do NOT detach — joined in MSG_WORKER_DONE / QuitRequested so
 	// fSink is never freed while the worker still holds it.

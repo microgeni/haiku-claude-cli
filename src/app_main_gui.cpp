@@ -25,7 +25,6 @@
 #include "oauth.h"
 #include "paths.h"
 #include "skills.h"
-#include "workflow.h"
 
 // Application signature registered in Haiku's MIME database.
 // Must match the BEOS:APP_SIG attribute stamped onto the binary.
@@ -280,28 +279,19 @@ public:
 		config::InitLogging(cfg.logging_enabled);
 		config::SetHistoryMessageCap(cfg.history_max_messages);
 		api::g_thinking_budget.store(cfg.thinking_budget, std::memory_order_relaxed);
+		// Honour allow_destructive_tools the same way the CLI does. This
+		// runs before the ChatWindow is constructed, so the Tools menu
+		// checkmark and the token-bar indicator both pick the state up
+		// from api::g_ludicrous_mode and show it without extra wiring.
+		if (config::ApplyToolPolicy(cfg)) {
+			config::LogLine("gui: allow_destructive_tools set in config.json "
+			                "\xE2\x80\x94 starting in ludicrous mode");
+		}
 		config::LogLine("gui ReadyToRun fromGenio="
 			+ std::string(fFromGenio ? "yes" : "no")
 			+ " argv=[" + fRawArgv + "]");
 		hooks::Load(cfg.hooks);
 		mcp::Init(cfg.mcp_servers);
-
-		// Workflow memory, same wiring as the CLI: Observe() fires from
-		// the shared SendConversation engine in api.cpp, so both front
-		// ends learn identically once a repo is bound. Inert unless
-		// enabled in config.json. NOTE: the model is process-global, so
-		// multiple session windows on different repos currently share
-		// one model bound to whichever repo was bound last (see the
-		// LIMITATION note in workflow.h).
-		workflow::Configure(cfg.workflow);
-		if (workflow::Enabled()) {
-			std::string dir = fWorkingDir;
-			if (dir.empty()) {
-				char cwdbuf[PATH_MAX];
-				dir = getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : ".";
-			}
-			workflow::Begin(dir);
-		}
 
 		// Load custom commands, Agent Skills, and subagents so the GUI
 		// has the same /skill-name expansions, model-invocable skills,
@@ -454,7 +444,5 @@ int main()
 	api::GlobalInit();
 	ClaudeGuiApp app;
 	app.Run();
-	// Persist whatever the workflow memory learned this session.
-	workflow::Flush();
 	return 0;
 }

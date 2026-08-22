@@ -283,6 +283,18 @@ json TrimToolResults(const json& messages) {
 	return out;
 }
 
+// Warn about a deprecated config key. Accepting a legacy spelling
+// silently is how a stale key sits in a config file unnoticed, which is
+// exactly what happened with the f-prefixed destructive-tool keys: the
+// documented name was always allow_destructive_tools, so a file using
+// anything else is reading as a no-op the user cannot see.
+void WarnDeprecatedKey(const std::string& legacy, const std::string& canonical,
+                        const std::string& scope) {
+	std::cerr << "warning: " << paths::ConfigPath() << ": \"" << legacy
+	          << "\" is deprecated" << scope << " \x2d\x2d rename it to \""
+	          << canonical << "\"\n";
+}
+
 } // namespace
 
 Config Load() {
@@ -307,13 +319,39 @@ Config Load() {
 		if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
 		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
 		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
-		if (j.contains("workflow"))     cfg.workflow    = j["workflow"];
-		// Accept both the current key and the legacy lowercase-t spelling
-		// so existing config.json files continue to work after the rename.
-		if (j.contains("fAllowDestructiveTools"))
-			cfg.fAllowDestructiveTools = j["fAllowDestructiveTools"].get<bool>();
-		else if (j.contains("fAllowDestructivetools"))
-			cfg.fAllowDestructiveTools = j["fAllowDestructivetools"].get<bool>();
+		// Canonical key is snake_case like every other config key, and is
+		// what the README and man page have always documented. The two
+		// f-prefixed spellings leaked the C++ member name into the JSON
+		// schema; still accepted, but warned about so they cannot sit in
+		// a config file silently doing nothing.
+		//
+		// REMOVE IN 1.17.0: delete both legacy branches, WarnDeprecatedKey,
+		// and the legacy cases in tests/config_tool_policy_test.sh. The
+		// f-names were never documented, so nobody adopted them
+		// deliberately — they only ever came from the old --help text and
+		// the old no-TTY error message, both since corrected.
+		if (j.contains("allow_destructive_tools")) {
+			cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
+		} else if (j.contains("fAllowDestructiveTools")) {
+			cfg.allow_destructive_tools = j["fAllowDestructiveTools"].get<bool>();
+			WarnDeprecatedKey("fAllowDestructiveTools", "allow_destructive_tools", "");
+		} else if (j.contains("fAllowDestructivetools")) {
+			cfg.allow_destructive_tools = j["fAllowDestructivetools"].get<bool>();
+			WarnDeprecatedKey("fAllowDestructivetools", "allow_destructive_tools", "");
+		}
+		// Same rename inside the "telegram" object. Warned here rather
+		// than at the RemoteControl call site so the message appears even
+		// when the remote bridge is never started.
+		if (cfg.telegram.is_object()) {
+			if (!cfg.telegram.contains("allow_destructive_tools")) {
+				if (cfg.telegram.contains("fAllowDestructiveTools"))
+					WarnDeprecatedKey("fAllowDestructiveTools",
+					                   "allow_destructive_tools", " in \"telegram\"");
+				else if (cfg.telegram.contains("fAllowDestructivetools"))
+					WarnDeprecatedKey("fAllowDestructivetools",
+					                   "allow_destructive_tools", " in \"telegram\"");
+			}
+		}
 		if (j.contains("logging") && j["logging"].is_object()) {
 			cfg.logging_enabled = j["logging"].value("enabled", false);
 		}
@@ -329,6 +367,18 @@ Config Load() {
 		std::cerr << "warning: failed to parse " << paths::ConfigPath() << ": " << e.what() << "\n";
 	}
 	return cfg;
+}
+
+bool ApplyToolPolicy(const Config& cfg) {
+	if (!cfg.allow_destructive_tools) return false;
+
+	// Both globals are set. g_ludicrous_mode is what the permission gates
+	// in terminal_sink / gui_sink actually consult, so it is the switch
+	// that suppresses prompts. g_allow_destructive_tools remains the
+	// fallback consulted when stdin is not a usable TTY.
+	api::g_allow_destructive_tools = true;
+	api::g_ludicrous_mode.store(true);
+	return true;
 }
 
 Auth ResolveAuth() {

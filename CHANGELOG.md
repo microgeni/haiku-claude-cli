@@ -4,6 +4,54 @@ All notable changes to this project are recorded here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-08-22
+
+### Added
+
+- **`allow_destructive_tools` is honoured by both front-ends.** Setting it
+  to `true` in `config.json` now starts the session in ludicrous mode, so
+  every tool permission is auto-approved and the switch never has to be
+  flipped by hand. Previously the GUI ignored the setting entirely, and the
+  CLI only set the no-TTY fallback flag — so an interactive terminal still
+  prompted.
+
+### Fixed
+
+- **Semaphore leak in the working-directory picker.** Each *Browse* click
+  created a `BFilePanel` and relied on it deleting itself; it does not
+  (`hideWhenDone` defaults to true, so it only hides). Each leaked instance
+  cost 3 semaphores until the app quit. The panel is now cached and reused.
+- **Turn worker no longer crashes the GUI.** An exception from the API call
+  escaped the `std::thread` and called `std::terminate()`, taking the whole
+  app down mid-response. The worker body is now guarded, with failures
+  reported into the transcript.
+
+### Changed
+
+- **Main chat window uses `B_DOCUMENT_WINDOW_LOOK`**, so the transcript
+  scrollbar aligns into the gutter and the window gains a resize knob.
+
+### Removed
+
+- **Workflow memory / anomaly detection.** The per-repository Markov model
+  (`markov.*`, `workflow.*`) that learned tool-call sequences and emitted
+  "unusual step" nudges has been dropped, along with its `"workflow"`
+  config key, the `<ConfigDir>/workflow/` state directory, and its unit
+  tests. Any existing `"workflow"` block in `config.json` is now ignored
+  rather than erroring, and the learned state left in
+  `<ConfigDir>/workflow/` can be deleted by hand.
+
+### Deprecated
+
+- **`fAllowDestructiveTools` and `fAllowDestructivetools` config keys.**
+  The canonical spelling is `allow_destructive_tools`, which is what the
+  README, man page, and roadmap have always documented — the f-prefixed
+  names leaked a C++ member-variable convention into the JSON schema. Both
+  still load but now emit a warning naming the replacement. **They will be
+  removed in 1.17.0** — one release after the warning ships, so a config
+  using them gets at least one version of notice. The same rename applies
+  to the key nested inside the `telegram` object.
+
 ## [1.15.0] - 2026-07-26
 
 ### Added

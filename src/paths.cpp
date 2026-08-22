@@ -55,11 +55,6 @@ std::string ProjectSkillsDir()  { return ".claude/skills"; }
 std::string UserAgentsDir()     { return ConfigDir() + "/agents"; }
 std::string ProjectAgentsDir()  { return ".claude/agents"; }
 
-// Learned workflow state (workflow.cpp). One Markov model per repo,
-// stored as <WorkflowDir>/<repo-stem>.json, where the stem is the
-// working directory flattened into a single filename component.
-std::string WorkflowDir()       { return ConfigDir() + "/workflow"; }
-
 // Walk `path` one component at a time and mkdir each prefix. mkdir(2)
 // returning EEXIST is fine — someone (maybe a previous call, maybe the
 // user) already created it. Any other error aborts the walk.

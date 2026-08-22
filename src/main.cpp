@@ -24,7 +24,6 @@
 #include "repl.h"
 #include "session.h"
 #include "tui.h"
-#include "workflow.h"
 
 namespace {
 
@@ -73,7 +72,7 @@ void PrintUsage(const char* prog, const std::string& default_model, int default_
 			  << "\n"
 			  << "Config file: " << paths::ConfigPath() << "\n"
 			  << "  Optional JSON with keys: model, max_tokens, system, show_usage,\n"
-			  << "  fAllowDestructiveTools, prices. CLI flags override config values.\n"
+			  << "  allow_destructive_tools, prices. CLI flags override config values.\n"
 			  << "\n"
 			  << "Memory files (prepended to the system prompt, user before project):\n"
 			  << "  " << paths::UserMemoryPath() << "\n"
@@ -150,19 +149,6 @@ int main(int argc, char* argv[]) {
 	hooks::Load(cfg.hooks);
 	mcp::Init(cfg.mcp_servers);
 
-	// Workflow memory: learn this repo's tool sequences and flag steps
-	// that are unusual given recent context. Inert unless config.json
-	// sets "workflow": { "enabled": true }. Bind the model to the
-	// current repo, and persist what it learned on every exit path.
-	workflow::Configure(cfg.workflow);
-	if (workflow::Enabled()) {
-		char cwdbuf[PATH_MAX];
-		workflow::Begin(getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : ".");
-	}
-	struct WorkflowFlushGuard {
-		~WorkflowFlushGuard() { workflow::Flush(); }
-	} workflow_flush_guard;
-
 #ifdef __HAIKU__
 	// Ensure the claude:summary BFS index exists on this volume so
 	// Query("\"claude:summary\" == \"*\"") runs in O(1) rather than
@@ -201,9 +187,15 @@ int main(int argc, char* argv[]) {
 	std::vector<std::string> parts;
 	std::vector<std::string> attachments;
 
-	// Seed the destructive-tool flag from config. -y/--yes below
-	// can still flip it on for ad-hoc runs.
-	if (cfg.fAllowDestructiveTools) api::g_allow_destructive_tools = true;
+	// Seed the tool-permission policy from config. "allow_destructive_tools"
+	// engages ludicrous mode outright, so the user is not asked again.
+	// -y/--yes below can still flip it on for ad-hoc runs.
+	if (config::ApplyToolPolicy(cfg)) {
+		std::cerr << tui::Yellow("\xE2\x9A\xA1 LUDICROUS MODE \xE2\x80\x94 "
+		                          "allow_destructive_tools is set in config.json; "
+		                          "all tool permissions auto-approved")
+		          << "\n";
+	}
 
 	// GUI launchers (e.g. Claude.app on Haiku) may not inherit a meaningful
 	// working directory.  Allow them to set CLAUDE_WORKING_DIR in the

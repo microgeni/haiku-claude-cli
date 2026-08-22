@@ -48,8 +48,8 @@ void GuiSink::EndMessage()
 	fWindow.SendMessage(MSG_DONE);
 }
 
-// An advisory the user should see (workflow nudge). Unlike OnMeta/OnDiag
-// this is not suppressed — it goes to the chat view as a tool-log line.
+// An advisory the user should see. Unlike OnMeta/OnDiag this is not
+// suppressed — it goes to the chat view as a tool-log line.
 void GuiSink::OnNotice(const std::string& text)
 {
 	if (text.empty()) return;

@@ -66,7 +66,7 @@ struct StreamProgress {
 // Set by session.cpp LocalWorker when mirroring a local turn to Telegram.
 extern StreamProgress* g_stream_progress;
 
-// Set at startup from Config::fAllowDestructiveTools or -y/--yes.
+// Set at startup from Config::allow_destructive_tools or -y/--yes.
 // Grants destructive-tool permission without prompting whenever
 // stdin isn't usable for a y/a/n dialog.
 extern bool g_allow_destructive_tools;

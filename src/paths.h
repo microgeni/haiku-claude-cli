@@ -34,7 +34,6 @@ std::string UserSkillsDir();           // <ConfigDir>/skills
 std::string ProjectSkillsDir();        // ./.claude/skills (cwd-relative)
 std::string UserAgentsDir();           // <ConfigDir>/agents
 std::string ProjectAgentsDir();        // ./.claude/agents (cwd-relative)
-std::string WorkflowDir();             // <ConfigDir>/workflow
 
 // Create `path` and any missing parent directories with mode 0700.
 // Returns false only if a mkdir(2) call fails for a reason other

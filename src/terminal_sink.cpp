@@ -160,7 +160,7 @@ api::Permission TerminalSink::AskPermission(const std::string& tool_name,
 		const std::string msg =
 			"cannot prompt for " + tool_name + " permission: stdin is not a "
 			"terminal. Re-run with -y/--yes to auto-approve destructive tools, "
-			"set \"fAllowDestructiveTools\": true in config.json, or use "
+			"set \"allow_destructive_tools\": true in config.json, or use "
 			"-i/--interactive from a real terminal.";
 		std::cerr << tui::Meta("[tool: " + tool_name + " -> denied: no TTY to prompt]") << "\n"
 		          << tui::Dim("  " + msg) << "\n";
