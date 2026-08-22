@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <string>
 
@@ -2453,6 +2454,34 @@ void ChatWindow::_SpawnWorker()
 	// touch it until after join() in MSG_WORKER_DONE, so no data race.
 	fWorker = std::thread([this, auth, model, maxTokens, systemPrompt, sink,
 	                       remote, promptText]() {
+		// Nothing may escape this lambda: an exception leaving a
+		// std::thread calls std::terminate() and kills the whole app.
+		// api::SendWithTools() reaches nlohmann::json, which throws on a
+		// truncated or malformed SSE chunk, so this is a live path.
+		//
+		// Both guards below run before the catch handlers' effects are
+		// observed by the window, and on every exit path.
+
+		// The window joins this thread, deletes fSink, and stops the
+		// spinner when MSG_WORKER_DONE arrives. If it were never posted
+		// the GUI would stay stuck "busy" with the turn unrecoverable.
+		struct DoneGuard {
+			ChatWindow* window;
+			~DoneGuard()
+			{
+				BMessenger(window).SendMessage(gui::MSG_WORKER_DONE);
+			}
+		} doneGuard { this };
+
+		// Releases the remote turn lock however this scope exits.
+		// Without it, a throw would leave the Telegram poll loop blocked
+		// in AcquireTurn() forever. Armed only once the turn is actually
+		// acquired, so acquire/release stay balanced.
+		struct TurnGuard {
+			telegram::RemoteControl* remote = nullptr;
+			~TurnGuard() { if (remote) remote->ReleaseTurn(); }
+		} turnGuard;
+
 		// Build the active sink. With no remote, it's just the GuiSink.
 		// With remote active, tee the GuiSink and a TelegramSink so the
 		// turn appears on both surfaces. AcquireTurn() serialises against
@@ -2462,36 +2491,44 @@ void ChatWindow::_SpawnWorker()
 		std::unique_ptr<TeeSink>                tee;
 		OutputSink* active = sink;
 
-		if (remote && remote->PrimaryUserId() != 0) {
-			remote->AcquireTurn();
-			remote->SendPromptNotice(promptText);
-			tgSink = std::make_unique<telegram::TelegramSink>(
-				remote->GetClient(),
-				remote->PrimaryUserId(),
-				remote->AllowDestructive(),
-				remote->AllowedToolsRef(),
-				remote->PermQueueRef());
-			tgSink->BeginMessage("assistant");
-			tee = std::make_unique<TeeSink>(sink, tgSink.get());
-			active = tee.get();
-		}
+		try {
+			if (remote && remote->PrimaryUserId() != 0) {
+				remote->AcquireTurn();
+				turnGuard.remote = remote;
+				remote->SendPromptNotice(promptText);
+				tgSink = std::make_unique<telegram::TelegramSink>(
+					remote->GetClient(),
+					remote->PrimaryUserId(),
+					remote->AllowDestructive(),
+					remote->AllowedToolsRef(),
+					remote->PermQueueRef());
+				tgSink->BeginMessage("assistant");
+				tee = std::make_unique<TeeSink>(sink, tgSink.get());
+				active = tee.get();
+			}
 
-		const api::SendResult result = api::SendWithTools(auth, model, maxTokens,
-		                   fWorkerMessages, systemPrompt, active);
-		sink->EndMessage();
-
-		if (remote) {
+			const api::SendResult result = api::SendWithTools(auth, model,
+			                   maxTokens, fWorkerMessages, systemPrompt, active);
+			sink->EndMessage();
 			if (tgSink) tgSink->EndMessage();
-			remote->ReleaseTurn();
-		}
 
-		BMessage tokMsg(gui::MSG_TOKENS);
-		tokMsg.AddInt32("input",  result.input_tokens);
-		tokMsg.AddInt32("output", result.output_tokens);
-		tokMsg.AddInt32("max",    maxTokens);
-		tokMsg.AddBool("ok", result.exit_code == 0);
-		BMessenger(this).SendMessage(&tokMsg);
-		BMessenger(this).SendMessage(gui::MSG_WORKER_DONE);
+			BMessage tokMsg(gui::MSG_TOKENS);
+			tokMsg.AddInt32("input",  result.input_tokens);
+			tokMsg.AddInt32("output", result.output_tokens);
+			tokMsg.AddInt32("max",    maxTokens);
+			tokMsg.AddBool("ok", result.exit_code == 0);
+			BMessenger(this).SendMessage(&tokMsg);
+		} catch (const std::exception& e) {
+			// Surface the failure in the transcript, then close the
+			// message out so the next turn starts on a clean line.
+			sink->OnError(std::string("Request failed: ") + e.what());
+			sink->EndMessage();
+			if (tgSink) tgSink->EndMessage();
+		} catch (...) {
+			sink->OnError("Request failed: unknown error");
+			sink->EndMessage();
+			if (tgSink) tgSink->EndMessage();
+		}
 	});
 	// NOTE: do NOT detach — joined in MSG_WORKER_DONE / QuitRequested so
 	// fSink is never freed while the worker still holds it.
