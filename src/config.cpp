@@ -325,6 +325,12 @@ Config Load() {
 		// f-prefixed spellings leaked the C++ member name into the JSON
 		// schema; still accepted, but warned about so they cannot sit in
 		// a config file silently doing nothing.
+		//
+		// REMOVE IN 1.17.0: delete both legacy branches, WarnDeprecatedKey,
+		// and the legacy cases in tests/config_tool_policy_test.sh. The
+		// f-names were never documented, so nobody adopted them
+		// deliberately — they only ever came from the old --help text and
+		// the old no-TTY error message, both since corrected.
 		if (j.contains("allow_destructive_tools")) {
 			cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
 		} else if (j.contains("fAllowDestructiveTools")) {
