@@ -291,6 +291,7 @@ ChatWindow::~ChatWindow()
 	delete fSink;
 	delete fSpinnerTimer;
 	delete fExportPanel;
+	delete fBrowsePanel;
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,14 +1009,21 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// Open a directory-picker panel. The reply goes to this window
 		// as B_REFS_RECEIVED so we can extract the chosen path and push
 		// it back into the working-dir field.
-		BFilePanel* panel = new BFilePanel(B_OPEN_PANEL,
-		                                   new BMessenger(this),
-		                                   nullptr,
-		                                   B_DIRECTORY_NODE,
-		                                   false); // single selection
-		panel->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
-		panel->Show();
-		// panel deletes itself via BFilePanel's built-in quit handling.
+		//
+		// The panel is created once and reused. BFilePanel does not
+		// delete itself on dismissal (hideWhenDone defaults to true, so
+		// it merely hides), and it owns a BWindow — a fresh instance per
+		// click leaked 3 semaphores each time.
+		if (!fBrowsePanel) {
+			BMessenger target(this);
+			fBrowsePanel = new BFilePanel(B_OPEN_PANEL,
+			                              &target,
+			                              nullptr,
+			                              B_DIRECTORY_NODE,
+			                              false); // single selection
+			fBrowsePanel->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
+		}
+		fBrowsePanel->Show();
 		break;
 	}
 
@@ -1152,8 +1160,12 @@ void ChatWindow::MessageReceived(BMessage* msg)
 		// Lazily create the save panel; its B_SAVE_REQUESTED reply is
 		// retargeted to this window as MSG_EXPORT_SAVE.
 		if (!fExportPanel) {
+			// BFilePanel copies the messenger; it does not take ownership
+			// of the pointer, so pass a stack object rather than leaking
+			// a heap-allocated BMessenger.
+			BMessenger target(this);
 			fExportPanel = new BFilePanel(B_SAVE_PANEL,
-			                              new BMessenger(this),
+			                              &target,
 			                              nullptr, 0, false,
 			                              new BMessage(gui::MSG_EXPORT_SAVE));
 			fExportPanel->SetButtonLabel(B_DEFAULT_BUTTON, "Export");

@@ -259,6 +259,13 @@ private:
 	// ── Export transcript ─────────────────────────────────────────────────────
 	BFilePanel*    fExportPanel   = nullptr;  // lazily created B_SAVE_PANEL
 
+	// ── Working-directory picker ─────────────────────────────────────────────
+	// Cached like fExportPanel. BFilePanel does NOT delete itself when
+	// dismissed (hideWhenDone defaults to true — it only hides), and each
+	// instance owns a BWindow costing 3 semaphores, so creating one per
+	// Browse click leaked them until the app quit.
+	BFilePanel*    fBrowsePanel   = nullptr;  // lazily created B_OPEN_PANEL
+
 	// ── Scroll tracking (sticky-scroll) ─────────────────────────────────────
 	// No flag is kept: every append site samples _IsNearBottom() before
 	// inserting and follows the output only if the user was already at the
