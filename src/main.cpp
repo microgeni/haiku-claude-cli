@@ -24,7 +24,6 @@
 #include "repl.h"
 #include "session.h"
 #include "tui.h"
-#include "workflow.h"
 
 namespace {
 
@@ -149,19 +148,6 @@ int main(int argc, char* argv[]) {
 	api::g_thinking_budget.store(cfg.thinking_budget, std::memory_order_relaxed);
 	hooks::Load(cfg.hooks);
 	mcp::Init(cfg.mcp_servers);
-
-	// Workflow memory: learn this repo's tool sequences and flag steps
-	// that are unusual given recent context. Inert unless config.json
-	// sets "workflow": { "enabled": true }. Bind the model to the
-	// current repo, and persist what it learned on every exit path.
-	workflow::Configure(cfg.workflow);
-	if (workflow::Enabled()) {
-		char cwdbuf[PATH_MAX];
-		workflow::Begin(getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : ".");
-	}
-	struct WorkflowFlushGuard {
-		~WorkflowFlushGuard() { workflow::Flush(); }
-	} workflow_flush_guard;
 
 #ifdef __HAIKU__
 	// Ensure the claude:summary BFS index exists on this volume so

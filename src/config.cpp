@@ -319,7 +319,6 @@ Config Load() {
 		if (j.contains("hooks"))        cfg.hooks       = j["hooks"];
 		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
 		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
-		if (j.contains("workflow"))     cfg.workflow    = j["workflow"];
 		// Canonical key is snake_case like every other config key, and is
 		// what the README and man page have always documented. The two
 		// f-prefixed spellings leaked the C++ member name into the JSON

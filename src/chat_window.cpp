@@ -1375,10 +1375,10 @@ void ChatWindow::MessageReceived(BMessage* msg)
 	}
 
 	case gui::MSG_NOTICE: {
-		// Workflow nudge or similar advisory. Rendered in the tool-log
-		// style so it reads as system commentary, not assistant text.
-		// Flush any partial streamed line first so the nudge can't tear
-		// a half-rendered sentence or glue to it without a break.
+		// A user-facing advisory. Rendered in the tool-log style so it
+		// reads as system commentary, not assistant text. Flush any
+		// partial streamed line first so the notice can't tear a
+		// half-rendered sentence or glue to it without a break.
 		if (fMdRenderer) fMdRenderer->Flush();
 		const char* text = nullptr;
 		if (msg->FindString("text", &text) == B_OK && text)

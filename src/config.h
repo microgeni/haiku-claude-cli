@@ -56,10 +56,6 @@ struct Config {
 	json        hooks;
 	json        mcp_servers;
 	json        telegram;
-	// "workflow" object — the Markov workflow-memory settings
-	// (enabled / surprise_threshold / order / nudges). Passed
-	// verbatim to workflow::Configure(). Disabled when absent.
-	json        workflow;
 };
 
 Config Load();

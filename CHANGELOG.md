@@ -31,6 +31,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Main chat window uses `B_DOCUMENT_WINDOW_LOOK`**, so the transcript
   scrollbar aligns into the gutter and the window gains a resize knob.
 
+### Removed
+
+- **Workflow memory / anomaly detection.** The per-repository Markov model
+  (`markov.*`, `workflow.*`) that learned tool-call sequences and emitted
+  "unusual step" nudges has been dropped, along with its `"workflow"`
+  config key, the `<ConfigDir>/workflow/` state directory, and its unit
+  tests. Any existing `"workflow"` block in `config.json` is now ignored
+  rather than erroring, and the learned state left in
+  `<ConfigDir>/workflow/` can be deleted by hand.
+
 ### Deprecated
 
 - **`fAllowDestructiveTools` and `fAllowDestructivetools` config keys.**

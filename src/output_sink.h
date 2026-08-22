@@ -34,12 +34,15 @@ struct OutputSink {
 	// "[interrupted]", etc.).
 	virtual void OnMeta(const std::string& text) = 0;
 
-	// A user-facing advisory that is NOT routine tool chatter — currently
-	// the workflow-memory nudge. Separate from OnMeta() because the GUI
-	// suppresses meta entirely (it renders tool activity structurally),
-	// which would silently swallow anything sent that way. The default
-	// forwards to OnMeta(), so terminal and Telegram front-ends keep
-	// their existing behaviour without change.
+	// A user-facing advisory that is NOT routine tool chatter. Separate
+	// from OnMeta() because the GUI suppresses meta entirely (it renders
+	// tool activity structurally), which would silently swallow anything
+	// sent that way. The default forwards to OnMeta(), so terminal and
+	// Telegram front-ends keep their existing behaviour without change.
+	//
+	// NOTE: currently has no callers — the workflow-memory nudge was its
+	// only user and has been removed. Kept as the general-purpose
+	// advisory channel for whatever needs one next.
 	virtual void OnNotice(const std::string& text) { OnMeta(text); }
 
 	// A non-fatal diagnostic to stderr (retry notices, token-refresh

@@ -25,7 +25,6 @@
 #include "oauth.h"
 #include "paths.h"
 #include "skills.h"
-#include "workflow.h"
 
 // Application signature registered in Haiku's MIME database.
 // Must match the BEOS:APP_SIG attribute stamped onto the binary.
@@ -294,23 +293,6 @@ public:
 		hooks::Load(cfg.hooks);
 		mcp::Init(cfg.mcp_servers);
 
-		// Workflow memory, same wiring as the CLI: Observe() fires from
-		// the shared SendConversation engine in api.cpp, so both front
-		// ends learn identically once a repo is bound. Inert unless
-		// enabled in config.json. NOTE: the model is process-global, so
-		// multiple session windows on different repos currently share
-		// one model bound to whichever repo was bound last (see the
-		// LIMITATION note in workflow.h).
-		workflow::Configure(cfg.workflow);
-		if (workflow::Enabled()) {
-			std::string dir = fWorkingDir;
-			if (dir.empty()) {
-				char cwdbuf[PATH_MAX];
-				dir = getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : ".";
-			}
-			workflow::Begin(dir);
-		}
-
 		// Load custom commands, Agent Skills, and subagents so the GUI
 		// has the same /skill-name expansions, model-invocable skills,
 		// and Task-delegated subagents as the CLI.
@@ -462,7 +444,5 @@ int main()
 	api::GlobalInit();
 	ClaudeGuiApp app;
 	app.Run();
-	// Persist whatever the workflow memory learned this session.
-	workflow::Flush();
 	return 0;
 }
