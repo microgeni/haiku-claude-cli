@@ -203,7 +203,8 @@ ChatWindow::ChatWindow(const config::Auth& auth, const std::string& model,
                         int notifyMinSec, const std::string& workingDir,
                         const std::string& initialPrompt, bool autoSend)
 	: BWindow(BRect(100, 100, 900, 680), "Claude",
-	           B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
+	           B_DOCUMENT_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+	           B_QUIT_ON_WINDOW_CLOSE)
 	, fAuth(auth)
 	, fModel(model)
 	, fConfigModel(model)
