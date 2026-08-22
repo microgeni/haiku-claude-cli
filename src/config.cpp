@@ -283,6 +283,18 @@ json TrimToolResults(const json& messages) {
 	return out;
 }
 
+// Warn about a deprecated config key. Accepting a legacy spelling
+// silently is how a stale key sits in a config file unnoticed, which is
+// exactly what happened with the f-prefixed destructive-tool keys: the
+// documented name was always allow_destructive_tools, so a file using
+// anything else is reading as a no-op the user cannot see.
+void WarnDeprecatedKey(const std::string& legacy, const std::string& canonical,
+                        const std::string& scope) {
+	std::cerr << "warning: " << paths::ConfigPath() << ": \"" << legacy
+	          << "\" is deprecated" << scope << " \x2d\x2d rename it to \""
+	          << canonical << "\"\n";
+}
+
 } // namespace
 
 Config Load() {
@@ -308,15 +320,33 @@ Config Load() {
 		if (j.contains("mcp_servers"))  cfg.mcp_servers = j["mcp_servers"];
 		if (j.contains("telegram"))     cfg.telegram    = j["telegram"];
 		if (j.contains("workflow"))     cfg.workflow    = j["workflow"];
-		// Canonical key is snake_case like every other config key. The two
-		// legacy spellings leaked the C++ member name into the JSON schema
-		// and are still accepted so existing config.json files keep working.
-		if (j.contains("allow_destructive_tools"))
+		// Canonical key is snake_case like every other config key, and is
+		// what the README and man page have always documented. The two
+		// f-prefixed spellings leaked the C++ member name into the JSON
+		// schema; still accepted, but warned about so they cannot sit in
+		// a config file silently doing nothing.
+		if (j.contains("allow_destructive_tools")) {
 			cfg.allow_destructive_tools = j["allow_destructive_tools"].get<bool>();
-		else if (j.contains("fAllowDestructiveTools"))
+		} else if (j.contains("fAllowDestructiveTools")) {
 			cfg.allow_destructive_tools = j["fAllowDestructiveTools"].get<bool>();
-		else if (j.contains("fAllowDestructivetools"))
+			WarnDeprecatedKey("fAllowDestructiveTools", "allow_destructive_tools", "");
+		} else if (j.contains("fAllowDestructivetools")) {
 			cfg.allow_destructive_tools = j["fAllowDestructivetools"].get<bool>();
+			WarnDeprecatedKey("fAllowDestructivetools", "allow_destructive_tools", "");
+		}
+		// Same rename inside the "telegram" object. Warned here rather
+		// than at the RemoteControl call site so the message appears even
+		// when the remote bridge is never started.
+		if (cfg.telegram.is_object()) {
+			if (!cfg.telegram.contains("allow_destructive_tools")) {
+				if (cfg.telegram.contains("fAllowDestructiveTools"))
+					WarnDeprecatedKey("fAllowDestructiveTools",
+					                   "allow_destructive_tools", " in \"telegram\"");
+				else if (cfg.telegram.contains("fAllowDestructivetools"))
+					WarnDeprecatedKey("fAllowDestructivetools",
+					                   "allow_destructive_tools", " in \"telegram\"");
+			}
+		}
 		if (j.contains("logging") && j["logging"].is_object()) {
 			cfg.logging_enabled = j["logging"].value("enabled", false);
 		}
@@ -346,7 +376,8 @@ bool ApplyToolPolicy(const Config& cfg) {
 	return true;
 }
 
-Auth ResolveAuth() {	if (auto stored = LoadTokens(); stored) {
+Auth ResolveAuth() {
+	if (auto stored = LoadTokens(); stored) {
 		if (stored->IsExpired()) {
 			if (auto refreshed = RefreshTokens(*stored); refreshed) {
 				SaveTokens(*refreshed);
